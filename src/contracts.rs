@@ -85,6 +85,7 @@ pub trait ContractInstance {}
 // MACROS
 
 macro_rules! clause {
+    // Pattern when next_outputs_fn is provided
     (
         name: $name:expr,
         script: $script:expr,
@@ -111,6 +112,43 @@ macro_rules! clause {
             // Create the next_outputs_fn closure
             let next_outputs_fn = {
                 move |$args_ident: Args, $state_ident| $fn_body
+            };
+
+            // Construct the Clause instance
+            Clause {
+                name: $name.into(),
+                script: $script,
+                arg_specs,
+                next_outputs_fn: Box::new(next_outputs_fn),
+            }
+        }
+    };
+    // Pattern when next_outputs_fn is omitted
+    (
+        name: $name:expr,
+        script: $script:expr,
+        args {
+            $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)?
+        }
+    ) => {
+        {
+            // Define the argument struct
+            #[derive(Debug)]
+            struct Args {
+                $(pub $arg_name: $arg_type),*
+            }
+
+            // Implement ClauseArguments for the argument struct
+            impl ClauseArguments for Args {}
+
+            // Create the argument specifications
+            let arg_specs: ArgSpecs = vec![
+                $( (stringify!($arg_name).to_string(), $arg_spec) ),*
+            ];
+
+            // Create the default next_outputs_fn closure
+            let next_outputs_fn = {
+                move |_args: Args, _state| ClauseOutputs::CcvList(vec![])
             };
 
             // Construct the Clause instance
@@ -360,9 +398,6 @@ mod tests {
                 },
                 args {
                     ctv_hash: ArgSpec::Bytes => [u8; 32],
-                },
-                next_outputs_fn(args, _state) {
-                    ccv_list![]
                 }
             };
 
@@ -405,9 +440,6 @@ mod tests {
                 },
                 args {
                     out_i: ArgSpec::Int => i32,
-                },
-                next_outputs_fn(args, _state) {
-                    ccv_list![]
                 }
             };
 
