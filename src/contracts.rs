@@ -124,6 +124,36 @@ macro_rules! clause {
     };
 }
 
+macro_rules! ccv_list {
+    (
+        $( $($behaviour:ident)? $n:expr => $contract:tt $( : $state:expr )? ),* $(,)?
+    ) => {
+        ClauseOutputs::CcvList(vec![
+            $(
+                ccv_list!(@expand_output $($behaviour)?; $n; $contract; $( $state )? )
+            ),*
+        ])
+    };
+    (@expand_output $($behaviour:ident)?; $n:expr; $contract:tt; $state:expr) => {
+        CcvOutputDescription {
+            n: $n,
+            next_contract: ($contract).clone_box(),
+            next_state: Some(Box::new($state)),
+            behaviour: ccv_list!(@parse_behaviour $($behaviour)?),
+        }
+    };
+    (@expand_output $($behaviour:ident)?; $n:expr; $contract:tt;) => {
+        CcvOutputDescription {
+            n: $n,
+            next_contract: ($contract).clone_box(),
+            next_state: None,
+            behaviour: ccv_list!(@parse_behaviour $($behaviour)?),
+        }
+    };
+    (@parse_behaviour deduct) => { CcvClauseOutputAmountBehaviour::DeductOutput };
+    (@parse_behaviour) => { CcvClauseOutputAmountBehaviour::PreserveOutput };
+}
+
 #[cfg(test)]
 mod tests {
     use bitcoin::{
@@ -189,12 +219,9 @@ mod tests {
                     let unvaulting_state = UnvaultingState {
                         ctv_hash: args.ctv_hash,
                     };
-                    ClauseOutputs::CcvList(vec![CcvOutputDescription {
-                        n: args.out_i,
-                        next_contract: unvaulting.clone_box(),
-                        next_state: Some(Box::new(unvaulting_state)),
-                        behaviour: CcvClauseOutputAmountBehaviour::PreserveOutput,
-                    }])
+                    ccv_list![
+                        args.out_i => unvaulting : unvaulting_state
+                    ]
                 }
             };
 
@@ -234,20 +261,10 @@ mod tests {
                     let unvaulting_state = UnvaultingState {
                         ctv_hash: args.ctv_hash,
                     };
-                    return ClauseOutputs::CcvList(vec![
-                        CcvOutputDescription {
-                            n: args.revault_out_i,
-                            next_contract: self.clone_box(),
-                            next_state: None,
-                            behaviour: CcvClauseOutputAmountBehaviour::DeductOutput,
-                        },
-                        CcvOutputDescription {
-                            n: args.out_i,
-                            next_contract: unvaulting.clone_box(),
-                            next_state: Some(Box::new(unvaulting_state)),
-                            behaviour: CcvClauseOutputAmountBehaviour::PreserveOutput,
-                        },
-                    ]);
+                    ccv_list![
+                        deduct args.revault_out_i => self,
+                        args.out_i => unvaulting : unvaulting_state
+                    ]
                 }
             };
 
@@ -270,7 +287,7 @@ mod tests {
                     out_i: ArgSpec::Int => i32,
                 },
                 next_outputs_fn(args, _state) {
-                    ClauseOutputs::CcvList(vec![])
+                    ccv_list![]
                 }
             };
             let t = TapLeafHash::from_script(trigger.script.as_script(), LeafVersion::TapScript);
@@ -345,7 +362,7 @@ mod tests {
                     ctv_hash: ArgSpec::Bytes => [u8; 32],
                 },
                 next_outputs_fn(args, _state) {
-                    ClauseOutputs::CcvList(vec![])
+                    ccv_list![]
                 }
             };
 
@@ -390,7 +407,7 @@ mod tests {
                     out_i: ArgSpec::Int => i32,
                 },
                 next_outputs_fn(args, _state) {
-                    ClauseOutputs::CcvList(vec![])
+                    ccv_list![]
                 }
             };
 
