@@ -1,5 +1,6 @@
-use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use std::fmt::Debug;
+
+use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
 pub const OP_CHECKCONTRACTVERIFY: u8 = 0xbb;
 pub const OP_CHECKTEMPLATEVERIFY: u8 = 0xb3;
@@ -400,30 +401,6 @@ mod tests {
                     ctv_hash: ArgSpec::Bytes => [u8; 32],
                 }
             };
-
-            let withdraw_script = {
-                let builder = Builder::new().push_int(-1);
-                let builder = if let Some(pk) = self.alternate_pk {
-                    builder.push_x_only_key(&pk)
-                } else {
-                    builder.push_opcode(opcodes::OP_0)
-                };
-                let builder = builder
-                    .push_int(-1)
-                    .push_int(CCV_FLAG_CHECK_INPUT.into())
-                    .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-                    .push_int(self.spend_delay.into())
-                    .push_opcode(opcodes::all::OP_CSV)
-                    .push_opcode(opcodes::all::OP_DROP)
-                    .push_opcode(OP_CHECKTEMPLATEVERIFY.into());
-                builder.into_script()
-            };
-            struct Withdraw_Args {
-                ctv_hash: [u8; 32],
-            }
-            impl ClauseArguments for Withdraw_Args {}
-            let withdraw_arg_specs = vec![("ctv_hash".to_string(), ArgSpec::Bytes)];
-            // no withdraw_fn
 
             let recover = clause! {
                 name: "recover",
