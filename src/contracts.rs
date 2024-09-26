@@ -34,11 +34,11 @@ pub enum CcvClauseOutputAmountBehaviour {
 // TODO
 pub trait ClauseArguments {}
 
-pub struct Clause<A: ClauseArguments, S: ContractState> {
+pub struct Clause<'a, A: ClauseArguments, S: ContractState> {
     name: String,
     script: ScriptBuf,
     arg_specs: ArgSpecs,
-    next_outputs_fn: Box<dyn Fn(A, S) -> ClauseOutputs>,
+    next_outputs_fn: Box<dyn Fn(A, S) -> ClauseOutputs + 'a>,
 }
 
 #[derive(Debug)]
@@ -86,37 +86,30 @@ pub trait ContractInstance {}
 // MACROS
 
 macro_rules! clause {
-    // Pattern when next_outputs_fn is provided
+    // Pattern when next_outputs_fn is provided and state_type is specified
     (
         name: $name:expr,
         script: $script:expr,
-        args {
-            $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)?
-        },
+        args { $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)? },
+        state_type: $state_type:ty,
         next_outputs_fn($args_ident:ident, $state_ident:ident) $fn_body:block
     ) => {
         {
-            // Define the argument struct
             #[derive(Debug)]
             struct Args {
                 $(pub $arg_name: $arg_type),*
             }
-
-            // Implement ClauseArguments for the argument struct
             impl ClauseArguments for Args {}
 
-            // Create the argument specifications
             let arg_specs: ArgSpecs = vec![
                 $( (stringify!($arg_name).to_string(), $arg_spec) ),*
             ];
 
-            // Create the next_outputs_fn closure
             let next_outputs_fn = {
-                move |$args_ident: Args, $state_ident| $fn_body
+                move |$args_ident: Args, $state_ident: $state_type| $fn_body
             };
 
-            // Construct the Clause instance
-            Clause {
+            Clause::<Args, $state_type> {
                 name: $name.into(),
                 script: $script,
                 arg_specs,
@@ -124,41 +117,62 @@ macro_rules! clause {
             }
         }
     };
-    // Pattern when next_outputs_fn is omitted
+    // Pattern when next_outputs_fn is provided and state_type is not specified
     (
         name: $name:expr,
         script: $script:expr,
-        args {
-            $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)?
+        args { $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)? },
+        next_outputs_fn($args_ident:ident, $state_ident:ident) $fn_body:block
+    ) => {
+        clause! {
+            name: $name,
+            script: $script,
+            args { $($arg_name : $arg_spec => $arg_type),* },
+            state_type: (),
+            next_outputs_fn($args_ident, $state_ident) $fn_body
         }
+    };
+    // Pattern when next_outputs_fn is omitted and state_type is specified
+    (
+        name: $name:expr,
+        script: $script:expr,
+        args { $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)? },
+        state_type: $state_type:ty,
     ) => {
         {
-            // Define the argument struct
             #[derive(Debug)]
             struct Args {
                 $(pub $arg_name: $arg_type),*
             }
-
-            // Implement ClauseArguments for the argument struct
             impl ClauseArguments for Args {}
 
-            // Create the argument specifications
             let arg_specs: ArgSpecs = vec![
                 $( (stringify!($arg_name).to_string(), $arg_spec) ),*
             ];
 
-            // Create the default next_outputs_fn closure
             let next_outputs_fn = {
-                move |_args: Args, _state| ClauseOutputs::CcvList(vec![])
+                move |_args: Args, _state: $state_type| ClauseOutputs::CcvList(vec![])
             };
 
-            // Construct the Clause instance
-            Clause {
+            Clause::<Args, $state_type> {
                 name: $name.into(),
                 script: $script,
                 arg_specs,
                 next_outputs_fn: Box::new(next_outputs_fn),
             }
+        }
+    };
+    // Pattern when next_outputs_fn is omitted and state_type is not specified
+    (
+        name: $name:expr,
+        script: $script:expr,
+        args { $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)? },
+    ) => {
+        clause! {
+            name: $name,
+            script: $script,
+            args { $($arg_name : $arg_spec => $arg_type),* },
+            state_type: (),
         }
     };
 }
@@ -192,6 +206,7 @@ macro_rules! ccv_list {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bitcoin::{
         hashes::Hash,
         opcodes,
@@ -199,11 +214,8 @@ mod tests {
         taproot::{self, LeafVersion},
         TapLeafHash, XOnlyPublicKey,
     };
-    use bitcoin_script::bitcoin_script;
 
-    use super::*;
-
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     struct Vault {
         alternate_pk: Option<XOnlyPublicKey>,
         spend_delay: u32,
@@ -247,21 +259,12 @@ mod tests {
                         .push_opcode(opcodes::all::OP_CHECKSIG);
                     builder.into_script()
                 },
-                // script: {
-                //     bitcoin_script! {
-                //         <if let Some(pk) = self.alternate_pk { pk } else { 0 }>
-                //         <unvaulting.get_taptree_merkle_root()>
-                //         0
-                //         OP_RETURN_187 // wrong, doesn't exist in bitcoin_script crate
-                //         <self.unvault_pk>
-                //         OP_CHECKSIG
-                //     }
-                // },
                 args {
                     sig: ArgSpec::Bytes => [u8; 64],
                     ctv_hash: ArgSpec::Bytes => [u8; 32],
                     out_i: ArgSpec::Int => i32,
                 },
+                state_type: UnvaultingState,
                 next_outputs_fn(args, _state) {
                     ccv_list![
                         preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash),
@@ -370,7 +373,7 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     struct Unvaulting {
         alternate_pk: Option<XOnlyPublicKey>,
         spend_delay: u32,
@@ -406,7 +409,8 @@ mod tests {
                 },
                 args {
                     ctv_hash: ArgSpec::Bytes => [u8; 32],
-                }
+                },
+                state_type: UnvaultingState,
             };
 
             let recover = clause! {
@@ -424,7 +428,8 @@ mod tests {
                 },
                 args {
                     out_i: ArgSpec::Int => i32,
-                }
+                },
+                state_type: (),
             };
 
             let w = TapLeafHash::from_script(withdraw.script.as_script(), LeafVersion::TapScript);
