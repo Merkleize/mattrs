@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::fmt::Debug;
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
@@ -9,8 +10,31 @@ pub const CCV_FLAG_CHECK_INPUT: i32 = -1;
 pub const CCV_FLAG_IGNORE_OUTPUT_AMOUNT: i32 = 1;
 pub const CCV_FLAG_DEDUCT_OUTPUT_AMOUNT: i32 = 2;
 
-pub trait CloneBox {
-    fn clone_box(&self) -> Box<dyn Contract>;
+pub trait ContractParams: Debug + Any + Clone {}
+impl<T: Any + Debug + Clone> ContractParams for T {}
+pub trait ContractState: Debug + Any {
+    /// Encodes the state of an instance into the 32-byte data format that can be encoded in the UTXO.
+    fn encode(&self) -> [u8; 32] {
+        panic!("Not implemented for this State")
+    }
+
+    /// Returns a CScript that computes the commitment to the state, assuming that the top of the stack contains the
+    /// values of the individual stack items that allow to compute the state commitment, as output by the encode() function.
+    /// Contracts might decide not to implement this (and raise an error if this is called), but they must document how the
+    /// state commitment should be computed if not. Contracts implementing it should document what the expected stack
+    /// elements are when the encoder_script is used.
+    fn encoder_script(&self) -> ScriptBuf {
+        panic!("Not implemented for this State")
+    }
+}
+
+impl<T: Any + Debug + Clone> ContractState for T {}
+
+pub trait ClauseArguments: Any + Debug + Clone {}
+impl<T: Any + Debug + Clone> ClauseArguments for T {}
+
+pub trait Contract<P: ContractParams, S: ContractState = ()> {
+    fn get_taptree_merkle_root(&self) -> [u8; 32];
 }
 
 // The possible types to specify one of the arguments of a clause
@@ -32,20 +56,12 @@ pub enum CcvClauseOutputAmountBehaviour {
 }
 
 // TODO
-pub trait ClauseArguments {}
-
-pub struct Clause<'a, A: ClauseArguments, S: ContractState> {
-    name: String,
-    script: ScriptBuf,
-    arg_specs: ArgSpecs,
-    next_outputs_fn: Box<dyn Fn(A, S) -> ClauseOutputs + 'a>,
-}
 
 #[derive(Debug)]
 pub struct CcvOutputDescription {
     pub n: i32,
-    pub next_contract: Box<dyn Contract>,
-    pub next_state: Option<Box<dyn ContractState>>,
+    pub next_contract: Box<dyn Any>,
+    pub next_state: Option<Box<dyn Any>>,
     pub behaviour: CcvClauseOutputAmountBehaviour,
 }
 
@@ -54,129 +70,17 @@ pub enum ClauseOutputs {
     CcvList(Vec<CcvOutputDescription>),
 }
 
-/// Describes the State of a ContractInstance.
-pub trait ContractState: Debug {
-    /// Encodes the state of an instance into the 32-byte data format that can be encoded in the UTXO.
-    fn encode(&self) -> [u8; 32];
-
-    /// Returns a CScript that computes the commitment to the state, assuming that the top of the stack contains the
-    /// values of the individual stack items that allow to compute the state commitment, as output by the encode() function.
-    /// Contracts might decide not to implement this (and raise an error if this is called), but they must document how the
-    /// state commitment should be computed if not. Contracts implementing it should document what the expected stack
-    /// elements are when the encoder_script is used.
-    fn encoder_script(&self) -> ScriptBuf {
-        panic!("Not implemented for this State")
-    }
+// Define the Clause trait
+pub trait Clause<P: ContractParams, A: ClauseArguments, S: ContractState = ()>:
+    Debug + Clone
+{
+    fn name() -> String;
+    fn script(params: &P) -> ScriptBuf;
+    fn arg_specs() -> ArgSpecs;
+    fn next_outputs(params: &P, args: &A, state: &S) -> ClauseOutputs;
 }
-
-// TODO: do we want this? Or do we distinguish between stateful and stateless contracts/clauses etc?
-impl ContractState for () {
-    fn encode(&self) -> [u8; 32] {
-        panic!("Empty state cannot be encoded")
-    }
-}
-
-pub trait Contract: Debug + CloneBox {
-    // Returns the list of clauses of this contract
-    fn get_taptree_merkle_root(&self) -> [u8; 32];
-}
-
-pub trait ContractInstance {}
 
 // MACROS
-
-#[macro_export]
-macro_rules! clause {
-    // Pattern when next_outputs_fn is provided and state_type is specified
-    (
-        name: $name:expr,
-        script: $script:expr,
-        args { $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)? },
-        state_type: $state_type:ty,
-        next_outputs_fn($args_ident:ident, $state_ident:ident) $fn_body:block
-    ) => {
-        {
-            #[derive(Debug)]
-            struct Args {
-                $(pub $arg_name: $arg_type),*
-            }
-            impl ClauseArguments for Args {}
-
-            let arg_specs: ArgSpecs = vec![
-                $( (stringify!($arg_name).to_string(), $arg_spec) ),*
-            ];
-
-            let next_outputs_fn = {
-                move |$args_ident: Args, $state_ident: $state_type| $fn_body
-            };
-
-            Clause::<Args, $state_type> {
-                name: $name.into(),
-                script: $script,
-                arg_specs,
-                next_outputs_fn: Box::new(next_outputs_fn),
-            }
-        }
-    };
-    // Pattern when next_outputs_fn is provided and state_type is not specified
-    (
-        name: $name:expr,
-        script: $script:expr,
-        args { $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)? },
-        next_outputs_fn($args_ident:ident, $state_ident:ident) $fn_body:block
-    ) => {
-        clause! {
-            name: $name,
-            script: $script,
-            args { $($arg_name : $arg_spec => $arg_type),* },
-            state_type: (),
-            next_outputs_fn($args_ident, $state_ident) $fn_body
-        }
-    };
-    // Pattern when next_outputs_fn is omitted and state_type is specified
-    (
-        name: $name:expr,
-        script: $script:expr,
-        args { $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)? },
-        state_type: $state_type:ty,
-    ) => {
-        {
-            #[derive(Debug)]
-            struct Args {
-                $(pub $arg_name: $arg_type),*
-            }
-            impl ClauseArguments for Args {}
-
-            let arg_specs: ArgSpecs = vec![
-                $( (stringify!($arg_name).to_string(), $arg_spec) ),*
-            ];
-
-            let next_outputs_fn = {
-                move |_args: Args, _state: $state_type| ClauseOutputs::CcvList(vec![])
-            };
-
-            Clause::<Args, $state_type> {
-                name: $name.into(),
-                script: $script,
-                arg_specs,
-                next_outputs_fn: Box::new(next_outputs_fn),
-            }
-        }
-    };
-    // Pattern when next_outputs_fn is omitted and state_type is not specified
-    (
-        name: $name:expr,
-        script: $script:expr,
-        args { $($arg_name:ident : $arg_spec:expr => $arg_type:ty),* $(,)? },
-    ) => {
-        clause! {
-            name: $name,
-            script: $script,
-            args { $($arg_name : $arg_spec => $arg_type),* },
-            state_type: (),
-        }
-    };
-}
 
 #[macro_export]
 macro_rules! ccv_list {
@@ -189,7 +93,7 @@ macro_rules! ccv_list {
             $(
                 CcvOutputDescription {
                     n: $n,
-                    next_contract: $contract.clone_box(),
+                    next_contract: Box::new($contract.clone()),
                     next_state: ccv_list!(@optional_state $( $state )? ),
                     behaviour: ccv_list!(@parse_behaviour $behaviour),
                 }
@@ -217,128 +121,208 @@ mod tests {
         TapLeafHash, XOnlyPublicKey,
     };
 
-    #[derive(Debug, Clone, Copy)]
-    struct Vault {
+    #[derive(Debug, Clone)]
+    struct VaultParams {
         alternate_pk: Option<XOnlyPublicKey>,
         spend_delay: u32,
         recover_pk: XOnlyPublicKey,
         unvault_pk: XOnlyPublicKey,
     }
-
     #[derive(Debug, Clone)]
-    struct Vault_State {}
-
-    impl CloneBox for Vault {
-        fn clone_box(&self) -> Box<dyn Contract> {
-            Box::new(self.clone())
+    struct Vault {
+        pub params: VaultParams,
+    }
+    impl Vault {
+        pub fn new(params: VaultParams) -> Self {
+            Self { params }
         }
     }
 
-    impl Contract for Vault {
+    // clause: trigger
+
+    #[derive(Debug, Clone)]
+    struct VaultTriggerClauseArgs {
+        sig: [u8; 64],
+        ctv_hash: [u8; 32],
+        out_i: i32,
+    }
+
+    #[derive(Debug, Clone)]
+    struct VaultTriggerClause {}
+    impl Clause<VaultParams, VaultTriggerClauseArgs, ()> for VaultTriggerClause {
+        fn name() -> String {
+            "trigger".into()
+        }
+
+        fn script(params: &VaultParams) -> ScriptBuf {
+            let unvaulting = Unvaulting::new(UnvaultingParams {
+                alternate_pk: params.alternate_pk,
+                spend_delay: params.spend_delay,
+                recover_pk: params.recover_pk,
+            });
+
+            let builder = Builder::new();
+            let builder = if let Some(pk) = params.alternate_pk {
+                builder.push_x_only_key(&pk)
+            } else {
+                builder.push_opcode(opcodes::OP_0)
+            };
+            let builder = builder
+                .push_slice(unvaulting.get_taptree_merkle_root())
+                .push_int(0)
+                .push_opcode(OP_CHECKCONTRACTVERIFY.into())
+                .push_x_only_key(&params.unvault_pk)
+                .push_opcode(opcodes::all::OP_CHECKSIG);
+            builder.into_script()
+        }
+
+        fn arg_specs() -> ArgSpecs {
+            vec![
+                ("sig".into(), ArgSpec::Bytes),
+                ("ctv_hash".into(), ArgSpec::Bytes),
+                ("out_i".into(), ArgSpec::Int),
+            ]
+        }
+
+        fn next_outputs(
+            params: &VaultParams,
+            args: &VaultTriggerClauseArgs,
+            _state: &(),
+        ) -> ClauseOutputs {
+            let unvaulting = Unvaulting::new(UnvaultingParams {
+                alternate_pk: params.alternate_pk,
+                spend_delay: params.spend_delay,
+                recover_pk: params.recover_pk,
+            });
+
+            ccv_list![
+                preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash),
+            ]
+        }
+    }
+
+    // clause: trigger_and_revault
+
+    #[derive(Debug, Clone)]
+    struct VaultTriggerAndRevaultClauseArgs {
+        sig: [u8; 64],
+        ctv_hash: [u8; 32],
+        out_i: i32,
+        revault_out_i: i32,
+    }
+
+    #[derive(Debug, Clone)]
+    struct VaultTriggerAndRevaultClause {}
+    impl Clause<VaultParams, VaultTriggerAndRevaultClauseArgs, ()> for VaultTriggerAndRevaultClause {
+        fn name() -> String {
+            "trigger_and_revault".into()
+        }
+
+        fn script(params: &VaultParams) -> ScriptBuf {
+            let unvaulting = Unvaulting::new(UnvaultingParams {
+                alternate_pk: params.alternate_pk,
+                spend_delay: params.spend_delay,
+                recover_pk: params.recover_pk,
+            });
+
+            let builder = Builder::new()
+                .push_int(0)
+                .push_opcode(opcodes::all::OP_SWAP)
+                .push_int(-1)
+                .push_int(-1)
+                .push_int(CCV_FLAG_DEDUCT_OUTPUT_AMOUNT.into())
+                .push_opcode(OP_CHECKCONTRACTVERIFY.into());
+
+            let builder = if let Some(pk) = params.alternate_pk {
+                builder.push_x_only_key(&pk)
+            } else {
+                builder.push_opcode(opcodes::OP_0)
+            };
+            let builder = builder
+                .push_slice(unvaulting.get_taptree_merkle_root())
+                .push_int(0)
+                .push_opcode(OP_CHECKCONTRACTVERIFY.into())
+                .push_x_only_key(&params.unvault_pk)
+                .push_opcode(opcodes::all::OP_CHECKSIG);
+            builder.into_script()
+        }
+
+        fn arg_specs() -> ArgSpecs {
+            vec![
+                ("sig".into(), ArgSpec::Bytes),
+                ("ctv_hash".into(), ArgSpec::Bytes),
+                ("out_i".into(), ArgSpec::Int),
+                ("revault_out_i".into(), ArgSpec::Int),
+            ]
+        }
+
+        fn next_outputs(
+            params: &VaultParams,
+            args: &VaultTriggerAndRevaultClauseArgs,
+            _state: &(),
+        ) -> ClauseOutputs {
+            let unvaulting = Unvaulting::new(UnvaultingParams {
+                alternate_pk: params.alternate_pk,
+                spend_delay: params.spend_delay,
+                recover_pk: params.recover_pk,
+            });
+
+            ccv_list![
+                deduct(args.revault_out_i) => Vault::new(params.clone()),
+                preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash)
+            ]
+        }
+    }
+
+    // clause: recover
+
+    #[derive(Debug, Clone)]
+    struct VaultRecoverArgs {
+        out_i: i32,
+    }
+
+    #[derive(Debug, Clone)]
+    struct VaultRecover {}
+    impl Clause<VaultParams, VaultRecoverArgs, ()> for VaultRecover {
+        fn name() -> String {
+            "recover".into()
+        }
+
+        fn script(params: &VaultParams) -> ScriptBuf {
+            Builder::new()
+                .push_int(0)
+                .push_opcode(opcodes::all::OP_SWAP)
+                .push_x_only_key(&params.recover_pk)
+                .push_int(0)
+                .push_int(0)
+                .push_opcode(OP_CHECKCONTRACTVERIFY.into())
+                .push_opcode(opcodes::OP_TRUE)
+                .into_script()
+        }
+
+        fn arg_specs() -> ArgSpecs {
+            vec![("out_i".into(), ArgSpec::Int)]
+        }
+
+        fn next_outputs(
+            _params: &VaultParams,
+            _args: &VaultRecoverArgs,
+            _state: &(),
+        ) -> ClauseOutputs {
+            ccv_list![]
+        }
+    }
+
+    impl Contract<VaultParams> for Vault {
         fn get_taptree_merkle_root(&self) -> [u8; 32] {
-            let unvaulting = Unvaulting {
-                alternate_pk: self.alternate_pk,
-                spend_delay: self.spend_delay,
-                recover_pk: self.recover_pk,
-            };
+            let trigger_script = VaultTriggerClause::script(&self.params);
+            let trigger_and_revault_script = VaultTriggerAndRevaultClause::script(&self.params);
+            let recover_script = VaultRecover::script(&self.params);
 
-            // Clause: trigger
-
-            let trigger = clause! {
-                name: "trigger",
-                script: {
-                    let builder = Builder::new();
-                    let builder = if let Some(pk) = self.alternate_pk {
-                        builder.push_x_only_key(&pk)
-                    } else {
-                        builder.push_opcode(opcodes::OP_0)
-                    };
-                    let builder = builder
-                        .push_slice(unvaulting.get_taptree_merkle_root())
-                        .push_int(0)
-                        .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-                        .push_x_only_key(&self.unvault_pk)
-                        .push_opcode(opcodes::all::OP_CHECKSIG);
-                    builder.into_script()
-                },
-                args {
-                    sig: ArgSpec::Bytes => [u8; 64],
-                    ctv_hash: ArgSpec::Bytes => [u8; 32],
-                    out_i: ArgSpec::Int => i32,
-                },
-                state_type: UnvaultingState,
-                next_outputs_fn(args, _state) {
-                    ccv_list![
-                        preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash),
-                    ]
-                }
-            };
-
-            // Clause: trigger_and_revault
-
-            let trigger_and_revault = clause! {
-                name: "trigger_and_revault",
-                script: {
-                    let builder = Builder::new()
-                        .push_int(0)
-                        .push_opcode(opcodes::all::OP_SWAP)
-                        .push_int(-1)
-                        .push_int(-1)
-                        .push_int(CCV_FLAG_DEDUCT_OUTPUT_AMOUNT.into())
-                        .push_opcode(OP_CHECKCONTRACTVERIFY.into());
-
-                    let builder = if let Some(pk) = self.alternate_pk {
-                        builder.push_x_only_key(&pk)
-                    } else {
-                        builder.push_opcode(opcodes::OP_0)
-                    };
-                    let builder = builder
-                        .push_slice(unvaulting.get_taptree_merkle_root())
-                        .push_int(0)
-                        .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-                        .push_x_only_key(&self.unvault_pk)
-                        .push_opcode(opcodes::all::OP_CHECKSIG);
-                    builder.into_script()
-                },
-                args {
-                    sig: ArgSpec::Bytes => [u8; 64],
-                    ctv_hash: ArgSpec::Bytes => [u8; 32],
-                    out_i: ArgSpec::Int => i32,
-                    revault_out_i: ArgSpec::Int => i32,
-                },
-                next_outputs_fn(args, _state) {
-                    ccv_list![
-                        deduct(args.revault_out_i) => self,
-                        preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash)
-                    ]
-                }
-            };
-
-            // Clause: recover
-
-            let recover = clause! {
-                name: "recover",
-                script: {
-                    Builder::new()
-                        .push_int(0)
-                        .push_opcode(opcodes::all::OP_SWAP)
-                        .push_x_only_key(&self.recover_pk)
-                        .push_int(0)
-                        .push_int(0)
-                        .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-                        .push_opcode(opcodes::OP_TRUE)
-                        .into_script()
-                },
-                args {
-                    out_i: ArgSpec::Int => i32,
-                },
-            };
-            let t = TapLeafHash::from_script(trigger.script.as_script(), LeafVersion::TapScript);
-            let tr = TapLeafHash::from_script(
-                trigger_and_revault.script.as_script(),
-                LeafVersion::TapScript,
-            );
-            let r = TapLeafHash::from_script(recover.script.as_script(), LeafVersion::TapScript);
+            // Compute TapLeafHashes
+            let t = TapLeafHash::from_script(&trigger_script, LeafVersion::TapScript);
+            let tr = TapLeafHash::from_script(&trigger_and_revault_script, LeafVersion::TapScript);
+            let r = TapLeafHash::from_script(&recover_script, LeafVersion::TapScript);
 
             taproot::TapNodeHash::from_node_hashes(
                 tr.into(),
@@ -349,16 +333,48 @@ mod tests {
         }
     }
 
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     struct Unvaulting {
+        params: UnvaultingParams,
+    }
+    impl Unvaulting {
+        pub fn new(params: UnvaultingParams) -> Self {
+            Self { params }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct UnvaultingParams {
         alternate_pk: Option<XOnlyPublicKey>,
         spend_delay: u32,
         recover_pk: XOnlyPublicKey,
     }
 
+    impl Contract<UnvaultingParams, UnvaultingState> for Unvaulting {
+        fn get_taptree_merkle_root(&self) -> [u8; 32] {
+            let withdraw_script = UnvaultingWithdrawClause::script(&self.params);
+            let recover_script = UnvaultingRecoverClause::script(&self.params);
+
+            // Compute TapLeafHashes
+            let w = TapLeafHash::from_script(&withdraw_script, LeafVersion::TapScript);
+            let r = TapLeafHash::from_script(&recover_script, LeafVersion::TapScript);
+
+            taproot::TapNodeHash::from_node_hashes(w.into(), r.into())
+                .to_raw_hash()
+                .to_byte_array()
+        }
+    }
+
+    // Define the UnvaultingState
     #[derive(Debug)]
     struct UnvaultingState {
         ctv_hash: [u8; 32],
+    }
+
+    impl UnvaultingState {
+        fn new(ctv_hash: [u8; 32]) -> Self {
+            Self { ctv_hash }
+        }
     }
 
     impl ContractState for UnvaultingState {
@@ -366,69 +382,88 @@ mod tests {
             self.ctv_hash
         }
     }
-    impl UnvaultingState {
-        fn new(ctv_hash: [u8; 32]) -> Self {
-            Self { ctv_hash }
+
+    // clause: recover
+
+    #[derive(Debug, Clone)]
+    struct UnvaultingWithdrawClauseArgs {
+        ctv_hash: [u8; 32],
+    }
+
+    #[derive(Debug, Clone)]
+    struct UnvaultingWithdrawClause {}
+    impl Clause<UnvaultingParams, UnvaultingWithdrawClauseArgs, ()> for UnvaultingWithdrawClause {
+        fn name() -> String {
+            "withdraw".into()
+        }
+
+        fn script(params: &UnvaultingParams) -> ScriptBuf {
+            let builder = Builder::new().push_int(-1);
+            let builder = if let Some(pk) = params.alternate_pk {
+                builder.push_x_only_key(&pk)
+            } else {
+                builder.push_opcode(opcodes::OP_0)
+            };
+            let builder = builder
+                .push_int(-1)
+                .push_int(CCV_FLAG_CHECK_INPUT.into())
+                .push_opcode(OP_CHECKCONTRACTVERIFY.into())
+                .push_int(params.spend_delay.into())
+                .push_opcode(opcodes::all::OP_CSV)
+                .push_opcode(opcodes::all::OP_DROP)
+                .push_opcode(OP_CHECKTEMPLATEVERIFY.into());
+            builder.into_script()
+        }
+
+        fn arg_specs() -> ArgSpecs {
+            vec![("ctv_hash".into(), ArgSpec::Bytes)]
+        }
+
+        fn next_outputs(
+            _params: &UnvaultingParams,
+            _args: &UnvaultingWithdrawClauseArgs,
+            _state: &(),
+        ) -> ClauseOutputs {
+            ccv_list![]
         }
     }
 
-    impl CloneBox for Unvaulting {
-        fn clone_box(&self) -> Box<dyn Contract> {
-            Box::new(self.clone())
-        }
+    // clause: recover
+
+    #[derive(Debug, Clone)]
+    struct UnvaultingRecoverClauseArgs {
+        out_i: i32,
     }
 
-    impl Contract for Unvaulting {
-        fn get_taptree_merkle_root(&self) -> [u8; 32] {
-            let withdraw = clause! {
-                name: "recover",
-                script: {
-                    let builder = Builder::new().push_int(-1);
-                    let builder = if let Some(pk) = self.alternate_pk {
-                        builder.push_x_only_key(&pk)
-                    } else {
-                        builder.push_opcode(opcodes::OP_0)
-                    };
-                    let builder = builder
-                        .push_int(-1)
-                        .push_int(CCV_FLAG_CHECK_INPUT.into())
-                        .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-                        .push_int(self.spend_delay.into())
-                        .push_opcode(opcodes::all::OP_CSV)
-                        .push_opcode(opcodes::all::OP_DROP)
-                        .push_opcode(OP_CHECKTEMPLATEVERIFY.into());
-                    builder.into_script()
-                },
-                args {
-                    ctv_hash: ArgSpec::Bytes => [u8; 32],
-                },
-                state_type: UnvaultingState,
-            };
+    #[derive(Debug, Clone)]
+    struct UnvaultingRecoverClause {}
+    impl Clause<UnvaultingParams, UnvaultingRecoverClauseArgs, ()> for UnvaultingRecoverClause {
+        fn name() -> String {
+            "recover".into()
+        }
 
-            let recover = clause! {
-                name: "recover",
-                script: {
-                    Builder::new()
-                        .push_int(0)
-                        .push_opcode(opcodes::all::OP_SWAP)
-                        .push_x_only_key(&self.recover_pk)
-                        .push_int(0)
-                        .push_int(0)
-                        .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-                        .push_opcode(opcodes::OP_TRUE)
-                        .into_script()
-                },
-                args {
-                    out_i: ArgSpec::Int => i32,
-                },
-            };
+        fn script(params: &UnvaultingParams) -> ScriptBuf {
+            Builder::new()
+                .push_int(0)
+                .push_opcode(opcodes::all::OP_SWAP)
+                .push_x_only_key(&params.recover_pk)
+                .push_int(0)
+                .push_int(0)
+                .push_opcode(OP_CHECKCONTRACTVERIFY.into())
+                .push_opcode(opcodes::OP_TRUE)
+                .into_script()
+        }
 
-            let w = TapLeafHash::from_script(withdraw.script.as_script(), LeafVersion::TapScript);
-            let r = TapLeafHash::from_script(recover.script.as_script(), LeafVersion::TapScript);
+        fn arg_specs() -> ArgSpecs {
+            vec![("out_i".into(), ArgSpec::Int)]
+        }
 
-            taproot::TapNodeHash::from_node_hashes(w.into(), r.into())
-                .to_raw_hash()
-                .to_byte_array()
+        fn next_outputs(
+            _params: &UnvaultingParams,
+            _args: &UnvaultingRecoverClauseArgs,
+            _state: &(),
+        ) -> ClauseOutputs {
+            ccv_list![]
         }
     }
 }
