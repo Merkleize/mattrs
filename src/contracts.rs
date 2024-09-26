@@ -85,6 +85,7 @@ pub trait ContractInstance {}
 
 // MACROS
 
+#[macro_export]
 macro_rules! clause {
     // Pattern when next_outputs_fn is provided and state_type is specified
     (
@@ -177,6 +178,7 @@ macro_rules! clause {
     };
 }
 
+#[macro_export]
 macro_rules! ccv_list {
     (
         $(
@@ -330,9 +332,6 @@ mod tests {
                 args {
                     out_i: ArgSpec::Int => i32,
                 },
-                next_outputs_fn(args, _state) {
-                    ccv_list![]
-                }
             };
             let t = TapLeafHash::from_script(trigger.script.as_script(), LeafVersion::TapScript);
             let tr = TapLeafHash::from_script(
@@ -350,11 +349,11 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct VaultTriggerArgs {
-        sig: [u8; 64],
-        ctv_hash: [u8; 32],
-        out_i: i32,
+    #[derive(Debug, Clone, Copy)]
+    struct Unvaulting {
+        alternate_pk: Option<XOnlyPublicKey>,
+        spend_delay: u32,
+        recover_pk: XOnlyPublicKey,
     }
 
     #[derive(Debug)]
@@ -371,13 +370,6 @@ mod tests {
         fn new(ctv_hash: [u8; 32]) -> Self {
             Self { ctv_hash }
         }
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    struct Unvaulting {
-        alternate_pk: Option<XOnlyPublicKey>,
-        spend_delay: u32,
-        recover_pk: XOnlyPublicKey,
     }
 
     impl CloneBox for Unvaulting {
@@ -429,7 +421,6 @@ mod tests {
                 args {
                     out_i: ArgSpec::Int => i32,
                 },
-                state_type: (),
             };
 
             let w = TapLeafHash::from_script(withdraw.script.as_script(), LeafVersion::TapScript);
