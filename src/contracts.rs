@@ -165,32 +165,29 @@ macro_rules! clause {
 
 macro_rules! ccv_list {
     (
-        $( $($behaviour:ident)? $n:expr => $contract:tt $( : $state:expr )? ),* $(,)?
+        $(
+            $behaviour:ident ( $n:expr ) => $contract:expr $( ; $state:expr )? $(,)?
+        )*
     ) => {
         ClauseOutputs::CcvList(vec![
             $(
-                ccv_list!(@expand_output $($behaviour)?; $n; $contract; $( $state )? )
+                CcvOutputDescription {
+                    n: $n,
+                    next_contract: $contract.clone_box(),
+                    next_state: ccv_list!(@optional_state $( $state )? ),
+                    behaviour: ccv_list!(@parse_behaviour $behaviour),
+                }
             ),*
         ])
     };
-    (@expand_output $($behaviour:ident)?; $n:expr; $contract:tt; $state:expr) => {
-        CcvOutputDescription {
-            n: $n,
-            next_contract: ($contract).clone_box(),
-            next_state: Some(Box::new($state)),
-            behaviour: ccv_list!(@parse_behaviour $($behaviour)?),
-        }
+    (@optional_state $state:expr) => {
+        Some(Box::new($state))
     };
-    (@expand_output $($behaviour:ident)?; $n:expr; $contract:tt;) => {
-        CcvOutputDescription {
-            n: $n,
-            next_contract: ($contract).clone_box(),
-            next_state: None,
-            behaviour: ccv_list!(@parse_behaviour $($behaviour)?),
-        }
+    (@optional_state) => {
+        None
     };
     (@parse_behaviour deduct) => { CcvClauseOutputAmountBehaviour::DeductOutput };
-    (@parse_behaviour) => { CcvClauseOutputAmountBehaviour::PreserveOutput };
+    (@parse_behaviour preserve) => { CcvClauseOutputAmountBehaviour::PreserveOutput };
 }
 
 #[cfg(test)]
@@ -202,6 +199,7 @@ mod tests {
         taproot::{self, LeafVersion},
         TapLeafHash, XOnlyPublicKey,
     };
+    use bitcoin_script::bitcoin_script;
 
     use super::*;
 
@@ -249,17 +247,24 @@ mod tests {
                         .push_opcode(opcodes::all::OP_CHECKSIG);
                     builder.into_script()
                 },
+                // script: {
+                //     bitcoin_script! {
+                //         <if let Some(pk) = self.alternate_pk { pk } else { 0 }>
+                //         <unvaulting.get_taptree_merkle_root()>
+                //         0
+                //         OP_RETURN_187 // wrong, doesn't exist in bitcoin_script crate
+                //         <self.unvault_pk>
+                //         OP_CHECKSIG
+                //     }
+                // },
                 args {
                     sig: ArgSpec::Bytes => [u8; 64],
                     ctv_hash: ArgSpec::Bytes => [u8; 32],
                     out_i: ArgSpec::Int => i32,
                 },
                 next_outputs_fn(args, _state) {
-                    let unvaulting_state = UnvaultingState {
-                        ctv_hash: args.ctv_hash,
-                    };
                     ccv_list![
-                        args.out_i => unvaulting : unvaulting_state
+                        preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash),
                     ]
                 }
             };
@@ -297,12 +302,9 @@ mod tests {
                     revault_out_i: ArgSpec::Int => i32,
                 },
                 next_outputs_fn(args, _state) {
-                    let unvaulting_state = UnvaultingState {
-                        ctv_hash: args.ctv_hash,
-                    };
                     ccv_list![
-                        deduct args.revault_out_i => self,
-                        args.out_i => unvaulting : unvaulting_state
+                        deduct(args.revault_out_i) => self,
+                        preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash)
                     ]
                 }
             };
@@ -360,6 +362,11 @@ mod tests {
     impl ContractState for UnvaultingState {
         fn encode(&self) -> [u8; 32] {
             self.ctv_hash
+        }
+    }
+    impl UnvaultingState {
+        fn new(ctv_hash: [u8; 32]) -> Self {
+            Self { ctv_hash }
         }
     }
 
@@ -420,7 +427,7 @@ mod tests {
                 }
             };
 
-            let w = TapLeafHash::from_script(withdraw_script.as_script(), LeafVersion::TapScript);
+            let w = TapLeafHash::from_script(withdraw.script.as_script(), LeafVersion::TapScript);
             let r = TapLeafHash::from_script(recover.script.as_script(), LeafVersion::TapScript);
 
             taproot::TapNodeHash::from_node_hashes(w.into(), r.into())
