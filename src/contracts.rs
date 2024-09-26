@@ -137,6 +137,44 @@ macro_rules! define_clause_args {
     };
 }
 
+#[macro_export]
+macro_rules! define_clause {
+    (
+        $clause_struct_name:ident,
+        $clause_string_name:expr,
+        $contract_params:ty,
+        $clause_args:ty,
+        $contract_state:ty,
+        script($script_params:tt) $script_body:block,
+        next_outputs($no_params:tt,$no_args:tt,$no_state:tt) $next_outputs_body:block
+    ) => {
+        #[derive(Debug, Clone)]
+        pub struct $clause_struct_name {}
+
+        impl Clause<$contract_params, $clause_args, $contract_state> for $clause_struct_name {
+            fn name() -> String {
+                $clause_string_name.into()
+            }
+
+            fn script($script_params: &$contract_params) -> ScriptBuf {
+                $script_body
+            }
+
+            fn arg_specs() -> ArgSpecs {
+                <$clause_args>::as_arg_specs()
+            }
+
+            fn next_outputs(
+                $no_params: &$contract_params,
+                $no_args: &$clause_args,
+                $no_state: &$contract_state,
+            ) -> ClauseOutputs {
+                $next_outputs_body
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,14 +214,14 @@ mod tests {
         }
     );
 
-    #[derive(Debug, Clone)]
-    struct VaultTriggerClause {}
-    impl Clause<VaultParams, VaultTriggerClauseArgs, ()> for VaultTriggerClause {
-        fn name() -> String {
-            "trigger".into()
-        }
-
-        fn script(params: &VaultParams) -> ScriptBuf {
+    define_clause!(
+        VaultTriggerClause,
+        "trigger",
+        VaultParams,
+        VaultTriggerClauseArgs,
+        (),
+        script(params) {
+            // script body
             let unvaulting = Unvaulting::new(UnvaultingParams {
                 alternate_pk: params.alternate_pk,
                 spend_delay: params.spend_delay,
@@ -203,17 +241,9 @@ mod tests {
                 .push_x_only_key(&params.unvault_pk)
                 .push_opcode(opcodes::all::OP_CHECKSIG);
             builder.into_script()
-        }
-
-        fn arg_specs() -> ArgSpecs {
-            VaultTriggerClauseArgs::as_arg_specs()
-        }
-
-        fn next_outputs(
-            params: &VaultParams,
-            args: &VaultTriggerClauseArgs,
-            _state: &(),
-        ) -> ClauseOutputs {
+        },
+        next_outputs(params, args, _state) {
+            // next_outputs body
             let unvaulting = Unvaulting::new(UnvaultingParams {
                 alternate_pk: params.alternate_pk,
                 spend_delay: params.spend_delay,
@@ -224,7 +254,7 @@ mod tests {
                 preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash),
             ]
         }
-    }
+    );
 
     // clause: trigger_and_revault
 
@@ -238,14 +268,13 @@ mod tests {
         }
     );
 
-    #[derive(Debug, Clone)]
-    struct VaultTriggerAndRevaultClause {}
-    impl Clause<VaultParams, VaultTriggerAndRevaultClauseArgs, ()> for VaultTriggerAndRevaultClause {
-        fn name() -> String {
-            "trigger_and_revault".into()
-        }
-
-        fn script(params: &VaultParams) -> ScriptBuf {
+    define_clause!(
+        VaultTriggerAndRevaultClause,
+        "trigger_and_revault",
+        VaultParams,
+        VaultTriggerAndRevaultClauseArgs,
+        (),
+        script(params) {
             let unvaulting = Unvaulting::new(UnvaultingParams {
                 alternate_pk: params.alternate_pk,
                 spend_delay: params.spend_delay,
@@ -272,17 +301,8 @@ mod tests {
                 .push_x_only_key(&params.unvault_pk)
                 .push_opcode(opcodes::all::OP_CHECKSIG);
             builder.into_script()
-        }
-
-        fn arg_specs() -> ArgSpecs {
-            VaultTriggerAndRevaultClauseArgs::as_arg_specs()
-        }
-
-        fn next_outputs(
-            params: &VaultParams,
-            args: &VaultTriggerAndRevaultClauseArgs,
-            _state: &(),
-        ) -> ClauseOutputs {
+        },
+        next_outputs(params, args, _state) {
             let unvaulting = Unvaulting::new(UnvaultingParams {
                 alternate_pk: params.alternate_pk,
                 spend_delay: params.spend_delay,
@@ -294,25 +314,24 @@ mod tests {
                 preserve(args.out_i) => unvaulting; UnvaultingState::new(args.ctv_hash)
             ]
         }
-    }
+    );
 
     // clause: recover
 
     define_clause_args!(
-        VaultRecoverArgs,
+        VaultRecoverClauseArgs,
         {
             out_i: i32 => ArgSpec::Int,
         }
     );
 
-    #[derive(Debug, Clone)]
-    struct VaultRecover {}
-    impl Clause<VaultParams, VaultRecoverArgs, ()> for VaultRecover {
-        fn name() -> String {
-            "recover".into()
-        }
-
-        fn script(params: &VaultParams) -> ScriptBuf {
+    define_clause!(
+        VaultRecoverClause,
+        "recover",
+        VaultParams,
+        VaultRecoverClauseArgs,
+        (),
+        script(params) {
             Builder::new()
                 .push_int(0)
                 .push_opcode(opcodes::all::OP_SWAP)
@@ -322,26 +341,17 @@ mod tests {
                 .push_opcode(OP_CHECKCONTRACTVERIFY.into())
                 .push_opcode(opcodes::OP_TRUE)
                 .into_script()
-        }
-
-        fn arg_specs() -> ArgSpecs {
-            VaultRecoverArgs::as_arg_specs()
-        }
-
-        fn next_outputs(
-            _params: &VaultParams,
-            _args: &VaultRecoverArgs,
-            _state: &(),
-        ) -> ClauseOutputs {
+        },
+        next_outputs(_params, _args, _state) {
             ccv_list![]
         }
-    }
+    );
 
     impl Contract<VaultParams> for Vault {
         fn get_taptree_merkle_root(&self) -> [u8; 32] {
             let trigger_script = VaultTriggerClause::script(&self.params);
             let trigger_and_revault_script = VaultTriggerAndRevaultClause::script(&self.params);
-            let recover_script = VaultRecover::script(&self.params);
+            let recover_script = VaultRecoverClause::script(&self.params);
 
             // Compute TapLeafHashes
             let t = TapLeafHash::from_script(&trigger_script, LeafVersion::TapScript);
@@ -416,14 +426,13 @@ mod tests {
         }
     );
 
-    #[derive(Debug, Clone)]
-    struct UnvaultingWithdrawClause {}
-    impl Clause<UnvaultingParams, UnvaultingWithdrawClauseArgs, ()> for UnvaultingWithdrawClause {
-        fn name() -> String {
-            "withdraw".into()
-        }
-
-        fn script(params: &UnvaultingParams) -> ScriptBuf {
+    define_clause!(
+        UnvaultingWithdrawClause,
+        "withdraw",
+        UnvaultingParams,
+        UnvaultingWithdrawClauseArgs,
+        (),
+        script(params) {
             let builder = Builder::new().push_int(-1);
             let builder = if let Some(pk) = params.alternate_pk {
                 builder.push_x_only_key(&pk)
@@ -439,20 +448,11 @@ mod tests {
                 .push_opcode(opcodes::all::OP_DROP)
                 .push_opcode(OP_CHECKTEMPLATEVERIFY.into());
             builder.into_script()
-        }
-
-        fn arg_specs() -> ArgSpecs {
-            UnvaultingWithdrawClauseArgs::as_arg_specs()
-        }
-
-        fn next_outputs(
-            _params: &UnvaultingParams,
-            _args: &UnvaultingWithdrawClauseArgs,
-            _state: &(),
-        ) -> ClauseOutputs {
+        },
+        next_outputs(_params, _args, _state) {
             ccv_list![]
         }
-    }
+    );
 
     // clause: recover
 
@@ -463,14 +463,13 @@ mod tests {
         }
     );
 
-    #[derive(Debug, Clone)]
-    struct UnvaultingRecoverClause {}
-    impl Clause<UnvaultingParams, UnvaultingRecoverClauseArgs, ()> for UnvaultingRecoverClause {
-        fn name() -> String {
-            "recover".into()
-        }
-
-        fn script(params: &UnvaultingParams) -> ScriptBuf {
+    define_clause!(
+        UnvaultingRecoverClause,
+        "recover",
+        UnvaultingParams,
+        UnvaultingRecoverClauseArgs,
+        (),
+        script(params) {
             Builder::new()
                 .push_int(0)
                 .push_opcode(opcodes::all::OP_SWAP)
@@ -480,18 +479,9 @@ mod tests {
                 .push_opcode(OP_CHECKCONTRACTVERIFY.into())
                 .push_opcode(opcodes::OP_TRUE)
                 .into_script()
-        }
-
-        fn arg_specs() -> ArgSpecs {
-            UnvaultingRecoverClauseArgs::as_arg_specs()
-        }
-
-        fn next_outputs(
-            _params: &UnvaultingParams,
-            _args: &UnvaultingRecoverClauseArgs,
-            _state: &(),
-        ) -> ClauseOutputs {
+        },
+        next_outputs(_params, _args, _state) {
             ccv_list![]
         }
-    }
+    );
 }
