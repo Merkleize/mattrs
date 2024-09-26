@@ -30,8 +30,9 @@ pub trait ContractState: Debug + Any {
 
 impl<T: Any + Debug + Clone> ContractState for T {}
 
-pub trait ClauseArguments: Any + Debug + Clone {}
-impl<T: Any + Debug + Clone> ClauseArguments for T {}
+pub trait ClauseArguments: Any + Debug + Clone {
+    fn as_arg_specs() -> ArgSpecs;
+}
 
 pub trait Contract<P: ContractParams, S: ContractState = ()> {
     fn get_taptree_merkle_root(&self) -> [u8; 32];
@@ -110,6 +111,32 @@ macro_rules! ccv_list {
     (@parse_behaviour preserve) => { CcvClauseOutputAmountBehaviour::PreserveOutput };
 }
 
+macro_rules! define_clause_args {
+    (
+        $args_name:ident,
+        {
+            $(
+                $field:ident : $type:ty => $arg_spec:expr
+            ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, Clone)]
+        pub struct $args_name {
+            $(pub $field : $type),*
+        }
+
+        impl ClauseArguments for $args_name {
+            fn as_arg_specs() -> ArgSpecs {
+                vec![
+                    $(
+                        (stringify!($field).to_string(), $arg_spec),
+                    )*
+                ]
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,12 +167,14 @@ mod tests {
 
     // clause: trigger
 
-    #[derive(Debug, Clone)]
-    struct VaultTriggerClauseArgs {
-        sig: [u8; 64],
-        ctv_hash: [u8; 32],
-        out_i: i32,
-    }
+    define_clause_args!(
+        VaultTriggerClauseArgs,
+        {
+            sig: [u8; 64] => ArgSpec::Bytes,
+            ctv_hash: [u8; 32] => ArgSpec::Bytes,
+            out_i: i32 => ArgSpec::Int,
+        }
+    );
 
     #[derive(Debug, Clone)]
     struct VaultTriggerClause {}
@@ -177,11 +206,7 @@ mod tests {
         }
 
         fn arg_specs() -> ArgSpecs {
-            vec![
-                ("sig".into(), ArgSpec::Bytes),
-                ("ctv_hash".into(), ArgSpec::Bytes),
-                ("out_i".into(), ArgSpec::Int),
-            ]
+            VaultTriggerClauseArgs::as_arg_specs()
         }
 
         fn next_outputs(
@@ -203,13 +228,15 @@ mod tests {
 
     // clause: trigger_and_revault
 
-    #[derive(Debug, Clone)]
-    struct VaultTriggerAndRevaultClauseArgs {
-        sig: [u8; 64],
-        ctv_hash: [u8; 32],
-        out_i: i32,
-        revault_out_i: i32,
-    }
+    define_clause_args!(
+        VaultTriggerAndRevaultClauseArgs,
+        {
+            sig: [u8; 64] => ArgSpec::Bytes,
+            ctv_hash: [u8; 32] => ArgSpec::Bytes,
+            out_i: i32 => ArgSpec::Int,
+            revault_out_i: i32 => ArgSpec::Int,
+        }
+    );
 
     #[derive(Debug, Clone)]
     struct VaultTriggerAndRevaultClause {}
@@ -248,12 +275,7 @@ mod tests {
         }
 
         fn arg_specs() -> ArgSpecs {
-            vec![
-                ("sig".into(), ArgSpec::Bytes),
-                ("ctv_hash".into(), ArgSpec::Bytes),
-                ("out_i".into(), ArgSpec::Int),
-                ("revault_out_i".into(), ArgSpec::Int),
-            ]
+            VaultTriggerAndRevaultClauseArgs::as_arg_specs()
         }
 
         fn next_outputs(
@@ -276,10 +298,12 @@ mod tests {
 
     // clause: recover
 
-    #[derive(Debug, Clone)]
-    struct VaultRecoverArgs {
-        out_i: i32,
-    }
+    define_clause_args!(
+        VaultRecoverArgs,
+        {
+            out_i: i32 => ArgSpec::Int,
+        }
+    );
 
     #[derive(Debug, Clone)]
     struct VaultRecover {}
@@ -301,7 +325,7 @@ mod tests {
         }
 
         fn arg_specs() -> ArgSpecs {
-            vec![("out_i".into(), ArgSpec::Int)]
+            VaultRecoverArgs::as_arg_specs()
         }
 
         fn next_outputs(
@@ -383,12 +407,14 @@ mod tests {
         }
     }
 
-    // clause: recover
+    // clause: withdraw
 
-    #[derive(Debug, Clone)]
-    struct UnvaultingWithdrawClauseArgs {
-        ctv_hash: [u8; 32],
-    }
+    define_clause_args!(
+        UnvaultingWithdrawClauseArgs,
+        {
+            ctv_hash: [u8; 32] => ArgSpec::Bytes,
+        }
+    );
 
     #[derive(Debug, Clone)]
     struct UnvaultingWithdrawClause {}
@@ -416,7 +442,7 @@ mod tests {
         }
 
         fn arg_specs() -> ArgSpecs {
-            vec![("ctv_hash".into(), ArgSpec::Bytes)]
+            UnvaultingWithdrawClauseArgs::as_arg_specs()
         }
 
         fn next_outputs(
@@ -430,10 +456,12 @@ mod tests {
 
     // clause: recover
 
-    #[derive(Debug, Clone)]
-    struct UnvaultingRecoverClauseArgs {
-        out_i: i32,
-    }
+    define_clause_args!(
+        UnvaultingRecoverClauseArgs,
+        {
+            out_i: i32 => ArgSpec::Int,
+        }
+    );
 
     #[derive(Debug, Clone)]
     struct UnvaultingRecoverClause {}
@@ -455,7 +483,7 @@ mod tests {
         }
 
         fn arg_specs() -> ArgSpecs {
-            vec![("out_i".into(), ArgSpec::Int)]
+            UnvaultingRecoverClauseArgs::as_arg_specs()
         }
 
         fn next_outputs(
