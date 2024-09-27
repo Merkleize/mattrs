@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::fmt::Debug;
 
+use bitcoin::taproot::{LeafVersion, TapLeafHash, TapNodeHash};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
 pub const OP_CHECKCONTRACTVERIFY: u8 = 0xbb;
@@ -111,6 +112,7 @@ macro_rules! ccv_list {
     (@parse_behaviour preserve) => { CcvClauseOutputAmountBehaviour::PreserveOutput };
 }
 
+#[macro_export]
 macro_rules! define_clause_args {
     (
         $args_name:ident,
@@ -175,16 +177,50 @@ macro_rules! define_clause {
     };
 }
 
+#[macro_export]
+macro_rules! define_contract {
+    (
+        $contract_struct_name:ident,
+        $contract_params:ty,
+        $contract_state:ty,
+        taptree: $taptree:tt
+    ) => {
+        #[derive(Debug, Clone)]
+        pub struct $contract_struct_name {
+            pub params: $contract_params,
+        }
+
+        impl $contract_struct_name {
+            pub fn new(params: $contract_params) -> Self {
+                Self { params }
+            }
+        }
+
+        impl Contract<$contract_params, $contract_state> for $contract_struct_name {
+            fn get_taptree_merkle_root(&self) -> [u8; 32] {
+                define_contract!(@process_taptree self, $taptree)
+            }
+        }
+    };
+
+    // Process a single clause (leaf node)
+    (@process_taptree $self:ident, $clause:ident) => {{
+        let script = $clause::script(&$self.params);
+        *TapLeafHash::from_script(&script, LeafVersion::TapScript).as_byte_array()
+    }};
+
+    // Process a tuple representing a TapTree branch
+    (@process_taptree $self:ident, ( $left:tt , $right:tt ) ) => {{
+        let left = define_contract!(@process_taptree $self, $left);
+        let right = define_contract!(@process_taptree $self, $right);
+        TapNodeHash::from_node_hashes(TapNodeHash::from_byte_array(left), TapNodeHash::from_byte_array(right)).to_byte_array()
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::{
-        hashes::Hash,
-        opcodes,
-        script::Builder,
-        taproot::{self, LeafVersion},
-        TapLeafHash, XOnlyPublicKey,
-    };
+    use bitcoin::{hashes::Hash, opcodes, script::Builder, TapLeafHash, XOnlyPublicKey};
 
     #[derive(Debug, Clone)]
     struct VaultParams {
@@ -192,15 +228,6 @@ mod tests {
         spend_delay: u32,
         recover_pk: XOnlyPublicKey,
         unvault_pk: XOnlyPublicKey,
-    }
-    #[derive(Debug, Clone)]
-    struct Vault {
-        pub params: VaultParams,
-    }
-    impl Vault {
-        pub fn new(params: VaultParams) -> Self {
-            Self { params }
-        }
     }
 
     // clause: trigger
@@ -347,35 +374,12 @@ mod tests {
         }
     );
 
-    impl Contract<VaultParams> for Vault {
-        fn get_taptree_merkle_root(&self) -> [u8; 32] {
-            let trigger_script = VaultTriggerClause::script(&self.params);
-            let trigger_and_revault_script = VaultTriggerAndRevaultClause::script(&self.params);
-            let recover_script = VaultRecoverClause::script(&self.params);
-
-            // Compute TapLeafHashes
-            let t = TapLeafHash::from_script(&trigger_script, LeafVersion::TapScript);
-            let tr = TapLeafHash::from_script(&trigger_and_revault_script, LeafVersion::TapScript);
-            let r = TapLeafHash::from_script(&recover_script, LeafVersion::TapScript);
-
-            taproot::TapNodeHash::from_node_hashes(
-                tr.into(),
-                taproot::TapNodeHash::from_node_hashes(t.into(), r.into()),
-            )
-            .to_raw_hash()
-            .to_byte_array()
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct Unvaulting {
-        params: UnvaultingParams,
-    }
-    impl Unvaulting {
-        pub fn new(params: UnvaultingParams) -> Self {
-            Self { params }
-        }
-    }
+    define_contract!(
+        Vault,
+        VaultParams,
+        (),
+        taptree: (VaultTriggerAndRevaultClause, (VaultTriggerClause, VaultRecoverClause))
+    );
 
     #[derive(Debug, Clone)]
     struct UnvaultingParams {
@@ -384,20 +388,12 @@ mod tests {
         recover_pk: XOnlyPublicKey,
     }
 
-    impl Contract<UnvaultingParams, UnvaultingState> for Unvaulting {
-        fn get_taptree_merkle_root(&self) -> [u8; 32] {
-            let withdraw_script = UnvaultingWithdrawClause::script(&self.params);
-            let recover_script = UnvaultingRecoverClause::script(&self.params);
-
-            // Compute TapLeafHashes
-            let w = TapLeafHash::from_script(&withdraw_script, LeafVersion::TapScript);
-            let r = TapLeafHash::from_script(&recover_script, LeafVersion::TapScript);
-
-            taproot::TapNodeHash::from_node_hashes(w.into(), r.into())
-                .to_raw_hash()
-                .to_byte_array()
-        }
-    }
+    define_contract!(
+        Unvaulting,
+        UnvaultingParams,
+        UnvaultingState,
+        taptree: (UnvaultingWithdrawClause, UnvaultingRecoverClause)
+    );
 
     // Define the UnvaultingState
     #[derive(Debug)]
