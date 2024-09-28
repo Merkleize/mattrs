@@ -11,6 +11,36 @@ pub const CCV_FLAG_CHECK_INPUT: i32 = -1;
 pub const CCV_FLAG_IGNORE_OUTPUT_AMOUNT: i32 = 1;
 pub const CCV_FLAG_DEDUCT_OUTPUT_AMOUNT: i32 = 2;
 
+#[derive(Debug, Clone)]
+pub enum TapTree {
+    Leaf {
+        name: String,
+        script: ScriptBuf,
+        leaf_version: LeafVersion,
+    },
+    Branch {
+        left: Box<TapTree>,
+        right: Box<TapTree>,
+    },
+}
+
+impl TapTree {
+    pub fn get_root_hash(&self) -> [u8; 32] {
+        match self {
+            TapTree::Leaf {
+                name: _,
+                script,
+                leaf_version,
+            } => *TapLeafHash::from_script(script, *leaf_version).as_byte_array(),
+            TapTree::Branch { left, right } => {
+                let left_hash = TapNodeHash::from_byte_array(left.get_root_hash());
+                let right_hash = TapNodeHash::from_byte_array(right.get_root_hash());
+                *TapNodeHash::from_node_hashes(left_hash, right_hash).as_byte_array()
+            }
+        }
+    }
+}
+
 pub trait ContractParams: Debug + Any + Clone {}
 impl<T: Any + Debug + Clone> ContractParams for T {}
 pub trait ContractState: Debug + Any {
@@ -36,7 +66,7 @@ pub trait ClauseArguments: Any + Debug + Clone {
 }
 
 pub trait Contract<P: ContractParams, S: ContractState = ()> {
-    fn get_taptree_merkle_root(&self) -> [u8; 32];
+    fn get_taptree(&self) -> TapTree;
 }
 
 // The possible types to specify one of the arguments of a clause
@@ -186,7 +216,7 @@ macro_rules! define_contract {
         }
 
         impl Contract<$contract_params, $contract_state> for $contract_struct_name {
-            fn get_taptree_merkle_root(&self) -> [u8; 32] {
+            fn get_taptree(&self) -> TapTree {
                 define_contract!(@process_taptree self, $taptree)
             }
         }
@@ -195,14 +225,22 @@ macro_rules! define_contract {
     // Process a single clause (leaf node)
     (@process_taptree $self:ident, $clause:ident) => {{
         let script = $clause::script(&$self.params);
-        *TapLeafHash::from_script(&script, LeafVersion::TapScript).as_byte_array()
+        let name = $clause::name().to_string();
+        TapTree::Leaf {
+            name,
+            script,
+            leaf_version: LeafVersion::TapScript,
+        }
     }};
 
     // Process a tuple representing a TapTree branch
     (@process_taptree $self:ident, ( $left:tt , $right:tt ) ) => {{
         let left = define_contract!(@process_taptree $self, $left);
         let right = define_contract!(@process_taptree $self, $right);
-        TapNodeHash::from_node_hashes(TapNodeHash::from_byte_array(left), TapNodeHash::from_byte_array(right)).to_byte_array()
+        TapTree::Branch {
+            left: Box::new(left),
+            right: Box::new(right),
+        }
     }};
 }
 
@@ -244,7 +282,7 @@ define_clause!(
             builder.push_opcode(opcodes::OP_0)
         };
         let builder = builder
-            .push_slice(unvaulting.get_taptree_merkle_root())
+            .push_slice(unvaulting.get_taptree().get_root_hash())
             .push_int(0)
             .push_opcode(OP_CHECKCONTRACTVERIFY.into())
             .push_x_only_key(&params.unvault_pk)
@@ -300,7 +338,7 @@ define_clause!(
             builder.push_opcode(opcodes::OP_0)
         };
         let builder = builder
-            .push_slice(unvaulting.get_taptree_merkle_root())
+            .push_slice(unvaulting.get_taptree().get_root_hash())
             .push_int(0)
             .push_opcode(OP_CHECKCONTRACTVERIFY.into())
             .push_x_only_key(&params.unvault_pk)
