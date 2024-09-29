@@ -433,7 +433,7 @@ define_contract!(
         let nums_pk = XOnlyPublicKey::from_slice(&NUMS_KEY).expect("Valid default key");
         params.alternate_pk.unwrap_or(nums_pk)
     },
-    taptree: (VaultTriggerAndRevaultClause, (VaultTriggerClause, VaultRecoverClause))
+    taptree: (VaultTriggerClause, (VaultTriggerAndRevaultClause, VaultRecoverClause))
 );
 
 #[derive(Debug, Clone)]
@@ -473,7 +473,10 @@ define_clause!(
         ctv_hash: [u8; 32] => ArgSpec::Bytes,
     },
     script(params) {
-        let builder = Builder::new().push_int(-1);
+        let builder = Builder::new()
+            .push_opcode(opcodes::all::OP_DUP);
+
+        let builder = builder.push_int(-1);
         let builder = if let Some(pk) = params.alternate_pk {
             builder.push_x_only_key(&pk)
         } else {
@@ -499,7 +502,7 @@ define_clause!(
 define_clause!(
     UnvaultingRecoverClause,
     UnvaultingRecoverClauseArgs,
-    "Recover",
+    "recover",
     UnvaultingParams,
     UnvaultingState,
     args {
@@ -534,7 +537,42 @@ define_contract!(
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
+    use bitcoin::{bip32::Xpriv, key::Secp256k1, Address, KnownHrp};
+
     use super::*;
 
-    // TODO
+    #[test]
+    fn test_vault_address() {
+        let secp = Secp256k1::new();
+
+        let unvault_privkey = Xpriv::from_str(
+            "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
+        ).unwrap();
+        let unvault_pubkey = unvault_privkey.to_priv().public_key(&secp);
+
+        let recover_privkey = Xpriv::from_str(
+            "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
+        ).unwrap();
+        let recover_pubkey = recover_privkey.to_priv().public_key(&secp);
+
+        let vault = Vault::new(VaultParams {
+            alternate_pk: None,
+            spend_delay: 10,
+            recover_pk: recover_pubkey.into(),
+            unvault_pk: unvault_pubkey.into(),
+        });
+
+        let internal_key = vault.get_naked_internal_key();
+        let taptree_hash = TapNodeHash::from_byte_array(vault.get_taptree().get_root_hash());
+
+        let taproot_address =
+            Address::p2tr(&secp, internal_key, Some(taptree_hash), KnownHrp::Regtest);
+
+        assert_eq!(
+            taproot_address.to_string(),
+            "bcrt1plkh3clum5e2rynql75ufxxqxw898arfumqnua60hwr76q4y0jeksu88u3m"
+        );
+    }
 }
