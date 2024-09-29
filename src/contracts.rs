@@ -86,6 +86,7 @@ pub trait ClauseArguments: Any + Debug + Clone {
 
 pub trait Contract<P: ContractParams, S: ContractState = ()> {
     fn get_taptree(&self) -> TapTree;
+    fn get_naked_internal_key(&self) -> XOnlyPublicKey;
 }
 
 // The possible types to specify one of the arguments of a clause
@@ -221,16 +222,22 @@ macro_rules! define_contract {
         $contract_struct_name:ident,
         $contract_params:ty,
         $contract_state:ty,
+        $( get_pk($params_name:ident) $get_pk_block:block, )?
         taptree: $taptree:tt
     ) => {
         #[derive(Debug, Clone)]
         pub struct $contract_struct_name {
             pub params: $contract_params,
+            pub pk: XOnlyPublicKey,
         }
 
         impl $contract_struct_name {
             pub fn new(params: $contract_params) -> Self {
-                Self { params }
+                let pk = define_contract!(@get_pk params $( get_pk($params_name): $get_pk_block )? );
+                Self {
+                    params,
+                    pk,
+                }
             }
         }
 
@@ -238,7 +245,22 @@ macro_rules! define_contract {
             fn get_taptree(&self) -> TapTree {
                 define_contract!(@process_taptree self, $taptree)
             }
+
+            fn get_naked_internal_key(&self) -> XOnlyPublicKey {
+                self.pk
+            }
         }
+    };
+
+    // Helper to process the optional get_pk block
+    (@get_pk $params:ident get_pk($params_name:ident): $get_pk_block:block ) => {{
+        let $params_name = &$params;
+        $get_pk_block
+    }};
+
+    // Default implementation if get_pk is omitted
+    (@get_pk $params:ident) => {
+        XOnlyPublicKey::from_slice(&NUMS_KEY).expect("Valid default key")
     };
 
     // Process a single clause (leaf node)
@@ -407,6 +429,10 @@ define_contract!(
     Vault,
     VaultParams,
     (),
+    get_pk(params) {
+        let nums_pk = XOnlyPublicKey::from_slice(&NUMS_KEY).expect("Valid default key");
+        params.alternate_pk.unwrap_or(nums_pk)
+    },
     taptree: (VaultTriggerAndRevaultClause, (VaultTriggerClause, VaultRecoverClause))
 );
 
@@ -499,6 +525,10 @@ define_contract!(
     Unvaulting,
     UnvaultingParams,
     UnvaultingState,
+    get_pk(params) {
+        let nums_pk = XOnlyPublicKey::from_slice(&NUMS_KEY).expect("Valid default key");
+        params.alternate_pk.unwrap_or(nums_pk)
+    },
     taptree: (UnvaultingWithdrawClause, UnvaultingRecoverClause)
 );
 
