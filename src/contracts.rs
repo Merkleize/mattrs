@@ -159,6 +159,7 @@ macro_rules! ccv_list {
         None
     };
     (@parse_behaviour deduct) => { CcvClauseOutputAmountBehaviour::DeductOutput };
+    (@parse_behaviour ignore) => { CcvClauseOutputAmountBehaviour::IgnoreOutput };
     (@parse_behaviour preserve) => { CcvClauseOutputAmountBehaviour::PreserveOutput };
 }
 
