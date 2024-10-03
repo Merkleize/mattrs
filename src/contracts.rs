@@ -59,11 +59,24 @@ impl TapTree {
             }
         }
     }
+
+    pub fn get_clauses(&self) -> Vec<String> {
+        self.get_leaves().iter().map(|l| l.name.clone()).collect()
+    }
 }
 
-pub trait ContractParams: Debug + Any + Clone {}
-impl<T: Any + Debug + Clone> ContractParams for T {}
+pub trait ContractParams: Debug + Any {
+    fn as_any(&self) -> &dyn Any;
+}
+impl<T: Any + Debug> ContractParams for T {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 pub trait ContractState: Debug + Any {
+    fn as_any(&self) -> &dyn Any;
+
     /// Encodes the state of an instance into the 32-byte data format that can be encoded in the UTXO.
     fn encode(&self) -> [u8; 32] {
         panic!("Not implemented for this State")
@@ -79,15 +92,38 @@ pub trait ContractState: Debug + Any {
     }
 }
 
-impl<T: Any + Debug + Clone> ContractState for T {}
-
-pub trait ClauseArguments: Any + Debug + Clone {
-    fn as_arg_specs() -> ArgSpecs;
+impl ContractState for () {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
-pub trait Contract<P: ContractParams, S: ContractState = ()> {
+pub trait ClauseArguments: Any + Debug {
+    fn as_any(&self) -> &dyn Any;
+
+    fn as_arg_specs() -> ArgSpecs
+    where
+        Self: Sized;
+}
+
+pub trait Contract: Any + Debug {
+    fn is_augmented(&self) -> bool;
     fn get_taptree(&self) -> TapTree;
     fn get_naked_internal_key(&self) -> XOnlyPublicKey;
+
+    fn get_clauses(&self) -> Vec<String> {
+        self.get_taptree().get_clauses()
+    }
+
+    fn get_params(&self) -> Box<&dyn ContractParams>;
+
+    fn next_outputs(
+        &self,
+        clause_name: &str,
+        params: &dyn ContractParams,
+        args: &dyn ClauseArguments,
+        state: &dyn ContractState,
+    ) -> ClauseOutputs;
 }
 
 // The possible types to specify one of the arguments of a clause
@@ -113,8 +149,8 @@ pub enum CcvClauseOutputAmountBehaviour {
 #[derive(Debug)]
 pub struct CcvOutputDescription {
     pub n: i32,
-    pub next_contract: Box<dyn Any>,
-    pub next_state: Option<Box<dyn Any>>,
+    pub next_contract: Box<dyn Contract>,
+    pub next_state: Option<Box<dyn ContractState>>,
     pub behaviour: CcvClauseOutputAmountBehaviour,
 }
 
@@ -124,11 +160,14 @@ pub enum ClauseOutputs {
 }
 
 // Define the Clause trait
-pub trait Clause<P: ContractParams, A: ClauseArguments, S: ContractState = ()>:
-    Debug + Clone
-{
+pub trait Clause: Debug + Clone {
+    type Params: ContractParams;
+    type Args: ClauseArguments;
+    type State: ContractState;
+
     fn name() -> String;
-    fn script(params: &P) -> ScriptBuf;
+    fn script(params: &Self::Params) -> ScriptBuf;
     fn arg_specs() -> ArgSpecs;
-    fn next_outputs(params: &P, args: &A, state: &S) -> ClauseOutputs;
+    fn next_outputs(params: &Self::Params, args: &Self::Args, state: &Self::State)
+        -> ClauseOutputs;
 }

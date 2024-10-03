@@ -149,8 +149,7 @@ define_clause!(
 
 define_contract!(
     Vault,
-    VaultParams,
-    (),
+    params: VaultParams,
     get_pk(params) {
         let nums_pk = XOnlyPublicKey::from_slice(&NUMS_KEY).expect("Valid default key");
         params.alternate_pk.unwrap_or(nums_pk)
@@ -178,6 +177,11 @@ impl UnvaultingState {
 }
 
 impl ContractState for UnvaultingState {
+    // TODO: implement a define_state macro to hide the boilerplate
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn encode(&self) -> [u8; 32] {
         self.ctv_hash
     }
@@ -248,8 +252,8 @@ define_clause!(
 
 define_contract!(
     Unvaulting,
-    UnvaultingParams,
-    UnvaultingState,
+    params: UnvaultingParams,
+    state: UnvaultingState,
     get_pk(params) {
         let nums_pk = XOnlyPublicKey::from_slice(&NUMS_KEY).expect("Valid default key");
         params.alternate_pk.unwrap_or(nums_pk)

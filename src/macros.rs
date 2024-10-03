@@ -48,6 +48,10 @@ macro_rules! define_clause {
         }
 
         impl $crate::contracts::ClauseArguments for $clause_args_struct_name {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
             fn as_arg_specs() -> $crate::contracts::ArgSpecs {
                 vec![
                     $(
@@ -57,12 +61,16 @@ macro_rules! define_clause {
             }
         }
 
-        impl $crate::contracts::Clause<$contract_params, $clause_args_struct_name, $contract_state> for $clause_struct_name {
+        impl $crate::contracts::Clause for $clause_struct_name {
+            type Params = $contract_params;
+            type Args = $clause_args_struct_name;
+            type State = $contract_state;
+
             fn name() -> String {
                 $clause_string_name.into()
             }
 
-            fn script($script_params: &$contract_params) -> bitcoin::ScriptBuf {
+            fn script($script_params: &Self::Params) -> bitcoin::ScriptBuf {
                 $script_body
             }
 
@@ -71,9 +79,9 @@ macro_rules! define_clause {
             }
 
             fn next_outputs(
-                $no_params: &$contract_params,
-                $no_args: &$clause_args_struct_name,
-                $no_state: &$contract_state,
+                $no_params: &Self::Params,
+                $no_args: &Self::Args,
+                $no_state: &Self::State,
             ) -> $crate::contracts::ClauseOutputs {
                 $next_outputs_body
             }
@@ -83,11 +91,12 @@ macro_rules! define_clause {
 
 #[macro_export]
 macro_rules! define_contract {
+    // Case when 'state' is provided explicitly
     (
         $contract_struct_name:ident,
-        $contract_params:ty,
-        $contract_state:ty,
-        $( get_pk($params_name:ident) $get_pk_block:block, )?
+        params: $contract_params:ty,
+        state: $contract_state:ty,
+        $(get_pk($params_name:ident) $get_pk_block:block,)?
         taptree: $taptree:tt
     ) => {
         #[derive(Debug, Clone)]
@@ -98,15 +107,12 @@ macro_rules! define_contract {
 
         impl $contract_struct_name {
             pub fn new(params: $contract_params) -> Self {
-                let pk = define_contract!(@get_pk params $( get_pk($params_name): $get_pk_block )? );
-                Self {
-                    params,
-                    pk,
-                }
+                let pk = define_contract!(@get_pk params $(get_pk($params_name): $get_pk_block)?);
+                Self { params, pk }
             }
         }
 
-        impl $crate::contracts::Contract<$contract_params, $contract_state> for $contract_struct_name {
+        impl $crate::contracts::Contract for $contract_struct_name {
             fn get_taptree(&self) -> $crate::contracts::TapTree {
                 define_contract!(@process_taptree self, $taptree)
             }
@@ -114,11 +120,78 @@ macro_rules! define_contract {
             fn get_naked_internal_key(&self) -> XOnlyPublicKey {
                 self.pk
             }
+
+            fn is_augmented(&self) -> bool {
+                true
+            }
+
+            fn get_params(&self) -> Box<&dyn $crate::contracts::ContractParams> {
+                Box::new(&self.params)
+            }
+
+            fn next_outputs(
+                &self,
+                clause_name: &str,
+                params: &dyn $crate::contracts::ContractParams,
+                args: &dyn $crate::contracts::ClauseArguments,
+                state: &dyn $crate::contracts::ContractState,
+            ) -> $crate::contracts::ClauseOutputs {
+                define_contract!(@impl_next_outputs self, clause_name, params, args, state, $taptree)
+            }
+        }
+    };
+
+    // Case when 'state' is omitted; default to '()'
+    (
+        $contract_struct_name:ident,
+        params: $contract_params:ty,
+        $(get_pk($params_name:ident) $get_pk_block:block,)?
+        taptree: $taptree:tt
+    ) => {
+        #[derive(Debug, Clone)]
+        pub struct $contract_struct_name {
+            pub params: $contract_params,
+            pub pk: XOnlyPublicKey,
+        }
+
+        impl $contract_struct_name {
+            pub fn new(params: $contract_params) -> Self {
+                let pk = define_contract!(@get_pk params $(get_pk($params_name): $get_pk_block)?);
+                Self { params, pk }
+            }
+        }
+
+        impl $crate::contracts::Contract for $contract_struct_name {
+            fn get_taptree(&self) -> $crate::contracts::TapTree {
+                define_contract!(@process_taptree self, $taptree)
+            }
+
+            fn get_naked_internal_key(&self) -> XOnlyPublicKey {
+                self.pk
+            }
+
+            fn is_augmented(&self) -> bool {
+                false
+            }
+
+            fn get_params(&self) -> Box<&dyn $crate::contracts::ContractParams> {
+                Box::new(&self.params)
+            }
+
+            fn next_outputs(
+                &self,
+                clause_name: &str,
+                params: &dyn $crate::contracts::ContractParams,
+                args: &dyn $crate::contracts::ClauseArguments,
+                state: &dyn $crate::contracts::ContractState,
+            ) -> $crate::contracts::ClauseOutputs {
+                define_contract!(@impl_next_outputs self, clause_name, params, args, state, $taptree)
+            }
         }
     };
 
     // Helper to process the optional get_pk block
-    (@get_pk $params:ident get_pk($params_name:ident): $get_pk_block:block ) => {{
+    (@get_pk $params:ident get_pk($params_name:ident): $get_pk_block:block) => {{
         let $params_name = &$params;
         $get_pk_block
     }};
@@ -140,12 +213,58 @@ macro_rules! define_contract {
     }};
 
     // Process a tuple representing a TapTree branch
-    (@process_taptree $self:ident, ( $left:tt , $right:tt ) ) => {{
+    (@process_taptree $self:ident, ($left:tt, $right:tt)) => {{
         let left = define_contract!(@process_taptree $self, $left);
         let right = define_contract!(@process_taptree $self, $right);
         $crate::contracts::TapTree::Branch {
             left: Box::new(left),
             right: Box::new(right),
+        }
+    }};
+
+    // Implement next_outputs by traversing the TapTree
+    (@impl_next_outputs $self:ident, $clause_name:ident, $params:ident, $args:ident, $state:ident, $clause:ident) => {{
+        if $clause_name == $clause::name() {
+            let specific_params = $params.downcast_ref::<<$clause as $crate::contracts::Clause>::Params>()
+                .expect("Wrong params type");
+            let specific_args = $args.downcast_ref::<<$clause as $crate::contracts::Clause>::Args>()
+                .expect("Wrong args type");
+            let specific_state = $state.downcast_ref::<<$clause as $crate::contracts::Clause>::State>()
+                .expect("Wrong state type");
+            $clause::next_outputs(specific_params, specific_args, specific_state)
+        } else {
+            panic!("Clause not found: {}", $clause_name);
+        }
+    }};
+
+    (@impl_next_outputs $self:ident, $clause_name:ident, $params:ident, $args:ident, $state:ident, ($left:tt, $right:tt)) => {{
+        match define_contract!(@impl_next_outputs_option $self, $clause_name, $params, $args, $state, $left) {
+            Some(outputs) => outputs,
+            None => match define_contract!(@impl_next_outputs_option $self, $clause_name, $params, $args, $state, $right) {
+                Some(outputs) => outputs,
+                None => panic!("Clause not found: {}", $clause_name),
+            },
+        }
+    }};
+
+    (@impl_next_outputs_option $self:ident, $clause_name:ident, $params:ident, $args:ident, $state:ident, $clause:ident) => {{
+        if $clause_name == $clause::name() {
+            let specific_params = $params.as_any().downcast_ref::<<$clause as $crate::contracts::Clause>::Params>()
+                .expect("Wrong params type");
+            let specific_args = $args.as_any().downcast_ref::<<$clause as $crate::contracts::Clause>::Args>()
+                .expect("Wrong args type");
+            let specific_state = $state.as_any().downcast_ref::<<$clause as $crate::contracts::Clause>::State>()
+                .expect("Wrong state type");
+            Some($clause::next_outputs(specific_params, specific_args, specific_state))
+        } else {
+            None
+        }
+    }};
+
+    (@impl_next_outputs_option $self:ident, $clause_name:ident, $params:ident, $args:ident, $state:ident, ($left:tt, $right:tt)) => {{
+        match define_contract!(@impl_next_outputs_option $self, $clause_name, $params, $args, $state, $left) {
+            Some(outputs) => Some(outputs),
+            None => define_contract!(@impl_next_outputs_option $self, $clause_name, $params, $args, $state, $right),
         }
     }};
 }
