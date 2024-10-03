@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Debug;
 
 use bitcoin::hashes::Hash;
@@ -68,11 +69,6 @@ impl TapTree {
 pub trait ContractParams: Debug + Any {
     fn as_any(&self) -> &dyn Any;
 }
-impl<T: Any + Debug> ContractParams for T {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
 
 pub trait ContractState: Debug + Any {
     fn as_any(&self) -> &dyn Any;
@@ -101,9 +97,8 @@ impl ContractState for () {
 pub trait ClauseArguments: Any + Debug {
     fn as_any(&self) -> &dyn Any;
 
-    fn as_arg_specs() -> ArgSpecs
-    where
-        Self: Sized;
+    fn arg_names(&self) -> Vec<String>;
+    fn as_hashmap(&self, params: &dyn ContractParams) -> HashMap<String, Vec<u8>>;
 }
 
 pub trait Contract: Any + Debug {
@@ -124,17 +119,23 @@ pub trait Contract: Any + Debug {
         args: &dyn ClauseArguments,
         state: &dyn ContractState,
     ) -> ClauseOutputs;
+
+    fn stack_elements_from_args(
+        &self,
+        clause_name: &str,
+        args: &dyn ClauseArguments,
+    ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>>;
 }
 
-// The possible types to specify one of the arguments of a clause
-pub enum ArgSpec {
-    Int,
-    Bytes,
-    Signature { pk: XOnlyPublicKey },
+// encoders
+pub fn encode_bytes<A: AsRef<[u8]>, P: ?Sized>(arg: &A, _params: &P) -> Vec<u8> {
+    arg.as_ref().to_vec()
 }
 
-// Each argument has a name and a type, and they are ordered
-pub type ArgSpecs = Vec<(String, ArgSpec)>;
+pub fn encode_i32_be<A: Into<i32> + Copy, P: ?Sized>(arg: &A, _params: &P) -> Vec<u8> {
+    let value: i32 = (*arg).into();
+    value.to_be_bytes().to_vec()
+}
 
 // Define the ClauseOutputAmountBehaviour enum
 #[derive(Debug, PartialEq)]
@@ -167,7 +168,24 @@ pub trait Clause: Debug + Clone {
 
     fn name() -> String;
     fn script(params: &Self::Params) -> ScriptBuf;
-    fn arg_specs() -> ArgSpecs;
     fn next_outputs(params: &Self::Params, args: &Self::Args, state: &Self::State)
         -> ClauseOutputs;
+    fn stack_elements_from_args(
+        params: &Self::Params,
+        args: &Self::Args,
+    ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+        let args_map = args.as_hashmap(params);
+        let arg_names = args.arg_names();
+
+        let mut stack_elements = Vec::new();
+        for arg_name in arg_names {
+            match args_map.get(&arg_name) {
+                Some(arg) => stack_elements.push(arg.clone()),
+                None => {
+                    return Err(format!("Argument {} not found in args_map", arg_name).into());
+                }
+            }
+        }
+        Ok(stack_elements)
+    }
 }

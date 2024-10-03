@@ -4,19 +4,19 @@ use bitcoin::{opcodes, script::Builder, XOnlyPublicKey};
 use crate::{
     ccv_list,
     contracts::{
-        ArgSpec, Clause, ClauseArguments, Contract, ContractState, CCV_FLAG_CHECK_INPUT,
-        CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY, OP_CHECKCONTRACTVERIFY, OP_CHECKTEMPLATEVERIFY,
+        encode_bytes, encode_i32_be, Clause, Contract, ContractParams, ContractState,
+        CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY, OP_CHECKCONTRACTVERIFY,
+        OP_CHECKTEMPLATEVERIFY,
     },
-    define_clause, define_contract,
+    define_clause, define_contract, define_params,
 };
 
-#[derive(Debug, Clone)]
-pub struct VaultParams {
-    pub alternate_pk: Option<XOnlyPublicKey>,
-    pub spend_delay: u32,
-    pub recover_pk: XOnlyPublicKey,
-    pub unvault_pk: XOnlyPublicKey,
-}
+define_params!(VaultParams {
+    alternate_pk: Option<XOnlyPublicKey>,
+    spend_delay: u32,
+    recover_pk: XOnlyPublicKey,
+    unvault_pk: XOnlyPublicKey,
+});
 
 // clause: trigger
 
@@ -27,9 +27,9 @@ define_clause!(
     VaultParams,
     (),
     args {
-        sig: [u8; 64] => ArgSpec::Bytes,
-        ctv_hash: [u8; 32] => ArgSpec::Bytes,
-        out_i: i32 => ArgSpec::Int,
+        sig: [u8; 64] => encode_bytes,
+        ctv_hash: [u8; 32] => encode_bytes,
+        out_i: i32 => encode_i32_be,
     },
     script(params) {
         let unvaulting = Unvaulting::new(UnvaultingParams {
@@ -75,10 +75,10 @@ define_clause!(
     VaultParams,
     (),
     args {
-        sig: [u8; 64] => ArgSpec::Bytes,
-        ctv_hash: [u8; 32] => ArgSpec::Bytes,
-        out_i: i32 => ArgSpec::Int,
-        revault_out_i: i32 => ArgSpec::Int,
+        sig: [u8; 64] => encode_bytes,
+        ctv_hash: [u8; 32] => encode_bytes,
+        out_i: i32 => encode_i32_be,
+        revault_out_i: i32 => encode_i32_be,
     },
     script(params) {
         let unvaulting = Unvaulting::new(UnvaultingParams {
@@ -157,12 +157,11 @@ define_contract!(
     taptree: (VaultTriggerClause, (VaultTriggerAndRevaultClause, VaultRecoverClause))
 );
 
-#[derive(Debug, Clone)]
-pub struct UnvaultingParams {
-    pub alternate_pk: Option<XOnlyPublicKey>,
-    pub spend_delay: u32,
-    pub recover_pk: XOnlyPublicKey,
-}
+define_params!(UnvaultingParams {
+    alternate_pk: Option<XOnlyPublicKey>,
+    spend_delay: u32,
+    recover_pk: XOnlyPublicKey,
+});
 
 // Define the UnvaultingState
 #[derive(Debug)]
@@ -196,7 +195,7 @@ define_clause!(
     UnvaultingParams,
     UnvaultingState,
     args {
-        ctv_hash: [u8; 32] => ArgSpec::Bytes,
+        ctv_hash: [u8; 32] => encode_bytes,
     },
     script(params) {
         let builder = Builder::new()
@@ -232,7 +231,7 @@ define_clause!(
     UnvaultingParams,
     UnvaultingState,
     args {
-        out_i: i32 => ArgSpec::Int,
+        out_i: i32 => encode_i32_be,
     },
     script(params) {
         Builder::new()

@@ -323,6 +323,27 @@ impl<'a> ContractManager<'a> {
         Ok(rc_inst)
     }
 
+    pub fn get_spend_witness(
+        &self,
+        instance: &ContractInstance,
+        clause_name: &str,
+        args: &dyn ClauseArguments,
+    ) -> Witness {
+        let contract = &instance.contract;
+
+        let leaves = contract.get_taptree().get_leaves();
+        let clause = leaves
+            .iter()
+            .find(|&leaf| leaf.name == *clause_name)
+            .expect("Clause not found");
+
+        let mut wit: Vec<Vec<u8>> = Vec::new();
+
+        todo!();
+
+        Witness::from(wit)
+    }
+
     pub fn create_spend_tx<I>(
         &self,
         spends: I,
@@ -334,7 +355,7 @@ impl<'a> ContractManager<'a> {
             Item = (
                 Rc<RefCell<ContractInstance>>,
                 String,
-                Box<dyn ClauseArguments>,
+                &'a dyn ClauseArguments,
             ),
         >,
     {
@@ -344,11 +365,8 @@ impl<'a> ContractManager<'a> {
         }
 
         // 2. Normalize spends to a Vec for indexing
-        let spends_vec: Vec<(
-            Rc<RefCell<ContractInstance>>,
-            String,
-            Box<dyn ClauseArguments>,
-        )> = spends.into_iter().collect();
+        let spends_vec: Vec<(Rc<RefCell<ContractInstance>>, String, &dyn ClauseArguments)> =
+            spends.into_iter().collect();
 
         // 3. Initialize the transaction
         let mut tx = Transaction {
@@ -393,8 +411,6 @@ impl<'a> ContractManager<'a> {
 
             leaf_scripts.insert(input_index, clause.clone().script.clone());
 
-            let x = args;
-
             // Generate next outputs based on the clause
             // if instance.state.as_ref() is None, we pass () as the state
             let state = if let Some(st) = instance.state.as_ref() {
@@ -438,8 +454,8 @@ impl<'a> ContractManager<'a> {
 
                         // TODO: the logic to compute the final script should move elsewhere
                         let secp = Secp256k1::new();
-                        let naked_internal_key = contract.get_naked_internal_key();
-                        let taptree_hash = contract.get_taptree().get_root_hash();
+                        let naked_internal_key = out_contract.get_naked_internal_key();
+                        let taptree_hash = out_contract.get_taptree().get_root_hash();
                         let internal_pubkey = if let Some(next_state_hash) = next_state_hash {
                             let (internal_pk, _) = naked_internal_key
                                 .add_tweak(&secp, &Scalar::from_be_bytes(next_state_hash).unwrap())
@@ -572,7 +588,7 @@ impl<'a> ContractManager<'a> {
     pub async fn spend_instance(
         &mut self,
         instance: Rc<RefCell<ContractInstance>>,
-        clause: &str,
+        clause_name: &str,
         clause_args: Box<dyn ClauseArguments>,
         outputs: Option<Vec<TxOut>>,
         // TODO: need to add the signing logic
@@ -595,8 +611,8 @@ impl<'a> ContractManager<'a> {
         // 3. Construct the spend transaction
         // This will depend on how your Contract trait defines transaction creation
         // For example purposes, we'll assume there's a method to create the spend transaction
-        let spends = vec![(Rc::clone(&instance), clause.to_string(), clause_args)];
-        let (spend_tx, sighashes) = self.create_spend_tx(spends, HashMap::new(), outputs)?;
+        let spends = vec![(Rc::clone(&instance), clause_name.to_string(), &*clause_args)];
+        let (mut spend_tx, sighashes) = self.create_spend_tx(spends, HashMap::new(), outputs)?;
 
         if sighashes.len() != 1 {
             return Err("Expected exactly one sighash".into());
@@ -606,6 +622,7 @@ impl<'a> ContractManager<'a> {
         println!("{:?}", spend_tx);
         println!("{:?}", sighash);
 
+        spend_tx.input[0].witness = self.get_spend_witness(&inst, clause_name, &*clause_args);
         // TODO: how to add signatures?
 
         // TODO: compute correct witness

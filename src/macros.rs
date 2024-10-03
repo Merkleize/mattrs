@@ -28,6 +28,26 @@ macro_rules! ccv_list {
 }
 
 #[macro_export]
+macro_rules! define_params {
+    (
+        $params_struct_name:ident {
+            $( $field_name:ident : $field_type:ty ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, Clone)]
+        pub struct $params_struct_name {
+            $( pub $field_name : $field_type ),*
+        }
+
+        impl $crate::contracts::ContractParams for $params_struct_name {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+    }
+}
+
+#[macro_export]
 macro_rules! define_clause {
     (
         $clause_struct_name:ident,
@@ -35,7 +55,7 @@ macro_rules! define_clause {
         $clause_string_name:expr,
         $contract_params:ty,
         $contract_state:ty,
-        args { $( $arg_name:ident : $arg_type:ty => $arg_spec:expr ),* $(,)? },
+        args { $( $arg_name:ident : $arg_type:ty => $encoder:expr ),* $(,)? },
         script($script_params:tt) $script_body:block,
         next_outputs($no_params:tt,$no_args:tt,$no_state:tt) $next_outputs_body:block
     ) => {
@@ -52,12 +72,21 @@ macro_rules! define_clause {
                 self
             }
 
-            fn as_arg_specs() -> $crate::contracts::ArgSpecs {
+            fn arg_names(&self) -> Vec<String> {
                 vec![
-                    $(
-                        (stringify!($arg_name).to_string(), $arg_spec),
-                    )*
+                    $( stringify!($arg_name).to_string() ),*
                 ]
+            }
+
+            fn as_hashmap(&self, params: &dyn $crate::contracts::ContractParams) -> std::collections::HashMap<String, Vec<u8>> {
+                let mut map = std::collections::HashMap::new();
+                $(
+                    map.insert(
+                        stringify!($arg_name).to_string(),
+                        ($encoder)(&self.$arg_name, params),
+                    );
+                )*
+                map
             }
         }
 
@@ -72,10 +101,6 @@ macro_rules! define_clause {
 
             fn script($script_params: &Self::Params) -> bitcoin::ScriptBuf {
                 $script_body
-            }
-
-            fn arg_specs() -> $crate::contracts::ArgSpecs {
-                <$clause_args_struct_name>::as_arg_specs()
             }
 
             fn next_outputs(
@@ -138,6 +163,14 @@ macro_rules! define_contract {
             ) -> $crate::contracts::ClauseOutputs {
                 define_contract!(@impl_next_outputs self, clause_name, params, args, state, $taptree)
             }
+
+            fn stack_elements_from_args(
+                &self,
+                clause_name: &str,
+                args: &dyn $crate::contracts::ClauseArguments,
+            ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+                define_contract!(@impl_stack_elements_from_args self, clause_name, args, $taptree)
+            }
         }
     };
 
@@ -187,6 +220,14 @@ macro_rules! define_contract {
             ) -> $crate::contracts::ClauseOutputs {
                 define_contract!(@impl_next_outputs self, clause_name, params, args, state, $taptree)
             }
+
+            fn stack_elements_from_args(
+                &self,
+                clause_name: &str,
+                args: &dyn $crate::contracts::ClauseArguments,
+            ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+                define_contract!(@impl_stack_elements_from_args self, clause_name, args, $taptree)
+            }
         }
     };
 
@@ -225,11 +266,11 @@ macro_rules! define_contract {
     // Implement next_outputs by traversing the TapTree
     (@impl_next_outputs $self:ident, $clause_name:ident, $params:ident, $args:ident, $state:ident, $clause:ident) => {{
         if $clause_name == $clause::name() {
-            let specific_params = $params.downcast_ref::<<$clause as $crate::contracts::Clause>::Params>()
+            let specific_params = $params.as_any().downcast_ref::<<$clause as $crate::contracts::Clause>::Params>()
                 .expect("Wrong params type");
-            let specific_args = $args.downcast_ref::<<$clause as $crate::contracts::Clause>::Args>()
+            let specific_args = $args.as_any().downcast_ref::<<$clause as $crate::contracts::Clause>::Args>()
                 .expect("Wrong args type");
-            let specific_state = $state.downcast_ref::<<$clause as $crate::contracts::Clause>::State>()
+            let specific_state = $state.as_any().downcast_ref::<<$clause as $crate::contracts::Clause>::State>()
                 .expect("Wrong state type");
             $clause::next_outputs(specific_params, specific_args, specific_state)
         } else {
@@ -265,6 +306,33 @@ macro_rules! define_contract {
         match define_contract!(@impl_next_outputs_option $self, $clause_name, $params, $args, $state, $left) {
             Some(outputs) => Some(outputs),
             None => define_contract!(@impl_next_outputs_option $self, $clause_name, $params, $args, $state, $right),
+        }
+    }};
+
+    // Implement stack_elements_from_args by traversing the TapTree
+    (@impl_stack_elements_from_args $self:ident, $clause_name:ident, $args:ident, $taptree:tt) => {{
+        match define_contract!(@impl_stack_elements_from_args_option $self, $clause_name, $args, $taptree) {
+            Some(result) => result,
+            None => Err(format!("Clause not found: {}", $clause_name).into()),
+        }
+    }};
+
+    (@impl_stack_elements_from_args_option $self:ident, $clause_name:ident, $args:ident, $clause:ident) => {{
+        if $clause_name == $clause::name() {
+            let specific_params = $self.params.as_any().downcast_ref::<<$clause as $crate::contracts::Clause>::Params>()
+                .expect("Wrong params type");
+            let specific_args = $args.as_any().downcast_ref::<<$clause as $crate::contracts::Clause>::Args>()
+                .expect("Wrong args type");
+            Some($clause::stack_elements_from_args(specific_params, specific_args))
+        } else {
+            None
+        }
+    }};
+
+    (@impl_stack_elements_from_args_option $self:ident, $clause_name:ident, $args:ident, ($left:tt, $right:tt)) => {{
+        match define_contract!(@impl_stack_elements_from_args_option $self, $clause_name, $args, $left) {
+            Some(result) => Some(result),
+            None => define_contract!(@impl_stack_elements_from_args_option $self, $clause_name, $args, $right),
         }
     }};
 }
