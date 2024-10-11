@@ -249,7 +249,6 @@ macro_rules! define_contract {
         $crate::contracts::TapTree::Leaf($crate::contracts::TapLeaf {
             name,
             script,
-            leaf_version: bitcoin::taproot::LeafVersion::TapScript,
         })
     }};
 

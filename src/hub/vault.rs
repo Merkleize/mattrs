@@ -4,7 +4,7 @@ use bitcoin::{opcodes, script::Builder, XOnlyPublicKey};
 use crate::{
     ccv_list,
     contracts::{
-        encode_bytes, encode_i32_be, Clause, Contract, ContractParams, ContractState,
+        encode_bytes, encode_i32, Clause, Contract, ContractParams, ContractState,
         CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY, OP_CHECKCONTRACTVERIFY,
         OP_CHECKTEMPLATEVERIFY,
     },
@@ -29,7 +29,7 @@ define_clause!(
     args {
         sig: [u8; 64] => encode_bytes,
         ctv_hash: [u8; 32] => encode_bytes,
-        out_i: i32 => encode_i32_be,
+        out_i: i32 => encode_i32,
     },
     script(params) {
         let unvaulting = Unvaulting::new(UnvaultingParams {
@@ -77,8 +77,8 @@ define_clause!(
     args {
         sig: [u8; 64] => encode_bytes,
         ctv_hash: [u8; 32] => encode_bytes,
-        out_i: i32 => encode_i32_be,
-        revault_out_i: i32 => encode_i32_be,
+        out_i: i32 => encode_i32,
+        revault_out_i: i32 => encode_i32,
     },
     script(params) {
         let unvaulting = Unvaulting::new(UnvaultingParams {
@@ -231,7 +231,7 @@ define_clause!(
     UnvaultingParams,
     UnvaultingState,
     args {
-        out_i: i32 => encode_i32_be,
+        out_i: i32 => encode_i32,
     },
     script(params) {
         Builder::new()

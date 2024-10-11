@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, thread::sleep, time::Dura
 use bitcoin::{
     hashes::Hash, key::Secp256k1, secp256k1::Scalar, sighash::SighashCache, taproot::LeafVersion,
     transaction::Version, Address, Amount, KnownHrp, OutPoint, Script, ScriptBuf, Sequence,
-    TapLeafHash, TapNodeHash, Transaction, TxIn, TxOut, Txid, Witness,
+    TapLeafHash, TapNodeHash, Transaction, TxIn, TxOut, Txid, Witness, XOnlyPublicKey,
 };
 use bitcoincore_rpc::{Client, RpcApi};
 
@@ -191,17 +191,11 @@ impl ContractInstance {
         ScriptBuf::from(self.get_address())
     }
 
-    pub fn get_address(&self) -> Address {
-        if self.contract.is_augmented() && self.state_hash.is_none() {
-            panic!("Can't get the address of a stateful contract if the state is not set")
-        }
-
+    pub fn get_internal_pubkey(&self) -> XOnlyPublicKey {
         let naked_key = self.contract.get_naked_internal_key();
-        let taptree_hash = self.contract.get_taptree().get_root_hash();
-
         let secp = Secp256k1::new();
 
-        let internal_pubkey = if self.contract.is_augmented() {
+        if self.contract.is_augmented() {
             let data = self.state_hash.unwrap();
             // tweak with the state hash
             let (pk, _) = naked_key
@@ -210,10 +204,20 @@ impl ContractInstance {
             pk
         } else {
             naked_key
-        };
+        }
+    }
+
+    pub fn get_address(&self) -> Address {
+        if self.contract.is_augmented() && self.state_hash.is_none() {
+            panic!("Can't get the address of a stateful contract if the state is not set")
+        }
+
+        let taptree_hash = self.contract.get_taptree().get_root_hash();
+        let secp = Secp256k1::new();
+
         Address::p2tr(
             &secp,
-            internal_pubkey,
+            self.get_internal_pubkey(),
             Some(TapNodeHash::from_slice(&taptree_hash).unwrap()),
             KnownHrp::Regtest,
         )
@@ -329,17 +333,23 @@ impl<'a> ContractManager<'a> {
         clause_name: &str,
         args: &dyn ClauseArguments,
     ) -> Witness {
-        let contract = &instance.contract;
+        let mut wit: Vec<Vec<u8>> = instance
+            .contract
+            .stack_elements_from_args(clause_name, args)
+            .unwrap();
 
-        let leaves = contract.get_taptree().get_leaves();
-        let clause = leaves
-            .iter()
-            .find(|&leaf| leaf.name == *clause_name)
-            .expect("Clause not found");
+        // add leaf script
+        wit.push(instance.get_script().to_bytes());
 
-        let mut wit: Vec<Vec<u8>> = Vec::new();
+        // add control block
+        let internal_pk: XOnlyPublicKey = instance.get_internal_pubkey();
 
-        todo!();
+        wit.push(
+            instance
+                .contract
+                .get_taptree()
+                .get_control_block(&internal_pk, clause_name),
+        );
 
         Witness::from(wit)
     }
@@ -623,9 +633,10 @@ impl<'a> ContractManager<'a> {
         println!("{:?}", sighash);
 
         spend_tx.input[0].witness = self.get_spend_witness(&inst, clause_name, &*clause_args);
-        // TODO: how to add signatures?
 
-        // TODO: compute correct witness
+        println!("{:?}", spend_tx.input[0].witness);
+
+        // TODO: how to add signatures?
 
         // TODO: send transaction
 

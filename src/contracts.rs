@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use bitcoin::hashes::Hash;
+use bitcoin::script::write_scriptint;
 use bitcoin::taproot::{LeafVersion, TapLeafHash, TapNodeHash};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
@@ -18,11 +19,11 @@ pub const NUMS_KEY: [u8; 32] = [
     0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TapLeaf {
     pub name: String,
     pub script: ScriptBuf,
-    pub leaf_version: LeafVersion,
+    // we assume the leaf version is 0xC0
 }
 
 #[derive(Debug, Clone)]
@@ -37,17 +38,100 @@ pub enum TapTree {
 impl TapTree {
     pub fn get_root_hash(&self) -> [u8; 32] {
         match self {
-            TapTree::Leaf(TapLeaf {
-                name: _,
-                script,
-                leaf_version,
-            }) => *TapLeafHash::from_script(script, *leaf_version).as_byte_array(),
+            TapTree::Leaf(TapLeaf { name: _, script }) => {
+                // Compute TapLeafHash
+                let leaf_hash =
+                    TapLeafHash::from_script(script.as_script(), LeafVersion::TapScript);
+                *leaf_hash.as_byte_array()
+            }
             TapTree::Branch { left, right } => {
                 let left_hash = TapNodeHash::from_byte_array(left.get_root_hash());
                 let right_hash = TapNodeHash::from_byte_array(right.get_root_hash());
-                *TapNodeHash::from_node_hashes(left_hash, right_hash).as_byte_array()
+                let node_hash = TapNodeHash::from_node_hashes(left_hash, right_hash);
+                *node_hash.as_byte_array()
             }
         }
+    }
+
+    pub fn get_merkle_proof(&self, target_leaf: &TapLeaf) -> Option<Vec<[u8; 32]>> {
+        match self {
+            TapTree::Leaf(leaf) => {
+                if leaf == target_leaf {
+                    Some(Vec::new())
+                } else {
+                    None
+                }
+            }
+            TapTree::Branch { left, right } => {
+                if let Some(mut proof) = left.get_merkle_proof(target_leaf) {
+                    // Target leaf is in the left subtree
+                    proof.insert(0, right.get_root_hash());
+                    Some(proof)
+                } else if let Some(mut proof) = right.get_merkle_proof(target_leaf) {
+                    // Target leaf is in the right subtree
+                    proof.insert(0, left.get_root_hash());
+                    Some(proof)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    // finds the tapleaf for a clause (if any)
+    fn get_tapleaf(&self, name: &str) -> Option<&TapLeaf> {
+        match self {
+            TapTree::Leaf(leaf) => {
+                if leaf.name == name {
+                    Some(leaf)
+                } else {
+                    None
+                }
+            }
+            TapTree::Branch { left, right } => {
+                if let Some(leaf) = left.get_tapleaf(name) {
+                    Some(leaf)
+                } else if let Some(leaf) = right.get_tapleaf(name) {
+                    Some(leaf)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    pub fn get_control_block(
+        &self,
+        internal_pubkey: &XOnlyPublicKey,
+        clause_name: &str,
+    ) -> Vec<u8> {
+        let tapleaf = self.get_tapleaf(clause_name).expect("Tapleaf not found");
+
+        // Get the Merkle proof
+        let merkle_proof = self
+            .get_merkle_proof(tapleaf)
+            .expect("Merkle proof generation for controlblock failed");
+
+        // TODO: get the right parity
+        let parity = bitcoin::key::Parity::Even; // TODO: get the right parity
+
+        // Compute c[0]
+        let c0 = 0xC0u8 | parity.to_u8();
+
+        // c[1..33] is the x coordinate of the internal pubkey
+        let xonly_bytes = internal_pubkey.serialize();
+
+        // Assemble the control block
+        let mut control_block = Vec::new();
+        control_block.push(c0);
+        control_block.extend_from_slice(&xonly_bytes);
+
+        // Append the Merkle proof
+        for hash in merkle_proof {
+            control_block.extend_from_slice(&hash);
+        }
+
+        control_block
     }
 
     pub fn get_leaves(&self) -> Vec<TapLeaf> {
@@ -132,9 +216,10 @@ pub fn encode_bytes<A: AsRef<[u8]>, P: ?Sized>(arg: &A, _params: &P) -> Vec<u8> 
     arg.as_ref().to_vec()
 }
 
-pub fn encode_i32_be<A: Into<i32> + Copy, P: ?Sized>(arg: &A, _params: &P) -> Vec<u8> {
-    let value: i32 = (*arg).into();
-    value.to_be_bytes().to_vec()
+pub fn encode_i32<P: ?Sized>(arg: &i32, _params: &P) -> Vec<u8> {
+    let mut buf = [0u8; 8];
+    let len = write_scriptint(&mut buf, *arg as i64);
+    buf[..len].to_vec()
 }
 
 // Define the ClauseOutputAmountBehaviour enum
