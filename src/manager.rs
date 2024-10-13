@@ -1,16 +1,21 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc, thread::sleep, time::Duration};
 
 use bitcoin::{
-    hashes::Hash, key::Secp256k1, secp256k1::Scalar, sighash::SighashCache, taproot::LeafVersion,
-    transaction::Version, Address, Amount, KnownHrp, OutPoint, Script, ScriptBuf, Sequence,
-    TapLeafHash, TapNodeHash, Transaction, TxIn, TxOut, Txid, Witness, XOnlyPublicKey,
+    hashes::Hash, hex::DisplayHex, key::Secp256k1, secp256k1::Scalar, sighash::SighashCache,
+    taproot::LeafVersion, transaction::Version, Address, Amount, KnownHrp, OutPoint, Script,
+    ScriptBuf, Sequence, TapLeafHash, TapNodeHash, Transaction, TxIn, TxOut, Txid, Witness,
+    XOnlyPublicKey,
 };
-use bitcoincore_rpc::{Client, RpcApi};
+use bitcoincore_rpc::{Client, RawTx, RpcApi};
 
 use thiserror::Error;
 
-use crate::contracts::{
-    CcvClauseOutputAmountBehaviour, ClauseArguments, ClauseOutputs, Contract, ContractState,
+use crate::{
+    contracts::{
+        CcvClauseOutputAmountBehaviour, ClauseArguments, ClauseOutputs, Contract, ContractState,
+        WitnessStackElement,
+    },
+    signer::SchnorrSigner,
 };
 
 /// Waits for a specific output on the Bitcoin blockchain.
@@ -332,14 +337,42 @@ impl<'a> ContractManager<'a> {
         instance: &ContractInstance,
         clause_name: &str,
         args: &dyn ClauseArguments,
-    ) -> Witness {
-        let mut wit: Vec<Vec<u8>> = instance
+        sighash: &[u8; 32],
+        signers: Option<&HashMap<XOnlyPublicKey, Box<dyn SchnorrSigner>>>,
+    ) -> Result<Witness, SpendTxError> {
+        let wit_stack: Vec<WitnessStackElement> = instance
             .contract
             .stack_elements_from_args(clause_name, args)
             .unwrap();
 
+        let mut wit: Vec<Vec<u8>> = wit_stack
+            .iter()
+            .map(|el| match el {
+                WitnessStackElement::Bytes(buf) => Ok(buf.clone()),
+                WitnessStackElement::Signature { pk } => {
+                    let signer = signers
+                        .as_ref()
+                        .ok_or_else(|| SpendTxError::Other("No signers provided".to_string()))?
+                        .get(pk)
+                        .ok_or_else(|| {
+                            SpendTxError::Other("Signer not found for pubkey".to_string())
+                        })?;
+                    Ok(signer.sign(sighash.clone()).serialize().to_vec())
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         // add leaf script
-        wit.push(instance.get_script().to_bytes());
+        wit.push(
+            instance
+                .contract
+                .get_taptree()
+                .get_tapleaf(clause_name)
+                .unwrap()
+                .script
+                .as_bytes()
+                .to_vec(),
+        );
 
         // add control block
         let internal_pk: XOnlyPublicKey = instance.get_internal_pubkey();
@@ -351,7 +384,7 @@ impl<'a> ContractManager<'a> {
                 .get_control_block(&internal_pk, clause_name),
         );
 
-        Witness::from(wit)
+        Ok(Witness::from(wit))
     }
 
     pub fn create_spend_tx<I>(
@@ -601,7 +634,7 @@ impl<'a> ContractManager<'a> {
         clause_name: &str,
         clause_args: Box<dyn ClauseArguments>,
         outputs: Option<Vec<TxOut>>,
-        // TODO: need to add the signing logic
+        signers: Option<&HashMap<XOnlyPublicKey, Box<dyn SchnorrSigner>>>,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, Box<dyn std::error::Error>> {
         // Implementation will depend on how spending is handled.
         // 1. Ensure the instance is in the Funded state
@@ -632,43 +665,44 @@ impl<'a> ContractManager<'a> {
         println!("{:?}", spend_tx);
         println!("{:?}", sighash);
 
-        spend_tx.input[0].witness = self.get_spend_witness(&inst, clause_name, &*clause_args);
+        spend_tx.input[0].witness =
+            self.get_spend_witness(&inst, clause_name, &*clause_args, &sighash, signers)?;
 
         println!("{:?}", spend_tx.input[0].witness);
 
-        // TODO: how to add signatures?
+        for wit_el in spend_tx.input[0].witness.iter() {
+            println!("{} ({} bytes)", wit_el.as_hex(), wit_el.len());
+        }
 
-        // TODO: send transaction
+        println!("Sending transaction: {:?}", spend_tx);
+        println!("Serialized: {:?}", spend_tx.raw_hex());
+        // send transaction
+        let txid = self.rpc.send_raw_transaction(&spend_tx)?;
+        println!("Sent transaction: {}", txid);
 
-        // TODO: wait for transaction to be confirmed, compute resulting instances
+        // wait for transaction to confirm
 
-        // // 8. Attach witnesses to the transaction inputs
-        // // This will depend on your Contract trait's implementation
-        // // For example:
-        // let witness = contract.construct_witness(&spend_tx, &clause, &clause_args)?;
-        // spend_tx.input[0].witness = witness;
+        // wait for confirmation
+        let (outpoint, _) = wait_for_output(
+            self.rpc,
+            &spend_tx.output[0].script_pubkey,
+            0.1,
+            None,
+            Some(txid),
+            None,
+        )
+        .await
+        .unwrap();
 
-        // // 9. Broadcast the transaction
-        // let txid = self.rpc.send_raw_transaction(&spend_tx)?;
+        // compute the next outputs
 
-        // // 10. Wait for the transaction to be confirmed
-        // // You might want to implement a helper function to wait for confirmation
-        // wait_for_transaction_confirmation(self.rpc, txid, Some(1)).await?;
+        self.wait_for_spend(vec![Rc::clone(&instance)]).await
+    }
 
-        // // 11. Update the contract instance status to Spent
-        // {
-        //     let mut inst_mut = instance.borrow_mut();
-        //     inst_mut.status = ContractInstanceStatus::Spent;
-        //     inst_mut.spending_tx = Some(spend_tx.clone());
-        //     inst_mut.spending_clause_name = Some(clause.to_string());
-        //     inst_mut.spending_args = Some(clause_args);
-        // }
-
-        // // 12. Extract new contract instances from the spend transaction
-        // // This depends on how your contracts define the outputs
-        // let new_instances = contract.extract_new_instances(&spend_tx)?;
-
-        // Ok(new_instances)
+    pub async fn wait_for_spend(
+        &mut self,
+        instances: Vec<Rc<RefCell<ContractInstance>>>,
+    ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, Box<dyn std::error::Error>> {
         todo!()
     }
 }

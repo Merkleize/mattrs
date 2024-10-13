@@ -8,7 +8,7 @@ use crate::{
         CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY, OP_CHECKCONTRACTVERIFY,
         OP_CHECKTEMPLATEVERIFY,
     },
-    define_clause, define_contract, define_params,
+    define_clause, define_contract, define_params, pk_from_params,
 };
 
 define_params!(VaultParams {
@@ -27,7 +27,7 @@ define_clause!(
     VaultParams,
     (),
     args {
-        sig: [u8; 64] => encode_bytes,
+        sig: () => pk_from_params!(VaultParams, unvault_pk),
         ctv_hash: [u8; 32] => encode_bytes,
         out_i: i32 => encode_i32,
     },
@@ -75,7 +75,7 @@ define_clause!(
     VaultParams,
     (),
     args {
-        sig: [u8; 64] => encode_bytes,
+        sig: () => pk_from_params!(VaultParams, unvault_pk),
         ctv_hash: [u8; 32] => encode_bytes,
         out_i: i32 => encode_i32,
         revault_out_i: i32 => encode_i32,

@@ -78,12 +78,12 @@ macro_rules! define_clause {
                 ]
             }
 
-            fn as_hashmap(&self, params: &dyn $crate::contracts::ContractParams) -> std::collections::HashMap<String, Vec<u8>> {
+            fn as_hashmap(&self, _params: &dyn $crate::contracts::ContractParams) -> std::collections::HashMap<String, $crate::contracts::WitnessStackElement> {
                 let mut map = std::collections::HashMap::new();
                 $(
                     map.insert(
                         stringify!($arg_name).to_string(),
-                        ($encoder)(&self.$arg_name, params),
+                        ($encoder)(&self.$arg_name, _params),
                     );
                 )*
                 map
@@ -168,7 +168,7 @@ macro_rules! define_contract {
                 &self,
                 clause_name: &str,
                 args: &dyn $crate::contracts::ClauseArguments,
-            ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+            ) -> Result<Vec<$crate::contracts::WitnessStackElement>, Box<dyn std::error::Error>> {
                 define_contract!(@impl_stack_elements_from_args self, clause_name, args, $taptree)
             }
         }
@@ -225,7 +225,7 @@ macro_rules! define_contract {
                 &self,
                 clause_name: &str,
                 args: &dyn $crate::contracts::ClauseArguments,
-            ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+            ) -> Result<Vec<$crate::contracts::WitnessStackElement>, Box<dyn std::error::Error>> {
                 define_contract!(@impl_stack_elements_from_args self, clause_name, args, $taptree)
             }
         }
@@ -334,4 +334,16 @@ macro_rules! define_contract {
             None => define_contract!(@impl_stack_elements_from_args_option $self, $clause_name, $args, $right),
         }
     }};
+}
+
+#[macro_export]
+macro_rules! pk_from_params {
+    ($params_type:ty, $field_name:ident) => {
+        |_, params: &(dyn $crate::contracts::ContractParams)| {
+            let specific_params = params.as_any().downcast_ref::<$params_type>().unwrap();
+            $crate::contracts::WitnessStackElement::Signature {
+                pk: specific_params.$field_name,
+            }
+        }
+    };
 }

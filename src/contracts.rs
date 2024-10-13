@@ -79,7 +79,7 @@ impl TapTree {
     }
 
     // finds the tapleaf for a clause (if any)
-    fn get_tapleaf(&self, name: &str) -> Option<&TapLeaf> {
+    pub fn get_tapleaf(&self, name: &str) -> Option<&TapLeaf> {
         match self {
             TapTree::Leaf(leaf) => {
                 if leaf.name == name {
@@ -182,7 +182,7 @@ pub trait ClauseArguments: Any + Debug {
     fn as_any(&self) -> &dyn Any;
 
     fn arg_names(&self) -> Vec<String>;
-    fn as_hashmap(&self, params: &dyn ContractParams) -> HashMap<String, Vec<u8>>;
+    fn as_hashmap(&self, params: &dyn ContractParams) -> HashMap<String, WitnessStackElement>;
 }
 
 pub trait Contract: Any + Debug {
@@ -208,18 +208,28 @@ pub trait Contract: Any + Debug {
         &self,
         clause_name: &str,
         args: &dyn ClauseArguments,
-    ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>>;
+    ) -> Result<Vec<WitnessStackElement>, Box<dyn std::error::Error>>;
+}
+
+#[derive(Debug, Clone)]
+pub enum WitnessStackElement {
+    Bytes(Vec<u8>),
+    Signature { pk: XOnlyPublicKey },
 }
 
 // encoders
-pub fn encode_bytes<A: AsRef<[u8]>, P: ?Sized>(arg: &A, _params: &P) -> Vec<u8> {
-    arg.as_ref().to_vec()
+pub fn encode_bytes<A: AsRef<[u8]>, P: ?Sized>(arg: &A, _params: &P) -> WitnessStackElement {
+    WitnessStackElement::Bytes(arg.as_ref().to_vec())
 }
 
-pub fn encode_i32<P: ?Sized>(arg: &i32, _params: &P) -> Vec<u8> {
+pub fn encode_i32<P: ?Sized>(arg: &i32, _params: &P) -> WitnessStackElement {
     let mut buf = [0u8; 8];
     let len = write_scriptint(&mut buf, *arg as i64);
-    buf[..len].to_vec()
+    WitnessStackElement::Bytes(buf[..len].to_vec())
+}
+
+pub fn encode_sig(pk: XOnlyPublicKey) -> WitnessStackElement {
+    WitnessStackElement::Signature { pk }
 }
 
 // Define the ClauseOutputAmountBehaviour enum
@@ -258,7 +268,7 @@ pub trait Clause: Debug + Clone {
     fn stack_elements_from_args(
         params: &Self::Params,
         args: &Self::Args,
-    ) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<WitnessStackElement>, Box<dyn std::error::Error>> {
         let args_map = args.as_hashmap(params);
         let arg_names = args.arg_names();
 

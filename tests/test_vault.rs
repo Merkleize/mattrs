@@ -1,10 +1,17 @@
 mod common;
 
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
-use bitcoin::{bip32::Xpriv, hashes::Hash, key::Secp256k1, Address, KnownHrp, TapNodeHash};
+use bitcoin::{
+    bip32::Xpriv, hashes::Hash, key::Secp256k1, Address, KnownHrp, TapNodeHash, XOnlyPublicKey,
+};
 
-use mattrs::{contracts::*, hub::vault::*, manager::ContractManager};
+use mattrs::{
+    contracts::*,
+    hub::vault::*,
+    manager::ContractManager,
+    signer::{HotSigner, SchnorrSigner},
+};
 
 #[tokio::test]
 async fn test_fund_vault() {
@@ -44,16 +51,31 @@ async fn test_fund_vault() {
         .await
         .expect("Failed to fund instance");
 
+    let mut signers: HashMap<XOnlyPublicKey, Box<dyn SchnorrSigner>> = HashMap::new();
+
+    signers.insert(
+        unvault_pubkey.into(),
+        Box::new(HotSigner {
+            privkey: unvault_privkey,
+        }),
+    );
+
     let out_inst = manager
         .spend_instance(
             inst,
             "trigger",
             Box::new(VaultTriggerClauseArgs {
-                sig: [0u8; 64],
-                ctv_hash: [0u8; 32],
+                // TODO: put real data
+                sig: (),
+                ctv_hash: [
+                    0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8,
+                    15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8,
+                    28u8, 29u8, 30u8, 31u8,
+                ],
                 out_i: 0,
             }),
             None,
+            Some(&signers),
         )
         .await
         .expect("Failed to spend instance");
