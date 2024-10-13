@@ -182,7 +182,6 @@ pub trait ClauseArguments: Any + Debug {
     fn as_any(&self) -> &dyn Any;
 
     fn arg_names(&self) -> Vec<String>;
-    fn as_hashmap(&self, params: &dyn ContractParams) -> HashMap<String, WitnessStackElement>;
 }
 
 pub trait Contract: Any + Debug {
@@ -209,6 +208,12 @@ pub trait Contract: Any + Debug {
         clause_name: &str,
         args: &dyn ClauseArguments,
     ) -> Result<Vec<WitnessStackElement>, Box<dyn std::error::Error>>;
+
+    fn args_from_stack_elements(
+        &self,
+        clause_name: &str,
+        stack: &[Vec<u8>],
+    ) -> Result<Box<dyn ClauseArguments>, Box<dyn std::error::Error>>;
 }
 
 #[derive(Debug, Clone)]
@@ -217,19 +222,82 @@ pub enum WitnessStackElement {
     Signature { pk: XOnlyPublicKey },
 }
 
-// encoders
-pub fn encode_bytes<A: AsRef<[u8]>, P: ?Sized>(arg: &A, _params: &P) -> WitnessStackElement {
-    WitnessStackElement::Bytes(arg.as_ref().to_vec())
+pub struct Codec<T, P> {
+    pub encode: Box<dyn Fn(&T, &P) -> WitnessStackElement>,
+    pub decode: Box<dyn Fn(&[Vec<u8>], &P) -> Result<(usize, T), Box<dyn std::error::Error>>>,
 }
 
-pub fn encode_i32<P: ?Sized>(arg: &i32, _params: &P) -> WitnessStackElement {
-    let mut buf = [0u8; 8];
-    let len = write_scriptint(&mut buf, *arg as i64);
-    WitnessStackElement::Bytes(buf[..len].to_vec())
+// Encoder-decoder for bytes
+pub fn codec_bytes<T: AsRef<[u8]> + From<Vec<u8>>, P>(_params: P) -> Codec<T, P> {
+    Codec {
+        encode: Box::new(|arg: &T, _params: &P| WitnessStackElement::Bytes(arg.as_ref().to_vec())),
+        decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
+            if !stack.is_empty() {
+                Ok((1, stack[0].clone().into()))
+            } else {
+                Err("Stack underflow".into())
+            }
+        }),
+    }
 }
 
-pub fn encode_sig(pk: XOnlyPublicKey) -> WitnessStackElement {
-    WitnessStackElement::Signature { pk }
+// Encoder-decoder for fixed-size arrays
+pub fn codec_array<P, const N: usize>(_params: P) -> Codec<[u8; N], P> {
+    Codec {
+        encode: Box::new(|arg: &[u8; N], _params: &P| WitnessStackElement::Bytes(arg.to_vec())),
+        decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
+            if !stack.is_empty() {
+                if stack[0].len() == N {
+                    let mut arr = [0u8; N];
+                    arr.copy_from_slice(&stack[0]);
+                    Ok((1, arr))
+                } else {
+                    Err(format!("Expected array of length {}", N).into())
+                }
+            } else {
+                Err("Stack underflow".into())
+            }
+        }),
+    }
+}
+
+// Encoder-decoder for i32
+pub fn codec_i32<P>(_params: P) -> Codec<i32, P> {
+    Codec {
+        encode: Box::new(|arg: &i32, _params: &P| {
+            let mut buf = [0u8; 8];
+            let len = bitcoin::script::write_scriptint(&mut buf, *arg as i64);
+            WitnessStackElement::Bytes(buf[..len].to_vec())
+        }),
+        decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
+            if !stack.is_empty() {
+                match bitcoin::script::read_scriptint(&stack[0]) {
+                    Ok(val) => Ok((1, val as i32)),
+                    Err(e) => Err(format!("Failed to decode i32: {}", e).into()),
+                }
+            } else {
+                Err("Stack underflow".into())
+            }
+        }),
+    }
+}
+
+// TODO: maybe for signatures we should make a custom type
+pub fn codec_sig<P>(pk_getter: impl Fn(&P) -> XOnlyPublicKey) -> impl Fn(&P) -> Codec<(), P> {
+    move |params: &P| {
+        let pk = pk_getter(params);
+        Codec {
+            encode: Box::new(move |_: &(), _params: &P| WitnessStackElement::Signature { pk }),
+            decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
+                // TODO
+                if !stack.is_empty() {
+                    Ok((1, ()))
+                } else {
+                    Err("Stack underflow".into())
+                }
+            }),
+        }
+    }
 }
 
 // Define the ClauseOutputAmountBehaviour enum
@@ -268,19 +336,9 @@ pub trait Clause: Debug + Clone {
     fn stack_elements_from_args(
         params: &Self::Params,
         args: &Self::Args,
-    ) -> Result<Vec<WitnessStackElement>, Box<dyn std::error::Error>> {
-        let args_map = args.as_hashmap(params);
-        let arg_names = args.arg_names();
-
-        let mut stack_elements = Vec::new();
-        for arg_name in arg_names {
-            match args_map.get(&arg_name) {
-                Some(arg) => stack_elements.push(arg.clone()),
-                None => {
-                    return Err(format!("Argument {} not found in args_map", arg_name).into());
-                }
-            }
-        }
-        Ok(stack_elements)
-    }
+    ) -> Result<Vec<WitnessStackElement>, Box<dyn std::error::Error>>;
+    fn args_from_stack_elements(
+        params: &Self::Params,
+        stack: &[Vec<u8>],
+    ) -> Result<Self::Args, Box<dyn std::error::Error>>;
 }
