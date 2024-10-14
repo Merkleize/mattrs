@@ -66,7 +66,7 @@ async fn test_fund_vault() {
             "trigger",
             Box::new(VaultTriggerClauseArgs {
                 // TODO: put real data
-                sig: (),
+                sig: Signature::default(),
                 ctv_hash: [
                     0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8, 8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8,
                     15u8, 16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8, 24u8, 25u8, 26u8, 27u8,

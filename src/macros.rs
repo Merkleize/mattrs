@@ -55,7 +55,7 @@ macro_rules! define_clause {
         $clause_string_name:expr,
         $contract_params:ty,
         $contract_state:ty,
-        args { $( $arg_name:ident : $arg_type:ty => $encoder_decoder:expr ),* $(,)? },
+        args { $( $arg_name:ident : $arg_type:ty $(=> $closure:expr)? ),* $(,)? },
         script($script_params:tt) $script_body:block,
         next_outputs($no_params:tt,$no_args:tt,$no_state:tt) $next_outputs_body:block
     ) => {
@@ -101,33 +101,57 @@ macro_rules! define_clause {
             }
 
             fn stack_elements_from_args(
-                params: &Self::Params,
-                args: &Self::Args,
+                _params: &Self::Params,
+                _args: &Self::Args,
             ) -> Result<Vec<$crate::contracts::WitnessStackElement>, Box<dyn std::error::Error>> {
-                let mut stack_elements = Vec::new();
+                let mut _stack_elements = Vec::new();
                 $(
-                    stack_elements.push((($encoder_decoder(params)).encode)(&args.$arg_name, &params));
+                    define_clause!(@encode_arg _params, _args, _stack_elements, $arg_name, $arg_type $(, $closure )? );
                 )*
-                Ok(stack_elements)
+                Ok(_stack_elements)
             }
 
             fn args_from_stack_elements(
-                params: &Self::Params,
+                _params: &Self::Params,
                 stack: &[Vec<u8>],
             ) -> Result<Self::Args, Box<dyn std::error::Error>> {
-                let mut idx = 0;
+                let mut _idx = 0;
                 $(
-                    let (used, $arg_name) = (($encoder_decoder(params)).decode)(&stack[idx..], &params)?;
-                    idx += used;
+                    define_clause!(@decode_arg _params, stack, _idx, $arg_name, $arg_type $(, $closure )? );
                 )*
-                if idx != stack.len() {
-                    return Err(format!("Not all stack elements were consumed (consumed {}, stack len {})", idx, stack.len()).into());
+                if _idx != stack.len() {
+                    return Err(format!("Not all stack elements were consumed (consumed {}, stack len {})", _idx, stack.len()).into());
                 }
                 Ok(Self::Args {
                     $( $arg_name ),*
                 })
             }
         }
+    };
+
+    // Helper macros to process arguments with closure
+    (@encode_arg $params:ident, $args:ident, $stack_elements:ident, $arg_name:ident, $arg_type:ty, $closure:expr ) => {
+        let codec = <$arg_type as $crate::contracts::ArgType<_>>::codec(Box::new($closure))($params);
+        $stack_elements.push((codec.encode)(&$args.$arg_name, $params));
+    };
+
+    // Helper macros to process arguments without closure
+    (@encode_arg $params:ident, $args:ident, $stack_elements:ident, $arg_name:ident, $arg_type:ty ) => {
+        let codec = <$arg_type as $crate::contracts::ArgType<_>>::codec(())($params);
+        $stack_elements.push((codec.encode)(&$args.$arg_name, $params));
+    };
+
+    // Similar for decode_arg
+    (@decode_arg $params:ident, $stack:ident, $idx:ident, $arg_name:ident, $arg_type:ty, $closure:expr ) => {
+        let codec = <$arg_type as $crate::contracts::ArgType<_>>::codec(Box::new($closure))($params);
+        let (used, $arg_name) = (codec.decode)(&$stack[$idx..], $params)?;
+        $idx += used;
+    };
+
+    (@decode_arg $params:ident, $stack:ident, $idx:ident, $arg_name:ident, $arg_type:ty ) => {
+        let codec = <$arg_type as $crate::contracts::ArgType<_>>::codec(())($params);
+        let (used, $arg_name) = (codec.decode)(&$stack[$idx..], $params)?;
+        $idx += used;
     };
 }
 

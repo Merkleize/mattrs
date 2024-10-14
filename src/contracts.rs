@@ -1,9 +1,7 @@
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt::Debug;
 
 use bitcoin::hashes::Hash;
-use bitcoin::script::write_scriptint;
 use bitcoin::taproot::{LeafVersion, TapLeafHash, TapNodeHash};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
@@ -227,75 +225,93 @@ pub struct Codec<T, P> {
     pub decode: Box<dyn Fn(&[Vec<u8>], &P) -> Result<(usize, T), Box<dyn std::error::Error>>>,
 }
 
-// Encoder-decoder for bytes
-pub fn codec_bytes<T: AsRef<[u8]> + From<Vec<u8>>, P>(_params: P) -> Codec<T, P> {
-    Codec {
-        encode: Box::new(|arg: &T, _params: &P| WitnessStackElement::Bytes(arg.as_ref().to_vec())),
-        decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
-            if !stack.is_empty() {
-                Ok((1, stack[0].clone().into()))
-            } else {
-                Err("Stack underflow".into())
-            }
-        }),
-    }
+// Define the ArgType trait
+pub trait ArgType<P> {
+    type CodecArgs;
+
+    fn codec(args: Self::CodecArgs) -> impl Fn(&P) -> Codec<Self, P>
+    where
+        Self: Sized;
 }
 
-// Encoder-decoder for fixed-size arrays
-pub fn codec_array<P, const N: usize>(_params: P) -> Codec<[u8; N], P> {
-    Codec {
-        encode: Box::new(|arg: &[u8; N], _params: &P| WitnessStackElement::Bytes(arg.to_vec())),
-        decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
-            if !stack.is_empty() {
-                if stack[0].len() == N {
-                    let mut arr = [0u8; N];
-                    arr.copy_from_slice(&stack[0]);
-                    Ok((1, arr))
-                } else {
-                    Err(format!("Expected array of length {}", N).into())
-                }
-            } else {
-                Err("Stack underflow".into())
-            }
-        }),
-    }
-}
+// Implement ArgType for fixed-size arrays
+impl<P, const N: usize> ArgType<P> for [u8; N] {
+    type CodecArgs = ();
 
-// Encoder-decoder for i32
-pub fn codec_i32<P>(_params: P) -> Codec<i32, P> {
-    Codec {
-        encode: Box::new(|arg: &i32, _params: &P| {
-            let mut buf = [0u8; 8];
-            let len = bitcoin::script::write_scriptint(&mut buf, *arg as i64);
-            WitnessStackElement::Bytes(buf[..len].to_vec())
-        }),
-        decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
-            if !stack.is_empty() {
-                match bitcoin::script::read_scriptint(&stack[0]) {
-                    Ok(val) => Ok((1, val as i32)),
-                    Err(e) => Err(format!("Failed to decode i32: {}", e).into()),
-                }
-            } else {
-                Err("Stack underflow".into())
-            }
-        }),
-    }
-}
-
-// TODO: maybe for signatures we should make a custom type
-pub fn codec_sig<P>(pk_getter: impl Fn(&P) -> XOnlyPublicKey) -> impl Fn(&P) -> Codec<(), P> {
-    move |params: &P| {
-        let pk = pk_getter(params);
-        Codec {
-            encode: Box::new(move |_: &(), _params: &P| WitnessStackElement::Signature { pk }),
-            decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
-                // TODO
+    fn codec(_: Self::CodecArgs) -> impl Fn(&P) -> Codec<Self, P> {
+        |_: &P| Codec {
+            encode: Box::new(|arg: &Self, _params: &P| WitnessStackElement::Bytes(arg.to_vec())),
+            decode: Box::new(move |stack: &[Vec<u8>], _params: &P| {
                 if !stack.is_empty() {
-                    Ok((1, ()))
+                    if stack[0].len() == N {
+                        let mut arr = [0u8; N];
+                        arr.copy_from_slice(&stack[0]);
+                        Ok((1, arr))
+                    } else {
+                        Err(format!("Expected array of length {}", N).into())
+                    }
                 } else {
                     Err("Stack underflow".into())
                 }
             }),
+        }
+    }
+}
+
+// Implement ArgType for i32
+impl<P> ArgType<P> for i32 {
+    type CodecArgs = ();
+
+    fn codec(_: Self::CodecArgs) -> impl Fn(&P) -> Codec<Self, P> {
+        |_: &P| Codec {
+            encode: Box::new(|arg: &i32, _params: &P| {
+                let mut buf = [0u8; 8];
+                let len = bitcoin::script::write_scriptint(&mut buf, *arg as i64);
+                WitnessStackElement::Bytes(buf[..len].to_vec())
+            }),
+            decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
+                if !stack.is_empty() {
+                    match bitcoin::script::read_scriptint(&stack[0]) {
+                        Ok(val) => Ok((1, val as i32)),
+                        Err(e) => Err(format!("Failed to decode i32: {}", e).into()),
+                    }
+                } else {
+                    Err("Stack underflow".into())
+                }
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Signature([u8; 64]);
+
+impl Default for Signature {
+    fn default() -> Self {
+        Signature([0u8; 64])
+    }
+}
+
+// Implement ArgType for signatures, requiring a pk_getter function
+impl<P> ArgType<P> for Signature {
+    type CodecArgs = Box<dyn Fn(&P) -> XOnlyPublicKey>;
+
+    fn codec(pk_getter: Self::CodecArgs) -> impl Fn(&P) -> Codec<Self, P> {
+        move |params: &P| {
+            let pk = pk_getter(params);
+
+            Codec {
+                encode: Box::new(move |_: &Signature, _params: &P| {
+                    WitnessStackElement::Signature { pk }
+                }),
+                decode: Box::new(|stack: &[Vec<u8>], _params: &P| {
+                    if !stack.is_empty() {
+                        Ok((1, Signature(stack[0].as_slice().try_into()?)))
+                    } else {
+                        Err("Stack underflow".into())
+                    }
+                }),
+            }
         }
     }
 }

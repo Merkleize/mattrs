@@ -4,9 +4,8 @@ use bitcoin::{opcodes, script::Builder, XOnlyPublicKey};
 use crate::{
     ccv_list,
     contracts::{
-        codec_array, codec_i32, codec_sig, Clause, Contract, ContractParams, ContractState,
-        CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY, OP_CHECKCONTRACTVERIFY,
-        OP_CHECKTEMPLATEVERIFY,
+        Clause, Contract, ContractParams, ContractState, Signature, CCV_FLAG_CHECK_INPUT,
+        CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY, OP_CHECKCONTRACTVERIFY, OP_CHECKTEMPLATEVERIFY,
     },
     define_clause, define_contract, define_params,
 };
@@ -27,9 +26,9 @@ define_clause!(
     VaultParams,
     (),
     args {
-        sig: () => codec_sig(|p: &VaultParams| p.unvault_pk),
-        ctv_hash: [u8; 32] => codec_array::<_,32>,
-        out_i: i32 => codec_i32,
+        sig: Signature => |p: &VaultParams| p.unvault_pk,
+        ctv_hash: [u8; 32],
+        out_i: i32,
     },
     script(params) {
         let unvaulting = Unvaulting::new(UnvaultingParams {
@@ -75,10 +74,10 @@ define_clause!(
     VaultParams,
     (),
     args {
-        sig: () => codec_sig(|p: &VaultParams| p.unvault_pk),
-        ctv_hash: [u8; 32] => codec_array::<_,32>,
-        out_i: i32 => codec_i32,
-        revault_out_i: i32 => codec_i32,
+        sig: Signature => |p: &VaultParams| p.unvault_pk,
+        ctv_hash: [u8; 32],
+        out_i: i32,
+        revault_out_i: i32,
     },
     script(params) {
         let unvaulting = Unvaulting::new(UnvaultingParams {
@@ -195,7 +194,7 @@ define_clause!(
     UnvaultingParams,
     UnvaultingState,
     args {
-        ctv_hash: [u8; 32] => codec_array::<_,32>,
+        ctv_hash: [u8; 32],
     },
     script(params) {
         let builder = Builder::new()
@@ -231,7 +230,7 @@ define_clause!(
     UnvaultingParams,
     UnvaultingState,
     args {
-        out_i: i32 => codec_i32,
+        ctv_hash: [u8; 32],
     },
     script(params) {
         Builder::new()
