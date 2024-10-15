@@ -179,6 +179,10 @@ macro_rules! define_contract {
         }
 
         impl $crate::contracts::Contract for $contract_struct_name {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
             fn get_taptree(&self) -> $crate::contracts::TapTree {
                 define_contract!(@process_taptree self, $taptree)
             }
@@ -244,6 +248,10 @@ macro_rules! define_contract {
         }
 
         impl $crate::contracts::Contract for $contract_struct_name {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
             fn get_taptree(&self) -> $crate::contracts::TapTree {
                 define_contract!(@process_taptree self, $taptree)
             }

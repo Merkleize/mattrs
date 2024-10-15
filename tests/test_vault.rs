@@ -41,10 +41,16 @@ async fn test_fund_vault() {
 
     let address = Address::p2tr(&secp, internal_key, Some(taptree_hash), KnownHrp::Regtest);
 
+    // compare with pymatt's address
+    assert_eq!(
+        address.to_string(),
+        "bcrt1plkh3clum5e2rynql75ufxxqxw898arfumqnua60hwr76q4y0jeksu88u3m"
+    );
+
     // Define the amount to send (in BTC)
     let amount = 20_000;
 
-    let mut manager = ContractManager::new(&client);
+    let mut manager = ContractManager::new(&client, 0.1);
 
     let inst = manager
         .fund_instance(Box::new(vault.clone()), None, amount)
@@ -79,6 +85,18 @@ async fn test_fund_vault() {
         )
         .await
         .expect("Failed to spend instance");
+
+    println!("out_inst: {:?}", out_inst);
+
+    assert_eq!(out_inst.len(), 1);
+
+    let unvaulting_inst = out_inst[0].borrow();
+
+    let unvaulting = unvaulting_inst
+        .get_contract::<Unvaulting>()
+        .expect("Wrong contract type");
+
+    println!("params: {:?}", unvaulting.params);
 
     // TODO: spend vault using the recover clause
 }

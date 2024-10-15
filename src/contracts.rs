@@ -146,6 +146,22 @@ impl TapTree {
     pub fn get_clauses(&self) -> Vec<String> {
         self.get_leaves().iter().map(|l| l.name.clone()).collect()
     }
+
+    /// Finds the tapleaf for a given script (if any)
+    pub fn get_tapleaf_by_script(&self, script: &ScriptBuf) -> Option<&TapLeaf> {
+        match self {
+            TapTree::Leaf(leaf) => {
+                if &leaf.script == script {
+                    Some(leaf)
+                } else {
+                    None
+                }
+            }
+            TapTree::Branch { left, right } => left
+                .get_tapleaf_by_script(script)
+                .or_else(|| right.get_tapleaf_by_script(script)),
+        }
+    }
 }
 
 pub trait ContractParams: Debug + Any {
@@ -183,6 +199,7 @@ pub trait ClauseArguments: Any + Debug {
 }
 
 pub trait Contract: Any + Debug {
+    fn as_any(&self) -> &dyn Any;
     fn is_augmented(&self) -> bool;
     fn get_taptree(&self) -> TapTree;
     fn get_naked_internal_key(&self) -> XOnlyPublicKey;
