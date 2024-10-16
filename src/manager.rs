@@ -369,10 +369,11 @@ pub struct ContractManager<'a> {
     rpc: &'a Client,
     instances: Vec<Rc<RefCell<ContractInstance>>>,
     poll_interval: f64,
+    automine: bool,
 }
 
 impl<'a> ContractManager<'a> {
-    pub fn new(rpc: &'a Client, poll_interval: f64) -> Self {
+    pub fn new(rpc: &'a Client, poll_interval: f64, automine: bool) -> Self {
         if poll_interval <= 0.0 {
             panic!("Poll interval must be greater than zero");
         }
@@ -381,6 +382,7 @@ impl<'a> ContractManager<'a> {
             rpc,
             instances: vec![],
             poll_interval,
+            automine,
         }
     }
 
@@ -411,17 +413,26 @@ impl<'a> ContractManager<'a> {
         // 1) send transaction funding the instance
         let address = rc_inst.borrow().get_address();
 
+        // height before the transaction is sent
+        let starting_height = self.rpc.get_block_count()?;
+
         // Send the specified amount to the address
         let amount_btc = Amount::from_sat(amount);
         let txid = self
             .rpc
             .send_to_address(&address, amount_btc, None, None, None, None, None, None)?;
 
+        if self.automine {
+            // mine a block
+            let addr = self.rpc.get_new_address(None, None)?.assume_checked();
+            self.rpc.generate_to_address(1, &addr)?;
+        }
+
         let (outpoint, last_height) = wait_for_output(
             self.rpc,
             &rc_inst.borrow().get_script().as_script(),
             0.1,
-            None,
+            Some(starting_height),
             Some(txid),
             Some(amount_btc.to_sat()),
         )
@@ -788,8 +799,18 @@ impl<'a> ContractManager<'a> {
         let txid = self.rpc.send_raw_transaction(&spend_tx)?;
         println!("Sent transaction: {}", txid);
 
+        // height before the transaction is sent
+        let starting_height = self.rpc.get_block_count()?;
+
+        if self.automine {
+            // mine a block
+            let addr = self.rpc.get_new_address(None, None)?.assume_checked();
+            self.rpc.generate_to_address(1, &addr)?;
+        }
+
         // wait for transaction to confirm and compute the next outputs and compute the next instances
-        self.wait_for_spend(vec![Rc::clone(&instance)]).await
+        self.wait_for_spend(vec![Rc::clone(&instance)], starting_height)
+            .await
     }
 
     /// Waits for one or more contract instances to be spent and processes the resulting transactions
@@ -802,6 +823,7 @@ impl<'a> ContractManager<'a> {
     ///
     /// # Parameters
     /// - `instances`: A vector of contract instances to monitor for spending transactions.
+    /// - `starting_height`: The block height to start polling from.
     ///
     /// # Returns
     /// A vector of new contract instances created as a result of the spending transactions.
@@ -812,6 +834,7 @@ impl<'a> ContractManager<'a> {
     pub async fn wait_for_spend(
         &mut self,
         instances: Vec<Rc<RefCell<ContractInstance>>>,
+        starting_height: u64,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, Box<dyn std::error::Error>> {
         let mut out_contracts: HashMap<usize, Rc<RefCell<ContractInstance>>> = HashMap::new();
 
@@ -831,7 +854,7 @@ impl<'a> ContractManager<'a> {
                     .as_ref()
                     .ok_or("Instance has no outpoint")?
                     .clone(),
-                instance.last_height,
+                Some(starting_height),
                 self.poll_interval,
             )
             .await?;

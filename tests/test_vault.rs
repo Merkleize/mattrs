@@ -50,7 +50,7 @@ async fn test_fund_vault() {
     // Define the amount to send (in BTC)
     let amount = 20_000;
 
-    let mut manager = ContractManager::new(&client, 0.1);
+    let mut manager = ContractManager::new(&client, 0.1, true);
 
     let inst = manager
         .fund_instance(Box::new(vault.clone()), None, amount)
