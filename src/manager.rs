@@ -502,11 +502,11 @@ impl<'a> ContractManager<'a> {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        let taptree = instance.contract.get_taptree();
+
         // add leaf script
         wit.push(
-            instance
-                .contract
-                .get_taptree()
+            taptree
                 .get_tapleaf(clause_name)
                 .unwrap()
                 .script
@@ -517,12 +517,7 @@ impl<'a> ContractManager<'a> {
         // add control block
         let internal_pk: XOnlyPublicKey = instance.get_internal_pubkey();
 
-        wit.push(
-            instance
-                .contract
-                .get_taptree()
-                .get_control_block(&internal_pk, clause_name),
-        );
+        wit.push(taptree.get_control_block(&internal_pk, clause_name));
 
         Ok(Witness::from(wit))
     }
@@ -833,17 +828,31 @@ impl<'a> ContractManager<'a> {
         }
 
         // wait for transaction to confirm and compute the next outputs and compute the next instances
-        self.wait_for_spend(vec![Rc::clone(&instance)], starting_height)
-            .await
+        self.wait_for_spend(&[&instance], starting_height).await
     }
 
     pub async fn spend_and_wait(
         &mut self,
-        instances: Vec<&Rc<RefCell<ContractInstance>>>,
+        instances: &[&Rc<RefCell<ContractInstance>>],
         tx: &Transaction,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, Box<dyn std::error::Error>> {
+        let cur_height = self.rpc.get_block_count()?;
+
+        for instance in instances.iter() {
+            if instance.borrow().status != ContractInstanceStatus::Funded {
+                return Err("Unexpected status: all instances should be FUNDED".into());
+            }
+        }
+        for instance in instances {
+            instance.borrow_mut().last_height = Some(cur_height);
+        }
+
         self.rpc.send_raw_transaction(tx)?;
-        todo!()
+
+        if self.automine {
+            self.mine_blocks(1)?;
+        }
+        self.wait_for_spend(instances, cur_height).await
     }
 
     /// Waits for one or more contract instances to be spent and processes the resulting transactions
@@ -855,7 +864,7 @@ impl<'a> ContractManager<'a> {
     /// clause and its arguments), and creates new contract instances as dictated by the contract logic.
     ///
     /// # Parameters
-    /// - `instances`: A vector of contract instances to monitor for spending transactions.
+    /// - `instances`: A slice of contract instances to monitor for spending transactions.
     /// - `starting_height`: The block height to start polling from.
     ///
     /// # Returns
@@ -866,7 +875,7 @@ impl<'a> ContractManager<'a> {
     /// or if the spending transaction references a clause that is not found in the contract.
     pub async fn wait_for_spend(
         &mut self,
-        instances: Vec<Rc<RefCell<ContractInstance>>>,
+        instances: &[&Rc<RefCell<ContractInstance>>],
         starting_height: u64,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, Box<dyn std::error::Error>> {
         let mut out_contracts: HashMap<usize, Rc<RefCell<ContractInstance>>> = HashMap::new();

@@ -202,7 +202,7 @@ async fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Err
             bitcoin::TapSighashType::Default,
         )
         .map(|h| h.to_byte_array())
-        .map_err(|e| "Sighash computation failed")?;
+        .map_err(|_| "Sighash computation failed")?;
 
     sighashes.push(sighash);
 
@@ -217,16 +217,13 @@ async fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Err
         )?
     };
 
-    // TODO: parity calculation in the controlblock is missing in the manager.
-    // fixing the bit manually for this test until that's fixed
-    let mut wit_vec = tx.input[0].witness.to_vec();
-    wit_vec.last_mut().unwrap()[0] = 0xC1;
-    tx.input[0].witness = bitcoin::Witness::from(wit_vec);
-
     println!("Witness: {:?}", tx.input[0].witness);
 
     // send tx, update manager
-    manager.spend_and_wait(vec![&unvaulting_inst], &tx).await?;
+    let final_insts = manager.spend_and_wait(&[&unvaulting_inst], &tx).await?;
+
+    // Withdraw tx is terminal.
+    assert_eq!(final_insts.len(), 0);
 
     Ok(())
 }
