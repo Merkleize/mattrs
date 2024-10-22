@@ -349,8 +349,6 @@ pub enum CcvClauseOutputAmountBehaviour {
     DeductOutput,   // The output amount is subtracted from the input
 }
 
-// TODO
-
 #[derive(Debug)]
 pub struct CcvOutputDescription {
     pub n: i32,

@@ -455,8 +455,6 @@ impl<'a> ContractManager<'a> {
         )
         .await?;
 
-        println!("Funded contract instance at {:?}", outpoint); // TODO: remove
-
         let tx = self.rpc.get_raw_transaction(&txid, None)?;
 
         // Update the contract instance
