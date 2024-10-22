@@ -3,9 +3,8 @@ use std::fmt::Debug;
 
 use bitcoin::hashes::Hash;
 use bitcoin::key::Secp256k1;
-use bitcoin::secp256k1::Scalar;
 use bitcoin::taproot::{LeafVersion, TapLeafHash, TapNodeHash};
-use bitcoin::{ScriptBuf, XOnlyPublicKey};
+use bitcoin::{ScriptBuf, TapTweakHash, XOnlyPublicKey};
 
 pub const OP_CHECKCONTRACTVERIFY: u8 = 0xbb;
 pub const OP_CHECKTEMPLATEVERIFY: u8 = 0xb3;
@@ -107,17 +106,14 @@ impl TapTree {
     ) -> Vec<u8> {
         let tapleaf = self.get_tapleaf(clause_name).expect("Tapleaf not found");
 
-        // Get the Merkle proof
-        let merkle_proof = self
-            .get_merkle_proof(tapleaf)
-            .expect("Merkle proof generation for controlblock failed");
-
-        let taptree_hash = Scalar::from_be_bytes(self.get_root_hash()).expect("Should never fail");
+        let merkle_root = TapNodeHash::from_byte_array(self.get_root_hash());
+        let tweak =
+            TapTweakHash::from_key_and_tweak(*internal_pubkey, Some(merkle_root)).to_scalar();
 
         // compute the right parity bit
         let secp = Secp256k1::new();
         let (_, parity) = internal_pubkey
-            .add_tweak(&secp, &taptree_hash)
+            .add_tweak(&secp, &tweak)
             .expect("Should never fail");
 
         // Compute c[0]
@@ -130,6 +126,11 @@ impl TapTree {
         let mut control_block = Vec::new();
         control_block.push(c0);
         control_block.extend_from_slice(&xonly_bytes);
+
+        // Get the Merkle proof
+        let merkle_proof = self
+            .get_merkle_proof(tapleaf)
+            .expect("Merkle proof generation for controlblock failed");
 
         // Append the Merkle proof
         for hash in merkle_proof {
