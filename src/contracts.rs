@@ -2,6 +2,8 @@ use std::any::Any;
 use std::fmt::Debug;
 
 use bitcoin::hashes::Hash;
+use bitcoin::key::Secp256k1;
+use bitcoin::secp256k1::Scalar;
 use bitcoin::taproot::{LeafVersion, TapLeafHash, TapNodeHash};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
@@ -110,8 +112,13 @@ impl TapTree {
             .get_merkle_proof(tapleaf)
             .expect("Merkle proof generation for controlblock failed");
 
-        // TODO: get the right parity
-        let parity = bitcoin::key::Parity::Even; // TODO: get the right parity
+        let taptree_hash = Scalar::from_be_bytes(self.get_root_hash()).expect("Should never fail");
+
+        // compute the right parity bit
+        let secp = Secp256k1::new();
+        let (_, parity) = internal_pubkey
+            .add_tweak(&secp, &taptree_hash)
+            .expect("Should never fail");
 
         // Compute c[0]
         let c0 = 0xC0u8 | parity.to_u8();
