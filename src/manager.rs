@@ -332,6 +332,17 @@ impl ContractInstance {
             .downcast_ref::<T>()
             .ok_or_else(|| format!("Contract is not of type {}", std::any::type_name::<T>()).into())
     }
+
+    pub fn get_state<T: ContractState>(&self) -> Result<&T, Box<dyn std::error::Error>> {
+        self.state
+            .as_ref()
+            .ok_or_else(|| "State is not set".into())
+            .and_then(|state| {
+                state.as_any().downcast_ref::<T>().ok_or_else(|| {
+                    format!("State is not of type {}", std::any::type_name::<T>()).into()
+                })
+            })
+    }
 }
 
 /// Represents errors that can occur while constructing the spend transaction.
@@ -384,6 +395,12 @@ impl<'a> ContractManager<'a> {
             poll_interval,
             automine,
         }
+    }
+
+    pub fn mine_blocks(&self, count: u64) -> Result<(), bitcoincore_rpc::Error> {
+        let addr = self.rpc.get_new_address(None, None)?.assume_checked();
+        self.rpc.generate_to_address(count, &addr)?;
+        Ok(())
     }
 
     pub fn get_instances(&self) -> Vec<Rc<RefCell<ContractInstance>>> {
@@ -519,7 +536,7 @@ impl<'a> ContractManager<'a> {
     where
         I: IntoIterator<
             Item = (
-                Rc<RefCell<ContractInstance>>,
+                &'a Rc<RefCell<ContractInstance>>,
                 String,
                 &'a dyn ClauseArguments,
             ),
@@ -531,7 +548,7 @@ impl<'a> ContractManager<'a> {
         }
 
         // 2. Normalize spends to a Vec for indexing
-        let spends_vec: Vec<(Rc<RefCell<ContractInstance>>, String, &dyn ClauseArguments)> =
+        let spends_vec: Vec<(&Rc<RefCell<ContractInstance>>, String, &dyn ClauseArguments)> =
             spends.into_iter().collect();
 
         // 3. Initialize the transaction
@@ -720,7 +737,6 @@ impl<'a> ContractManager<'a> {
         // 8. Compute sighashes for each input
         let mut sighashes: Vec<[u8; 32]> = Vec::new();
 
-        // Placeholder: Collect spent UTXOs (This should include all necessary information for sighash computation)
         let spent_utxos: Vec<TxOut> = spends_vec
             .iter()
             .map(|(instance_rc, _, _)| {
@@ -733,7 +749,7 @@ impl<'a> ContractManager<'a> {
 
         let mut sighash_cache = SighashCache::new(tx.clone());
 
-        for (input_index, (instance_rc, clause_name, _)) in spends_vec.iter().enumerate() {
+        for input_index in 0..spends_vec.len() {
             let leaf_script = leaf_scripts.get(&input_index).unwrap();
             let sighash = sighash_cache
                 .taproot_script_spend_signature_hash(
@@ -751,6 +767,40 @@ impl<'a> ContractManager<'a> {
         Ok((tx, sighashes))
     }
 
+    pub fn get_spend_tx(
+        &self,
+        instance: &Rc<RefCell<ContractInstance>>,
+        clause_name: &str,
+        clause_args: Box<dyn ClauseArguments>,
+        outputs: Option<Vec<TxOut>>,
+        signers: Option<&HashMap<XOnlyPublicKey, Box<dyn SchnorrSigner>>>,
+    ) -> Result<Transaction, Box<dyn std::error::Error>> {
+        // Ensure the instance is in the Funded state
+        let inst = instance.borrow();
+        if inst.status != ContractInstanceStatus::Funded {
+            return Err("Contract instance is not in a Funded state".into());
+        }
+
+        let outputs = outputs.unwrap_or_else(|| vec![]);
+
+        // Construct the spend transaction
+        let spends = vec![(instance, clause_name.to_string(), &*clause_args)];
+        let (mut spend_tx, sighashes) = self.create_spend_tx(spends, HashMap::new(), outputs)?;
+
+        if sighashes.len() != 1 {
+            return Err("Expected exactly one sighash".into());
+        }
+        let sighash = sighashes[0];
+
+        println!("{:?}", spend_tx);
+        println!("{:?}", sighash);
+
+        spend_tx.input[0].witness =
+            self.get_spend_witness(&inst, clause_name, &*clause_args, &sighash, signers)?;
+
+        Ok(spend_tx)
+    }
+
     pub async fn spend_instance(
         &mut self,
         instance: Rc<RefCell<ContractInstance>>,
@@ -759,33 +809,7 @@ impl<'a> ContractManager<'a> {
         outputs: Option<Vec<TxOut>>,
         signers: Option<&HashMap<XOnlyPublicKey, Box<dyn SchnorrSigner>>>,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, Box<dyn std::error::Error>> {
-        let spend_tx = {
-            // Ensure the instance is in the Funded state
-            let inst = instance.borrow();
-            if inst.status != ContractInstanceStatus::Funded {
-                return Err("Contract instance is not in a Funded state".into());
-            }
-
-            let outputs = outputs.unwrap_or_else(|| vec![]);
-
-            // Construct the spend transaction
-            let spends = vec![(Rc::clone(&instance), clause_name.to_string(), &*clause_args)];
-            let (mut spend_tx, sighashes) =
-                self.create_spend_tx(spends, HashMap::new(), outputs)?;
-
-            if sighashes.len() != 1 {
-                return Err("Expected exactly one sighash".into());
-            }
-            let sighash = sighashes[0];
-
-            println!("{:?}", spend_tx);
-            println!("{:?}", sighash);
-
-            spend_tx.input[0].witness =
-                self.get_spend_witness(&inst, clause_name, &*clause_args, &sighash, signers)?;
-
-            spend_tx
-        };
+        let spend_tx = self.get_spend_tx(&instance, clause_name, clause_args, outputs, signers)?;
 
         println!("{:?}", spend_tx.input[0].witness);
 
@@ -811,6 +835,15 @@ impl<'a> ContractManager<'a> {
         // wait for transaction to confirm and compute the next outputs and compute the next instances
         self.wait_for_spend(vec![Rc::clone(&instance)], starting_height)
             .await
+    }
+
+    pub async fn spend_and_wait(
+        &mut self,
+        instances: Vec<&Rc<RefCell<ContractInstance>>>,
+        tx: &Transaction,
+    ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, Box<dyn std::error::Error>> {
+        self.rpc.send_raw_transaction(tx)?;
+        todo!()
     }
 
     /// Waits for one or more contract instances to be spent and processes the resulting transactions
