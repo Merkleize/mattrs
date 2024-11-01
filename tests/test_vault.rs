@@ -131,24 +131,23 @@ async fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Err
 
     manager.mine_blocks(10)?;
 
-    // TODO: spend the Unvaulting UTXO with the "withdraw" clause
-    let mut tx = manager
-        .get_spend_tx(
-            &unvaulting_inst,
-            "withdraw",
-            Box::new(UnvaultingWithdrawClauseArgs { ctv_hash }),
-            Some(
-                ctv_template
-                    .iter()
-                    .map(|(addr, amount)| TxOut {
-                        script_pubkey: addr.script_pubkey(),
-                        value: *amount,
-                    })
-                    .collect(),
-            ),
-            None,
-        )
-        .expect("Failed to spend instance");
+    // spend the Unvaulting UTXO with the "withdraw" clause
+    let mut tx = mattrs::manager::get_spend_tx(
+        &unvaulting_inst,
+        "withdraw",
+        Box::new(UnvaultingWithdrawClauseArgs { ctv_hash }),
+        Some(
+            ctv_template
+                .iter()
+                .map(|(addr, amount)| TxOut {
+                    script_pubkey: addr.script_pubkey(),
+                    value: *amount,
+                })
+                .collect(),
+        ),
+        None,
+    )
+    .expect("Failed to spend instance");
 
     tx.lock_time = bitcoin::absolute::LockTime::ZERO;
     tx.input[0].sequence = bitcoin::Sequence(10);
@@ -208,7 +207,7 @@ async fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Err
 
     // add witness
     tx.input[0].witness = {
-        manager.get_spend_witness(
+        mattrs::manager::get_spend_witness(
             &unvaulting_inst.borrow(),
             "withdraw",
             &withdraw_args,
