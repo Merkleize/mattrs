@@ -13,6 +13,7 @@ use mattrs::{
     hub::vault::*,
     manager::ContractManager,
     signer::{HotSigner, SchnorrSigner},
+    tx::{get_spend_tx, get_spend_witness},
 };
 
 #[tokio::test]
@@ -132,7 +133,7 @@ async fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Err
     manager.mine_blocks(10)?;
 
     // spend the Unvaulting UTXO with the "withdraw" clause
-    let mut tx = mattrs::manager::get_spend_tx(
+    let mut tx = get_spend_tx(
         &unvaulting_inst,
         "withdraw",
         Box::new(UnvaultingWithdrawClauseArgs { ctv_hash }),
@@ -207,7 +208,7 @@ async fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Err
 
     // add witness
     tx.input[0].witness = {
-        mattrs::manager::get_spend_witness(
+        get_spend_witness(
             &unvaulting_inst.borrow(),
             "withdraw",
             &withdraw_args,
