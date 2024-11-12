@@ -97,7 +97,6 @@ define_clause!(
             .push_opcode(opcodes::all::OP_WITHIN)
             .push_opcode(opcodes::all::OP_VERIFY)
             .push_opcode(opcodes::all::OP_SHA256) // encoder script
-
             // .append_script(&check_output_contract(&s1, 0));
             .push_int(0)
             .push_int(0)
