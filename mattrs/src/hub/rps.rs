@@ -4,15 +4,17 @@ use bitcoin::{
     key::Secp256k1,
     opcodes,
     script::Builder,
-    Address, Amount, KnownHrp, ScriptBuf, Sequence, XOnlyPublicKey,
+    Address, Amount, KnownHrp, Sequence, XOnlyPublicKey,
 };
+use bitcoin_script::{define_pushable, script};
 use std::{any::Any, io::Write};
+
+define_pushable!();
 
 use crate::{
     ccv_list,
     contracts::{
         Clause, Contract, ContractParams, ContractState, Signature, CCV_FLAG_CHECK_INPUT, NUMS_KEY,
-        OP_CHECKCONTRACTVERIFY, OP_CHECKTEMPLATEVERIFY,
     },
     ctv::make_ctv_template_hash,
     define_clause, define_contract, define_params,
@@ -79,6 +81,7 @@ define_clause!(
         m_b: i32,
         bob_sig: Signature => |p: &RPSGameS0Params| p.bob_pk,
     },
+    // witness: <m_b> <bob_sig>
     script(params) {
         let s1 = RPSGameS1::new(RPSGameS1Params {
             alice_pk: params.alice_pk,
@@ -87,24 +90,18 @@ define_clause!(
             stake: params.stake,
         });
 
-        let builder = Builder::new()
-            .push_x_only_key(&params.bob_pk)
-            .push_opcode(opcodes::all::OP_CHECKSIG)
-            .push_opcode(opcodes::all::OP_SWAP)
-            .push_opcode(opcodes::all::OP_DUP)
-            .push_int(0)
-            .push_int(3)
-            .push_opcode(opcodes::all::OP_WITHIN)
-            .push_opcode(opcodes::all::OP_VERIFY)
-            .push_opcode(opcodes::all::OP_SHA256) // encoder script
-            // .append_script(&check_output_contract(&s1, 0));
-            .push_int(0)
-            .push_int(0)
-            .push_slice(s1.get_taptree().get_root_hash())
-            .push_int(0)
-            .push_opcode(OP_CHECKCONTRACTVERIFY.into());
+        script! {
+            <params.bob_pk>
+            CHECKSIG
+            SWAP
 
-        builder.into_script()
+            // stack on successful signature check: <1> <m_b>
+
+            DUP 0 3 WITHIN VERIFY // check that m_b is 0, 1 or 2
+
+            <RPSGameS1State::encoder_script()>
+            0 0 <s1.get_taptree().get_root_hash()> 0 CHECKCONTRACTVERIFY
+        }
     },
     next_outputs(params, args, _state) {
         let s1 = RPSGameS1::new(RPSGameS1Params {
@@ -153,9 +150,9 @@ impl RPSGameS1State {
     }
 
     pub fn encoder_script() -> bitcoin::ScriptBuf {
-        Builder::new()
-            .push_opcode(opcodes::all::OP_SHA256)
-            .into_script()
+        script! {
+            SHA256
+        }
     }
 }
 
@@ -173,48 +170,45 @@ impl ContractState for RPSGameS1State {
 fn make_script(diff: i32, ctv_hash: &[u8; 32], c_a: &[u8; 32]) -> bitcoin::ScriptBuf {
     // diff is (m_b - m_a) % 3
     // Witness: [<m_b> <m_a> <r_a>]
-    let s1 = Builder::new()
-        .push_opcode(opcodes::all::OP_OVER)
-        .push_opcode(opcodes::all::OP_DUP)
-        .push_opcode(opcodes::all::OP_TOALTSTACK)
-        .push_int(0)
-        .push_int(3)
-        .push_opcode(opcodes::all::OP_WITHIN)
-        .push_opcode(opcodes::all::OP_VERIFY)
-        .push_opcode(opcodes::all::OP_CAT)
-        .push_opcode(opcodes::all::OP_SHA256)
-        .push_slice(c_a)
-        .push_opcode(opcodes::all::OP_EQUALVERIFY)
-        .push_opcode(opcodes::all::OP_DUP)
-        .into_script();
-    let s2 = RPSGameS1State::encoder_script();
-    let s3 = Builder::new()
-        .push_int(-1)
-        .push_int(0)
-        .push_int(-1)
-        .push_int(CCV_FLAG_CHECK_INPUT.into())
-        .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-        .push_opcode(opcodes::all::OP_FROMALTSTACK)
-        .push_opcode(opcodes::all::OP_SUB)
-        .push_opcode(opcodes::all::OP_DUP)
-        .push_int(0)
-        .push_opcode(opcodes::all::OP_LESSTHAN)
-        .push_opcode(opcodes::all::OP_IF)
-        .push_int(3)
-        .push_opcode(opcodes::all::OP_ADD)
-        .push_opcode(opcodes::all::OP_ENDIF)
-        .push_int(diff.into())
-        .push_opcode(opcodes::all::OP_EQUALVERIFY)
-        .push_slice(ctv_hash)
-        .push_opcode(OP_CHECKTEMPLATEVERIFY.into())
-        .into_script();
+    script! {
+        OVER DUP TOALTSTACK // save m_a
 
-    // concatenate s1, s2 and s3
-    let mut script = s1.to_bytes();
-    script.extend_from_slice(&s2.to_bytes());
-    script.extend_from_slice(&s3.to_bytes());
+        // stack: <m_b> <m_a> <r_a>        altstack: <m_a>
 
-    ScriptBuf::from(script)
+        0 3 WITHIN VERIFY // check that m_a is 0, 1 or 2
+
+        // check that SHA256(m_a || r_a) equals c_a
+        CAT SHA256
+        <c_a>
+        EQUALVERIFY
+
+        DUP
+
+        // stack: <m_b> <m_b>              altstack: <m_a>
+
+        <RPSGameS1State::encoder_script()>
+        -1 0 -1 <CCV_FLAG_CHECK_INPUT> CHECKCONTRACTVERIFY
+
+        // stack: <m_b>                    altstack: <m_a>
+
+        FROMALTSTACK
+        SUB
+
+        // stack: <m_b - m_a>
+
+        // if the result is negative, add 3
+        DUP
+        0 LESSTHAN
+        IF
+            3 ADD
+        ENDIF
+
+        <diff>  // draw / Bob wins / Alice wins, respectively
+        EQUALVERIFY
+
+        <ctv_hash>
+        CHECKTEMPLATEVERIFY
+    }
 }
 
 // Clause for a tie in RPSGameS1

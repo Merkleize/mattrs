@@ -1,13 +1,16 @@
 /// CONTRACT IMPLEMENTATIONS
-use bitcoin::{opcodes, script::Builder, XOnlyPublicKey};
+use bitcoin::XOnlyPublicKey;
+use bitcoin_script::{define_pushable, script};
+
+define_pushable!();
 
 use crate::{
     ccv_list,
     contracts::{
         Clause, Contract, ContractParams, ContractState, Signature, CCV_FLAG_CHECK_INPUT,
-        CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY, OP_CHECKCONTRACTVERIFY, OP_CHECKTEMPLATEVERIFY,
+        CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY,
     },
-    define_clause, define_contract, define_params,
+    define_clause, define_contract, define_params, optional_key,
 };
 
 define_params!(VaultParams {
@@ -18,7 +21,6 @@ define_params!(VaultParams {
 });
 
 // clause: trigger
-
 define_clause!(
     VaultTriggerClause,
     VaultTriggerClauseArgs,
@@ -37,19 +39,16 @@ define_clause!(
             recover_pk: params.recover_pk,
         });
 
-        let builder = Builder::new();
-        let builder = if let Some(pk) = params.alternate_pk {
-            builder.push_x_only_key(&pk)
-        } else {
-            builder.push_opcode(opcodes::OP_0)
-        };
-        let builder = builder
-            .push_slice(unvaulting.get_taptree().get_root_hash())
-            .push_int(0)
-            .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-            .push_x_only_key(&params.unvault_pk)
-            .push_opcode(opcodes::all::OP_CHECKSIG);
-        builder.into_script()
+        // witness: <sig> <ctv-hash> <out_i>
+        script! {
+            <optional_key(params.alternate_pk)>
+            <unvaulting.get_taptree().get_root_hash()>
+            0
+            CHECKCONTRACTVERIFY
+
+            <params.unvault_pk>
+            CHECKSIG
+        }
     },
     next_outputs(params, args, _state) {
         // next_outputs body
@@ -64,8 +63,6 @@ define_clause!(
         ]
     }
 );
-
-// clause: trigger_and_revault
 
 define_clause!(
     VaultTriggerAndRevaultClause,
@@ -86,26 +83,23 @@ define_clause!(
             recover_pk: params.recover_pk,
         });
 
-        let builder = Builder::new()
-            .push_int(0)
-            .push_opcode(opcodes::all::OP_SWAP)
-            .push_int(-1)
-            .push_int(-1)
-            .push_int(CCV_FLAG_DEDUCT_OUTPUT_AMOUNT.into())
-            .push_opcode(OP_CHECKCONTRACTVERIFY.into());
+       // witness: <sig> <ctv-hash> <trigger_out_i> <revault_out_i>
+        script! {
+            0 OP_SWAP // no data tweak
+            -1 // current input's taptweak
+            -1 // taptree
+            <CCV_FLAG_DEDUCT_OUTPUT_AMOUNT>
+            CHECKCONTRACTVERIFY
 
-        let builder = if let Some(pk) = params.alternate_pk {
-            builder.push_x_only_key(&pk)
-        } else {
-            builder.push_opcode(opcodes::OP_0)
-        };
-        let builder = builder
-            .push_slice(unvaulting.get_taptree().get_root_hash())
-            .push_int(0)
-            .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-            .push_x_only_key(&params.unvault_pk)
-            .push_opcode(opcodes::all::OP_CHECKSIG);
-        builder.into_script()
+            // data and index already on the stack
+            <optional_key(params.alternate_pk)>
+            <unvaulting.get_taptree().get_root_hash()>
+            0
+            CHECKCONTRACTVERIFY
+
+            <params.unvault_pk>
+            CHECKSIG
+        }
     },
     next_outputs(params, args, _state) {
         let unvaulting = Unvaulting::new(UnvaultingParams {
@@ -122,7 +116,6 @@ define_clause!(
 );
 
 // clause: recover
-
 define_clause!(
     VaultRecoverClause,
     VaultRecoverClauseArgs,
@@ -130,16 +123,17 @@ define_clause!(
     VaultParams,
     (),
     args { },
+    // witness: <out_i>
     script(params) {
-        Builder::new()
-            .push_int(0)
-            .push_opcode(opcodes::all::OP_SWAP)
-            .push_x_only_key(&params.recover_pk)
-            .push_int(0)
-            .push_int(0)
-            .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-            .push_opcode(opcodes::OP_TRUE)
-            .into_script()
+        script! {
+            0 // data
+            SWAP // <out_i> (from witness)
+            <params.recover_pk>
+            0 // taptree
+            0 // flags
+            CHECKCONTRACTVERIFY
+            TRUE
+        }
     },
     next_outputs(_params, _args, _state) {
         ccv_list![]
@@ -186,7 +180,6 @@ impl ContractState for UnvaultingState {
 }
 
 // clause: withdraw
-
 define_clause!(
     UnvaultingWithdrawClause,
     UnvaultingWithdrawClauseArgs,
@@ -196,25 +189,20 @@ define_clause!(
     args {
         ctv_hash: [u8; 32],
     },
+    // witness: <ctv_hash>
     script(params) {
-        let builder = Builder::new()
-            .push_opcode(opcodes::all::OP_DUP);
+        script! {
+            DUP
+            -1 <optional_key(params.alternate_pk)> -1 <CCV_FLAG_CHECK_INPUT> CHECKCONTRACTVERIFY
 
-        let builder = builder.push_int(-1);
-        let builder = if let Some(pk) = params.alternate_pk {
-            builder.push_x_only_key(&pk)
-        } else {
-            builder.push_opcode(opcodes::OP_0)
-        };
-        let builder = builder
-            .push_int(-1)
-            .push_int(CCV_FLAG_CHECK_INPUT.into())
-            .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-            .push_int(params.spend_delay.into())
-            .push_opcode(opcodes::all::OP_CSV)
-            .push_opcode(opcodes::all::OP_DROP)
-            .push_opcode(OP_CHECKTEMPLATEVERIFY.into());
-        builder.into_script()
+            // check timelock
+            <params.spend_delay>
+            CSV
+            DROP
+
+            // Check that the transaction output is as expected
+            CHECKTEMPLATEVERIFY
+        }
     },
     next_outputs(_params, _args, _state) {
         ccv_list![]
@@ -233,15 +221,14 @@ define_clause!(
         ctv_hash: [u8; 32],
     },
     script(params) {
-        Builder::new()
-            .push_int(0)
-            .push_opcode(opcodes::all::OP_SWAP)
-            .push_x_only_key(&params.recover_pk)
-            .push_int(0)
-            .push_int(0)
-            .push_opcode(OP_CHECKCONTRACTVERIFY.into())
-            .push_opcode(opcodes::OP_TRUE)
-            .into_script()
+        script! {
+            0 // data
+            SWAP // <out_i> (from witness)
+            <params.recover_pk>
+            0 // taptree
+            0 // flags
+            CHECKCONTRACTVERIFY
+            TRUE        }
     },
     next_outputs(_params, _args, _state) {
         ccv_list![]
