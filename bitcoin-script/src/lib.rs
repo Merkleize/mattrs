@@ -227,6 +227,16 @@ pub fn define_pushable(_: TokenStream) -> TokenStream {
                     builder.push_slice(PushBytesBuf::try_from(self).unwrap())
                 }
             }
+            impl NotU8Pushable for [u8; 32] {
+                fn bitcoin_script_push(self, builder: Builder) -> Builder {
+                    builder.push_slice(PushBytesBuf::try_from(self).unwrap())
+                }
+            }
+            impl NotU8Pushable for &[u8; 32] {
+                fn bitcoin_script_push(self, builder: Builder) -> Builder {
+                    builder.push_slice(PushBytesBuf::try_from(self).unwrap())
+                }
+            }
             impl NotU8Pushable for ::bitcoin::PublicKey {
                 fn bitcoin_script_push(self, builder: Builder) -> Builder {
                     builder.push_key(&self)
