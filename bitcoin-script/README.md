@@ -1,3 +1,5 @@
+Taken from https://github.com/BitVM/rust-bitcoin-script/tree/4af7ce2762e72e82b37cc8dbd130347dedc5238e, with some minor local changes.
+
 # bitcoin-script
 
 [![Rust](https://github.com/mappum/rust-bitcoin-script/workflows/Rust/badge.svg)](https://github.com/mappum/rust-bitcoin-script/actions?query=workflow%3ARust)
