@@ -6,10 +6,10 @@ define_pushable!();
 use crate::{
     ccv_list,
     contracts::{
-        Clause, Contract, ContractParams, ContractState, Signature, CCV_FLAG_CHECK_INPUT,
+        Clause, Contract, ContractParams, Signature, CCV_FLAG_CHECK_INPUT,
         CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY,
     },
-    define_clause, define_contract, define_params, optional_key,
+    define_clause, define_contract, define_params, define_state, optional_key,
 };
 
 define_params!(VaultParams {
@@ -155,28 +155,17 @@ define_params!(UnvaultingParams {
     recover_pk: XOnlyPublicKey,
 });
 
-// Define the UnvaultingState
-#[derive(Debug)]
-pub struct UnvaultingState {
-    pub ctv_hash: [u8; 32],
-}
-
-impl UnvaultingState {
-    fn new(ctv_hash: [u8; 32]) -> Self {
-        Self { ctv_hash }
+define_state!(
+    UnvaultingState {
+        ctv_hash: [u8; 32]
+    },
+    encode(state){
+        state.ctv_hash
+    },
+    encoder_script() {
+        script! {}
     }
-}
-
-impl ContractState for UnvaultingState {
-    // TODO: implement a define_state macro to hide the boilerplate
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn encode(&self) -> [u8; 32] {
-        self.ctv_hash
-    }
-}
+);
 
 // clause: withdraw
 define_clause!(

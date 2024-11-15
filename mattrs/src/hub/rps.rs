@@ -5,17 +5,15 @@ use bitcoin::{
     Address, Amount, KnownHrp, Sequence, XOnlyPublicKey,
 };
 use bitcoin_script::{define_pushable, script};
-use std::{any::Any, io::Write};
+use std::io::Write;
 
 define_pushable!();
 
 use crate::{
     ccv_list,
-    contracts::{
-        Clause, Contract, ContractParams, ContractState, Signature, CCV_FLAG_CHECK_INPUT, NUMS_KEY,
-    },
+    contracts::{Clause, Contract, ContractParams, Signature, CCV_FLAG_CHECK_INPUT, NUMS_KEY},
     ctv::make_ctv_template_hash,
-    define_clause, define_contract, define_params,
+    define_clause, define_contract, define_params, define_state,
 };
 
 /// Helper functions for the RPS game
@@ -133,36 +131,22 @@ define_params!(RPSGameS1Params {
     stake: u64,
 });
 
-/// State for the RPSGameS1 contract
-#[derive(Debug)]
-pub struct RPSGameS1State {
-    m_b_hash: [u8; 32],
-}
-
-impl RPSGameS1State {
-    pub fn new(m_b: i32) -> Self {
+define_state!(
+    RPSGameS1State {
+        m_b: i32
+    },
+    encode(state){
         let mut hasher = sha256::HashEngine::default();
-        m_b.consensus_encode(&mut hasher).unwrap();
+        state.m_b.consensus_encode(&mut hasher).unwrap();
         let m_b_hash = sha256::Hash::from_engine(hasher).to_byte_array();
-        Self { m_b_hash }
-    }
-
-    pub fn encoder_script() -> bitcoin::ScriptBuf {
+        m_b_hash
+    },
+    encoder_script() {
         script! {
             SHA256
         }
     }
-}
-
-impl ContractState for RPSGameS1State {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn encode(&self) -> [u8; 32] {
-        self.m_b_hash
-    }
-}
+);
 
 /// Function to generate the script for the clauses in RPSGameS1
 fn make_script(diff: i32, ctv_hash: &[u8; 32], c_a: &[u8; 32]) -> bitcoin::ScriptBuf {

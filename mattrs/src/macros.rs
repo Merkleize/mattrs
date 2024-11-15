@@ -28,6 +28,45 @@ macro_rules! ccv_list {
 }
 
 #[macro_export]
+macro_rules! define_state {
+    (
+        $state_struct_name:ident {
+            $( $field_name:ident : $field_type:ty ),* $(,)?
+        },
+        encode($self:ident) $encode_block:block,
+        encoder_script() $encoder_script_block:block
+    ) => {
+        #[derive(Debug, Clone)]
+        pub struct $state_struct_name {
+            $( pub $field_name : $field_type ),*
+        }
+
+        impl $state_struct_name {
+            pub fn new( $( $field_name : $field_type ),* ) -> Self {
+                Self {
+                    $( $field_name ),*
+                }
+            }
+
+            pub fn encoder_script() -> bitcoin::ScriptBuf {
+                $encoder_script_block
+            }
+        }
+
+        impl $crate::contracts::ContractState for $state_struct_name {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn encode(&self) -> [u8; 32] {
+                let $self = self;
+                $encode_block
+            }
+        }
+    }
+}
+
+#[macro_export]
 macro_rules! define_params {
     (
         $params_struct_name:ident {
