@@ -20,7 +20,7 @@ use mattrs::{
 async fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let secp = Secp256k1::new();
     // Initialize the RPC client
-    let client = common::get_rpc_client();
+    let client = common::get_rpc_client("testwallet");
 
     let unvault_privkey = Xpriv::from_str(
         "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
