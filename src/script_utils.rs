@@ -3,7 +3,7 @@
 //! This module provides functions for encoding and decoding values to/from
 //! Bitcoin Script format, particularly for witness stack manipulation.
 
-use crate::WitnessError;
+use crate::contracts::WitnessError;
 
 /// Converts a Rust i64 to Bitcoin Script's little-endian signed integer format.
 ///

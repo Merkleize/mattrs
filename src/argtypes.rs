@@ -3,7 +3,7 @@
 //! This module provides a type-safe framework for converting between high-level Rust values
 //! and Bitcoin witness stack elements. It mirrors the Python ArgType system from pymatt.
 
-use crate::WitnessError;
+use crate::contracts::WitnessError;
 use crate::script_utils::{bn2vch, vch2bn};
 use std::any::Any;
 use std::collections::HashMap;
