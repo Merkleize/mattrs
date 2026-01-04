@@ -3,10 +3,9 @@
 //! This module provides a type-safe framework for converting between high-level Rust values
 //! and Bitcoin witness stack elements. It mirrors the Python ArgType system from pymatt.
 
-use crate::contracts::WitnessError;
+use crate::contracts::{ArgType as ArgTypeTrait, WitnessError};
 use crate::script_utils::{bn2vch, vch2bn};
 use std::any::Any;
-use std::collections::HashMap;
 
 /// Represents a value that can be used as a contract clause argument.
 ///
@@ -75,55 +74,9 @@ impl ArgValue {
     }
 }
 
-/// Trait for types that can serialize and deserialize witness stack arguments.
-///
-/// This trait allows library users to define custom argument types while maintaining
-/// type safety and consistent error handling. Implementations should validate that
-/// the provided ArgValue matches the expected type.
-///
-/// # Object Safety
-///
-/// This trait is object-safe to allow `Box<dyn ArgType>` for runtime polymorphism.
-pub trait ArgType: Send + Sync {
-    /// Serializes a value into one or more witness stack elements.
-    ///
-    /// # Arguments
-    ///
-    /// * `value` - The value to serialize
-    ///
-    /// # Returns
-    ///
-    /// A vector of byte vectors, where each inner vector is a witness element.
-    /// Most types return a single element, but complex types (like MerkleProof)
-    /// may return multiple elements.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The value variant doesn't match the expected type
-    /// - The value is invalid for this type
-    fn serialize_to_wit(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError>;
-
-    /// Deserializes a value from the witness stack.
-    ///
-    /// # Arguments
-    ///
-    /// * `stack` - A slice of witness elements to deserialize from
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing:
-    /// - The number of elements consumed from the stack
-    /// - The deserialized value
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The stack doesn't have enough elements
-    /// - The elements are malformed
-    /// - Deserialization fails
-    fn deserialize_from_wit(&self, stack: &[Vec<u8>]) -> Result<(usize, ArgValue), WitnessError>;
-}
+// ============================================================================
+// Basic Argument Types
+// ============================================================================
 
 /// Standard argument type for signed integers.
 ///
@@ -131,8 +84,8 @@ pub trait ArgType: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct IntType;
 
-impl ArgType for IntType {
-    fn serialize_to_wit(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError> {
+impl ArgTypeTrait for IntType {
+    fn encode_to_witness(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError> {
         match value {
             ArgValue::Int(n) => Ok(vec![bn2vch(*n)]),
             _ => Err(WitnessError::TypeMismatch {
@@ -142,13 +95,17 @@ impl ArgType for IntType {
         }
     }
 
-    fn deserialize_from_wit(&self, stack: &[Vec<u8>]) -> Result<(usize, ArgValue), WitnessError> {
+    fn decode_from_witness(&self, stack: &[Vec<u8>]) -> Result<(ArgValue, usize), WitnessError> {
         if stack.is_empty() {
             return Err(WitnessError::StackUnderflow);
         }
 
         let value = vch2bn(&stack[0])?;
-        Ok((1, ArgValue::Int(value)))
+        Ok((ArgValue::Int(value), 1))
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ArgTypeTrait> {
+        Box::new(self.clone())
     }
 }
 
@@ -158,8 +115,8 @@ impl ArgType for IntType {
 #[derive(Debug, Clone)]
 pub struct BytesType;
 
-impl ArgType for BytesType {
-    fn serialize_to_wit(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError> {
+impl ArgTypeTrait for BytesType {
+    fn encode_to_witness(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError> {
         match value {
             ArgValue::Bytes(bytes) => Ok(vec![bytes.clone()]),
             _ => Err(WitnessError::TypeMismatch {
@@ -169,12 +126,16 @@ impl ArgType for BytesType {
         }
     }
 
-    fn deserialize_from_wit(&self, stack: &[Vec<u8>]) -> Result<(usize, ArgValue), WitnessError> {
+    fn decode_from_witness(&self, stack: &[Vec<u8>]) -> Result<(ArgValue, usize), WitnessError> {
         if stack.is_empty() {
             return Err(WitnessError::StackUnderflow);
         }
 
-        Ok((1, ArgValue::Bytes(stack[0].clone())))
+        Ok((ArgValue::Bytes(stack[0].clone()), 1))
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ArgTypeTrait> {
+        Box::new(self.clone())
     }
 }
 
@@ -190,14 +151,6 @@ pub struct SignerType {
 
 impl SignerType {
     /// Creates a new SignerType with the given public key.
-    ///
-    /// # Arguments
-    ///
-    /// * `pubkey` - A 32-byte x-only public key
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the pubkey is not exactly 32 bytes.
     pub fn new(pubkey: [u8; 32]) -> Self {
         SignerType { pubkey }
     }
@@ -221,8 +174,8 @@ impl SignerType {
     }
 }
 
-impl ArgType for SignerType {
-    fn serialize_to_wit(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError> {
+impl ArgTypeTrait for SignerType {
+    fn encode_to_witness(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError> {
         match value {
             ArgValue::Signature(sig) => Ok(vec![sig.clone()]),
             _ => Err(WitnessError::TypeMismatch {
@@ -232,100 +185,22 @@ impl ArgType for SignerType {
         }
     }
 
-    fn deserialize_from_wit(&self, stack: &[Vec<u8>]) -> Result<(usize, ArgValue), WitnessError> {
+    fn decode_from_witness(&self, stack: &[Vec<u8>]) -> Result<(ArgValue, usize), WitnessError> {
         if stack.is_empty() {
             return Err(WitnessError::StackUnderflow);
         }
 
-        Ok((1, ArgValue::Signature(stack[0].clone())))
+        Ok((ArgValue::Signature(stack[0].clone()), 1))
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ArgTypeTrait> {
+        Box::new(self.clone())
     }
 }
 
-/// A specification for a contract clause argument.
-///
-/// Pairs an argument name with its type definition.
-pub type ArgSpec = Vec<(String, Box<dyn ArgType>)>;
-
-/// Converts a map of argument values into witness stack elements.
-///
-/// # Arguments
-///
-/// * `specs` - The argument specifications (names and types)
-/// * `args` - Map of argument names to their values
-///
-/// # Returns
-///
-/// A flat vector of witness stack elements in the correct order.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - A required argument is missing
-/// - An argument has the wrong type
-/// - Serialization fails
-pub fn stack_elements_from_args(
-    specs: &ArgSpec,
-    args: &HashMap<String, ArgValue>,
-) -> Result<Vec<Vec<u8>>, WitnessError> {
-    let mut result = Vec::new();
-
-    for (arg_name, arg_type) in specs {
-        let value = args
-            .get(arg_name)
-            .ok_or_else(|| WitnessError::MissingArgument(arg_name.clone()))?;
-
-        let elements = arg_type.serialize_to_wit(value)?;
-        result.extend(elements);
-    }
-
-    Ok(result)
-}
-
-/// Converts witness stack elements into a map of argument values.
-///
-/// # Arguments
-///
-/// * `specs` - The argument specifications (names and types)
-/// * `elements` - The witness stack elements to deserialize
-///
-/// # Returns
-///
-/// A map of argument names to their deserialized values.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - There are too few elements in the stack
-/// - There are too many elements (not all consumed)
-/// - Deserialization fails
-pub fn args_from_stack_elements(
-    specs: &ArgSpec,
-    elements: &[Vec<u8>],
-) -> Result<HashMap<String, ArgValue>, WitnessError> {
-    let mut result = HashMap::new();
-    let mut cursor = 0;
-
-    for (arg_name, arg_type) in specs {
-        if cursor >= elements.len() {
-            return Err(WitnessError::StackUnderflow);
-        }
-
-        let (consumed, value) = arg_type.deserialize_from_wit(&elements[cursor..])?;
-        result.insert(arg_name.clone(), value);
-        cursor += consumed;
-    }
-
-    // Ensure all elements were consumed
-    if cursor != elements.len() {
-        return Err(WitnessError::InvalidData(format!(
-            "Too many witness elements: expected {}, got {}",
-            cursor,
-            elements.len()
-        )));
-    }
-
-    Ok(result)
-}
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -336,10 +211,10 @@ mod tests {
         let int_type = IntType;
         let value = ArgValue::Int(42);
 
-        let serialized = int_type.serialize_to_wit(&value).unwrap();
+        let serialized = int_type.encode_to_witness(&value).unwrap();
         assert_eq!(serialized.len(), 1);
 
-        let (consumed, deserialized) = int_type.deserialize_from_wit(&serialized).unwrap();
+        let (deserialized, consumed) = int_type.decode_from_witness(&serialized).unwrap();
         assert_eq!(consumed, 1);
         match deserialized {
             ArgValue::Int(n) => assert_eq!(n, 42),
@@ -353,11 +228,11 @@ mod tests {
         let data = vec![1, 2, 3, 4, 5];
         let value = ArgValue::Bytes(data.clone());
 
-        let serialized = bytes_type.serialize_to_wit(&value).unwrap();
+        let serialized = bytes_type.encode_to_witness(&value).unwrap();
         assert_eq!(serialized.len(), 1);
         assert_eq!(serialized[0], data);
 
-        let (consumed, deserialized) = bytes_type.deserialize_from_wit(&serialized).unwrap();
+        let (deserialized, consumed) = bytes_type.decode_from_witness(&serialized).unwrap();
         assert_eq!(consumed, 1);
         match deserialized {
             ArgValue::Bytes(b) => assert_eq!(b, data),
@@ -372,11 +247,11 @@ mod tests {
         let sig = vec![0xaa; 64];
         let value = ArgValue::Signature(sig.clone());
 
-        let serialized = signer_type.serialize_to_wit(&value).unwrap();
+        let serialized = signer_type.encode_to_witness(&value).unwrap();
         assert_eq!(serialized.len(), 1);
         assert_eq!(serialized[0], sig);
 
-        let (consumed, deserialized) = signer_type.deserialize_from_wit(&serialized).unwrap();
+        let (deserialized, consumed) = signer_type.decode_from_witness(&serialized).unwrap();
         assert_eq!(consumed, 1);
         match deserialized {
             ArgValue::Signature(s) => assert_eq!(s, sig),
@@ -385,98 +260,11 @@ mod tests {
     }
 
     #[test]
-    fn test_type_mismatch() {
+    fn test_type_mismatch_error() {
         let int_type = IntType;
         let wrong_value = ArgValue::Bytes(vec![1, 2, 3]);
 
-        let result = int_type.serialize_to_wit(&wrong_value);
+        let result = int_type.encode_to_witness(&wrong_value);
         assert!(matches!(result, Err(WitnessError::TypeMismatch { .. })));
-    }
-
-    #[test]
-    fn test_stack_elements_from_args() {
-        let specs: ArgSpec = vec![
-            ("x".to_string(), Box::new(IntType)),
-            ("y".to_string(), Box::new(BytesType)),
-        ];
-
-        let mut args = HashMap::new();
-        args.insert("x".to_string(), ArgValue::Int(100));
-        args.insert("y".to_string(), ArgValue::Bytes(vec![0xaa, 0xbb]));
-
-        let elements = stack_elements_from_args(&specs, &args).unwrap();
-        assert_eq!(elements.len(), 2);
-        assert_eq!(elements[0], bn2vch(100));
-        assert_eq!(elements[1], vec![0xaa, 0xbb]);
-    }
-
-    #[test]
-    fn test_args_from_stack_elements() {
-        let specs: ArgSpec = vec![
-            ("x".to_string(), Box::new(IntType)),
-            ("y".to_string(), Box::new(BytesType)),
-        ];
-
-        let elements = vec![bn2vch(100), vec![0xaa, 0xbb]];
-
-        let args = args_from_stack_elements(&specs, &elements).unwrap();
-        assert_eq!(args.len(), 2);
-
-        match args.get("x").unwrap() {
-            ArgValue::Int(n) => assert_eq!(*n, 100),
-            _ => panic!("Expected Int"),
-        }
-
-        match args.get("y").unwrap() {
-            ArgValue::Bytes(b) => assert_eq!(b, &vec![0xaa, 0xbb]),
-            _ => panic!("Expected Bytes"),
-        }
-    }
-
-    #[test]
-    fn test_roundtrip_full() {
-        let specs: ArgSpec = vec![
-            ("a".to_string(), Box::new(IntType)),
-            ("b".to_string(), Box::new(BytesType)),
-            ("c".to_string(), Box::new(SignerType::new([0x01; 32]))),
-        ];
-
-        let mut original_args = HashMap::new();
-        original_args.insert("a".to_string(), ArgValue::Int(-42));
-        original_args.insert("b".to_string(), ArgValue::Bytes(vec![1, 2, 3]));
-        original_args.insert("c".to_string(), ArgValue::Signature(vec![0xff; 64]));
-
-        let elements = stack_elements_from_args(&specs, &original_args).unwrap();
-        let recovered_args = args_from_stack_elements(&specs, &elements).unwrap();
-
-        assert_eq!(original_args.len(), recovered_args.len());
-
-        match (
-            original_args.get("a").unwrap(),
-            recovered_args.get("a").unwrap(),
-        ) {
-            (ArgValue::Int(a), ArgValue::Int(b)) => assert_eq!(a, b),
-            _ => panic!("Type mismatch"),
-        }
-    }
-
-    #[test]
-    fn test_missing_argument_error() {
-        let specs: ArgSpec = vec![("x".to_string(), Box::new(IntType))];
-
-        let args = HashMap::new(); // Empty!
-
-        let result = stack_elements_from_args(&specs, &args);
-        assert!(matches!(result, Err(WitnessError::MissingArgument(_))));
-    }
-
-    #[test]
-    fn test_too_many_elements_error() {
-        let specs: ArgSpec = vec![("x".to_string(), Box::new(IntType))];
-
-        let elements = vec![bn2vch(1), bn2vch(2)]; // Too many!
-
-        let result = args_from_stack_elements(&specs, &elements);
-        assert!(matches!(result, Err(WitnessError::InvalidData(_))));
     }
 }
