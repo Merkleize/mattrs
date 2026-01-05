@@ -1,6 +1,11 @@
 use std::{collections::HashMap, fmt, fmt::Debug, marker::PhantomData, sync::Arc};
 
-use bitcoin::ScriptBuf;
+use bitcoin::{
+    ScriptBuf, TapTweakHash, XOnlyPublicKey,
+    hashes::{Hash, sha256},
+    key::{Secp256k1, TweakedPublicKey},
+    taproot::{LeafVersion, TapLeafHash, TapNodeHash},
+};
 
 use crate::argtypes::ArgValue;
 
@@ -117,11 +122,82 @@ pub trait WitnessEncodable {
         Self: Sized;
 }
 
-/// Marker trait for contract parameters.
+// ============================================================================
+// WitnessEncodable implementations for common types
+// ============================================================================
+
+impl WitnessEncodable for i32 {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![crate::script_utils::bn2vch(*self as i64)]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        let val = crate::script_utils::vch2bn(&witness[0])
+            .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+        Ok((val as i32, 1))
+    }
+}
+
+impl WitnessEncodable for i64 {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![crate::script_utils::bn2vch(*self)]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        let val = crate::script_utils::vch2bn(&witness[0])
+            .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+        Ok((val, 1))
+    }
+}
+
+impl<const N: usize> WitnessEncodable for [u8; N] {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![self.to_vec()]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        if witness[0].len() != N {
+            return Err(WitnessError::InvalidValue(format!(
+                "Expected array of length {}, got {}",
+                N,
+                witness[0].len()
+            )));
+        }
+        let mut arr = [0u8; N];
+        arr.copy_from_slice(&witness[0]);
+        Ok((arr, 1))
+    }
+}
+
+impl WitnessEncodable for Vec<u8> {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![self.clone()]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        Ok((witness[0].clone(), 1))
+    }
+}
+
+// ============================================================================
+// Marker Trait Implementations
+// ============================================================================
 pub trait ContractParams: Debug + Clone + Send + Sync {
     /// Encode parameters to bytes.
     fn encode(&self) -> Vec<u8>;
-    
+
     /// Decode parameters from bytes.
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError>
     where
@@ -132,12 +208,12 @@ pub trait ContractParams: Debug + Clone + Send + Sync {
 pub trait ContractState: Debug + Clone + Send + Sync {
     /// Encode the state to bytes (typically 32 bytes for hash commitment).
     fn encode(&self) -> Vec<u8>;
-    
+
     /// Decode state from bytes.
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError>
     where
         Self: Sized;
-    
+
     /// Get the script that computes the state commitment on-chain.
     fn encoder_script(&self) -> ScriptBuf {
         ScriptBuf::new() // Default: no encoder script needed
@@ -148,7 +224,7 @@ pub trait ContractState: Debug + Clone + Send + Sync {
 pub trait ClauseArgs: Debug + Clone + Send + Sync {
     /// Encode arguments to witness stack elements.
     fn encode_to_witness(&self) -> Vec<Vec<u8>>;
-    
+
     /// Decode arguments from witness stack elements.
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError>
     where
@@ -181,6 +257,208 @@ pub struct ClauseOutput {
     pub next_state: Option<Vec<u8>>,
     /// Determines the semantic of the output amount.
     pub next_amount: ClauseOutputAmountBehaviour,
+}
+
+// ============================================================================
+// TapTree Structure
+// ============================================================================
+
+/// A single leaf in a taproot tree.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TapLeaf {
+    pub name: String,
+    pub script: ScriptBuf,
+}
+
+/// Recursive taproot tree structure.
+#[derive(Debug, Clone)]
+pub enum TapTree {
+    Leaf(TapLeaf),
+    Branch {
+        left: Arc<TapTree>,
+        right: Arc<TapTree>,
+    },
+}
+
+impl TapTree {
+    /// Create a new leaf node.
+    pub fn leaf(name: impl Into<String>, script: ScriptBuf) -> Self {
+        TapTree::Leaf(TapLeaf {
+            name: name.into(),
+            script,
+        })
+    }
+
+    /// Create a new branch node.
+    pub fn branch(left: TapTree, right: TapTree) -> Self {
+        TapTree::Branch {
+            left: Arc::new(left),
+            right: Arc::new(right),
+        }
+    }
+
+    /// Compute the merkle root hash of this tree.
+    pub fn root_hash(&self) -> [u8; 32] {
+        match self {
+            TapTree::Leaf(TapLeaf { name: _, script }) => {
+                let leaf_hash =
+                    TapLeafHash::from_script(script.as_script(), LeafVersion::TapScript);
+                *leaf_hash.as_byte_array()
+            }
+            TapTree::Branch { left, right } => {
+                let left_hash = TapNodeHash::from_byte_array(left.root_hash());
+                let right_hash = TapNodeHash::from_byte_array(right.root_hash());
+                let node_hash = TapNodeHash::from_node_hashes(left_hash, right_hash);
+                *node_hash.as_byte_array()
+            }
+        }
+    }
+
+    /// Get the merkle proof for a specific leaf.
+    /// Returns the sibling hashes from bottom to top.
+    pub fn merkle_proof(&self, target_leaf: &TapLeaf) -> Option<Vec<[u8; 32]>> {
+        match self {
+            TapTree::Leaf(leaf) => {
+                if leaf == target_leaf {
+                    Some(Vec::new())
+                } else {
+                    None
+                }
+            }
+            TapTree::Branch { left, right } => {
+                if let Some(mut proof) = left.merkle_proof(target_leaf) {
+                    proof.insert(0, right.root_hash());
+                    Some(proof)
+                } else if let Some(mut proof) = right.merkle_proof(target_leaf) {
+                    proof.insert(0, left.root_hash());
+                    Some(proof)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    /// Find a specific leaf by name.
+    pub fn find_leaf(&self, name: &str) -> Option<&TapLeaf> {
+        match self {
+            TapTree::Leaf(leaf) => {
+                if leaf.name == name {
+                    Some(leaf)
+                } else {
+                    None
+                }
+            }
+            TapTree::Branch { left, right } => {
+                left.find_leaf(name).or_else(|| right.find_leaf(name))
+            }
+        }
+    }
+
+    /// Find a clause name by its script bytes.
+    pub fn find_clause_by_script(&self, script_bytes: &[u8]) -> Option<String> {
+        match self {
+            TapTree::Leaf(leaf) => {
+                if leaf.script.as_bytes() == script_bytes {
+                    Some(leaf.name.clone())
+                } else {
+                    None
+                }
+            }
+            TapTree::Branch { left, right } => left
+                .find_clause_by_script(script_bytes)
+                .or_else(|| right.find_clause_by_script(script_bytes)),
+        }
+    }
+
+    /// Get all leaves in the tree (in order).
+    pub fn leaves(&self) -> Vec<&TapLeaf> {
+        match self {
+            TapTree::Leaf(leaf) => vec![leaf],
+            TapTree::Branch { left, right } => {
+                let mut result = left.leaves();
+                result.extend(right.leaves());
+                result
+            }
+        }
+    }
+
+    /// Generate a control block for spending a specific clause.
+    pub fn control_block(
+        &self,
+        internal_pubkey: &XOnlyPublicKey,
+        clause_name: &str,
+    ) -> Option<Vec<u8>> {
+        let tapleaf = self.find_leaf(clause_name)?;
+        let merkle_root = TapNodeHash::from_byte_array(self.root_hash());
+        let tweak =
+            TapTweakHash::from_key_and_tweak(*internal_pubkey, Some(merkle_root)).to_scalar();
+
+        let secp = Secp256k1::new();
+        let (_, parity) = internal_pubkey
+            .add_tweak(&secp, &tweak)
+            .expect("Taproot tweak should never fail");
+
+        let c0 = 0xC0u8 | parity.to_u8();
+        let xonly_bytes = internal_pubkey.serialize();
+
+        let mut control_block = Vec::new();
+        control_block.push(c0);
+        control_block.extend_from_slice(&xonly_bytes);
+
+        let merkle_proof = self.merkle_proof(tapleaf)?;
+        for hash in merkle_proof {
+            control_block.extend_from_slice(&hash);
+        }
+
+        Some(control_block)
+    }
+}
+
+// ============================================================================
+// Key Tweaking Utilities
+// ============================================================================
+
+/// Compute a tweaked key for augmented contracts with state commitment.
+/// Uses SHA256(naked_key || state_hash) to derive the tweak.
+pub fn compute_state_tweak(naked_key: &[u8; 32], state_hash: &[u8; 32]) -> [u8; 32] {
+    let mut data = Vec::with_capacity(64);
+    data.extend_from_slice(naked_key);
+    data.extend_from_slice(state_hash);
+    let hash = sha256::Hash::hash(&data);
+    *hash.as_byte_array()
+}
+
+/// Apply a state tweak to a public key.
+pub fn apply_state_tweak(
+    naked_key: &XOnlyPublicKey,
+    state_hash: &[u8; 32],
+) -> Result<XOnlyPublicKey, String> {
+    let tweak_bytes = compute_state_tweak(&naked_key.serialize(), state_hash);
+
+    let secp = Secp256k1::new();
+    let scalar = bitcoin::secp256k1::Scalar::from_be_bytes(tweak_bytes)
+        .map_err(|e| format!("Invalid scalar: {}", e))?;
+
+    naked_key
+        .add_tweak(&secp, &scalar)
+        .map(|(tweaked, _parity)| tweaked)
+        .map_err(|e| format!("Failed to apply tweak: {}", e))
+}
+
+/// Compute the final taproot output key from internal key and taptree.
+pub fn compute_taproot_output_key(
+    internal_key: &XOnlyPublicKey,
+    taptree: Option<&TapTree>,
+) -> XOnlyPublicKey {
+    let merkle_root = taptree.map(|tree| TapNodeHash::from_byte_array(tree.root_hash()));
+    let tweak = TapTweakHash::from_key_and_tweak(*internal_key, merkle_root).to_scalar();
+
+    let secp = Secp256k1::new();
+    internal_key
+        .add_tweak(&secp, &tweak)
+        .expect("Taproot tweak should never fail")
+        .0
 }
 
 // ============================================================================
@@ -260,11 +538,11 @@ impl Clone for Box<dyn ErasedClause> {
 pub trait ArgType: Debug + Send + Sync {
     /// Encode an ArgValue to witness stack elements.
     fn encode_to_witness(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError>;
-    
+
     /// Decode witness stack elements to an ArgValue.
     /// Returns (ArgValue, number of elements consumed).
     fn decode_from_witness(&self, witness: &[Vec<u8>]) -> Result<(ArgValue, usize), WitnessError>;
-    
+
     /// Clone into a Box.
     fn clone_boxed(&self) -> Box<dyn ArgType>;
 }
@@ -300,7 +578,7 @@ impl Debug for ArgSpec {
 // ============================================================================
 
 /// Type-safe function for computing next outputs.
-pub type NextOutputsFn<P, S, A> = 
+pub type NextOutputsFn<P, S, A> =
     Arc<dyn Fn(&P, &A, Option<&S>) -> Result<Vec<ClauseOutput>, ClauseError> + Send + Sync>;
 
 /// Standard implementation of a clause.
@@ -424,16 +702,16 @@ where
         args: &HashMap<String, ArgValue>,
     ) -> Result<Vec<Vec<u8>>, WitnessError> {
         let mut result = Vec::new();
-        
+
         for spec in &self.arg_specs {
             let arg_value = args
                 .get(&spec.name)
                 .ok_or_else(|| WitnessError::MissingArgument(spec.name.clone()))?;
-            
+
             let encoded = spec.arg_type.encode_to_witness(arg_value)?;
             result.extend(encoded);
         }
-        
+
         Ok(result)
     }
 
@@ -455,9 +733,11 @@ where
         }
 
         if offset != witness.len() {
-            return Err(WitnessError::InvalidData(
-                format!("Expected {} witness elements, got {}", offset, witness.len())
-            ));
+            return Err(WitnessError::InvalidData(format!(
+                "Expected {} witness elements, got {}",
+                offset,
+                witness.len()
+            )));
         }
 
         Ok(result)
@@ -502,10 +782,10 @@ where
 pub trait ErasedContract: Debug + Send + Sync {
     /// Get all clauses (type-erased).
     fn clauses(&self) -> &[Arc<dyn ErasedClause>];
-    
+
     /// Get a clause by name.
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
-    
+
     /// Clone into a Box.
     fn clone_boxed(&self) -> Box<dyn ErasedContract>;
 }
@@ -522,25 +802,44 @@ impl Clone for Box<dyn ErasedContract> {
 
 /// Standard P2TR contract with clauses.
 pub struct StandardP2TR<P: ContractParams> {
-    pub internal_pubkey: [u8; 32],
+    pub internal_pubkey: XOnlyPublicKey,
+    pub taptree: Arc<TapTree>,
     pub clauses: Vec<Arc<dyn ErasedClause>>,
     _phantom: PhantomData<P>,
 }
 
 impl<P: ContractParams> StandardP2TR<P> {
-    pub fn new(internal_pubkey: [u8; 32], clauses: Vec<Arc<dyn ErasedClause>>) -> Self {
+    pub fn new(
+        internal_pubkey: XOnlyPublicKey,
+        taptree: Arc<TapTree>,
+        clauses: Vec<Arc<dyn ErasedClause>>,
+    ) -> Self {
         Self {
             internal_pubkey,
+            taptree,
             clauses,
             _phantom: PhantomData,
         }
+    }
+
+    /// Get the taproot output key for this contract.
+    pub fn output_key(&self) -> XOnlyPublicKey {
+        compute_taproot_output_key(&self.internal_pubkey, Some(&self.taptree))
+    }
+
+    /// Get the scriptPubKey for this contract (OP_1 <output_key>).
+    pub fn script_pubkey(&self) -> ScriptBuf {
+        ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(
+            self.output_key(),
+        ))
     }
 }
 
 impl<P: ContractParams> Debug for StandardP2TR<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StandardP2TR")
-            .field("internal_pubkey", &format!("{:02x?}", self.internal_pubkey))
+            .field("internal_pubkey", &self.internal_pubkey)
+            .field("taptree", &"<TapTree>")
             .field("clauses", &self.clauses.len())
             .finish()
     }
@@ -550,6 +849,7 @@ impl<P: ContractParams> Clone for StandardP2TR<P> {
     fn clone(&self) -> Self {
         Self {
             internal_pubkey: self.internal_pubkey,
+            taptree: self.taptree.clone(),
             clauses: self.clauses.clone(),
             _phantom: PhantomData,
         }
@@ -560,11 +860,11 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     fn clauses(&self) -> &[Arc<dyn ErasedClause>] {
         &self.clauses
     }
-    
+
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
         self.clauses.iter().find(|c| c.name() == name)
     }
-    
+
     fn clone_boxed(&self) -> Box<dyn ErasedContract> {
         Box::new(self.clone())
     }
@@ -576,28 +876,67 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
 
 /// Standard Augmented P2TR contract with state.
 pub struct StandardAugmentedP2TR<P: ContractParams, S: ContractState> {
-    pub naked_internal_pubkey: [u8; 32],
+    pub naked_internal_pubkey: XOnlyPublicKey,
+    pub taptree: Arc<TapTree>,
     pub clauses: Vec<Arc<dyn ErasedClause>>,
     _phantom: PhantomData<(P, S)>,
 }
 
 impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
     pub fn new(
-        naked_internal_pubkey: [u8; 32],
+        naked_internal_pubkey: XOnlyPublicKey,
+        taptree: Arc<TapTree>,
         clauses: Vec<Arc<dyn ErasedClause>>,
     ) -> Self {
         Self {
             naked_internal_pubkey,
+            taptree,
             clauses,
             _phantom: PhantomData,
         }
+    }
+
+    /// Compute the internal pubkey tweaked with the state.
+    pub fn compute_internal_key(&self, state: &S) -> Result<XOnlyPublicKey, String> {
+        let state_bytes = state.encode();
+
+        // For state commitment, we typically hash the state to get a 32-byte value
+        let state_hash = if state_bytes.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&state_bytes);
+            arr
+        } else {
+            // Hash the state if it's not exactly 32 bytes
+            let hash = sha256::Hash::hash(&state_bytes);
+            *hash.as_byte_array()
+        };
+
+        apply_state_tweak(&self.naked_internal_pubkey, &state_hash)
+    }
+
+    /// Get the taproot output key for this contract with the given state.
+    pub fn output_key(&self, state: &S) -> Result<XOnlyPublicKey, String> {
+        let internal_key = self.compute_internal_key(state)?;
+        Ok(compute_taproot_output_key(
+            &internal_key,
+            Some(&self.taptree),
+        ))
+    }
+
+    /// Get the scriptPubKey for this contract with the given state.
+    pub fn script_pubkey(&self, state: &S) -> Result<ScriptBuf, String> {
+        let output_key = self.output_key(state)?;
+        Ok(ScriptBuf::new_p2tr_tweaked(
+            TweakedPublicKey::dangerous_assume_tweaked(output_key),
+        ))
     }
 }
 
 impl<P: ContractParams, S: ContractState> Debug for StandardAugmentedP2TR<P, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StandardAugmentedP2TR")
-            .field("naked_internal_pubkey", &format!("{:02x?}", self.naked_internal_pubkey))
+            .field("naked_internal_pubkey", &self.naked_internal_pubkey)
+            .field("taptree", &"<TapTree>")
             .field("clauses", &self.clauses.len())
             .finish()
     }
@@ -607,24 +946,245 @@ impl<P: ContractParams, S: ContractState> Clone for StandardAugmentedP2TR<P, S> 
     fn clone(&self) -> Self {
         Self {
             naked_internal_pubkey: self.naked_internal_pubkey,
+            taptree: self.taptree.clone(),
             clauses: self.clauses.clone(),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract 
-    for StandardAugmentedP2TR<P, S> 
+impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
+    for StandardAugmentedP2TR<P, S>
 {
     fn clauses(&self) -> &[Arc<dyn ErasedClause>] {
         &self.clauses
     }
-    
+
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
         self.clauses.iter().find(|c| c.name() == name)
     }
-    
+
     fn clone_boxed(&self) -> Box<dyn ErasedContract> {
         Box::new(self.clone())
+    }
+}
+
+// ============================================================================
+// Builder Patterns
+// ============================================================================
+
+/// Builder for creating StandardClause instances.
+pub struct StandardClauseBuilder<P, S, A>
+where
+    P: ContractParams + 'static,
+    S: ContractState + 'static,
+    A: ClauseArgs + 'static,
+{
+    name: Option<String>,
+    script: Option<ScriptBuf>,
+    arg_specs: Vec<ArgSpec>,
+    next_outputs_fn: Option<NextOutputsFn<P, S, A>>,
+    _phantom: PhantomData<(P, S, A)>,
+}
+
+impl<P, S, A> StandardClauseBuilder<P, S, A>
+where
+    P: ContractParams + 'static,
+    S: ContractState + 'static,
+    A: ClauseArgs + 'static,
+{
+    /// Create a new builder.
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            script: None,
+            arg_specs: Vec::new(),
+            next_outputs_fn: None,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the clause name.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Set the clause script.
+    pub fn script(mut self, script: ScriptBuf) -> Self {
+        self.script = Some(script);
+        self
+    }
+
+    /// Add an argument specification.
+    pub fn arg(mut self, name: impl Into<String>, arg_type: Arc<dyn ArgType>) -> Self {
+        self.arg_specs.push(ArgSpec {
+            name: name.into(),
+            arg_type,
+        });
+        self
+    }
+
+    /// Add multiple argument specifications.
+    pub fn args(mut self, specs: Vec<ArgSpec>) -> Self {
+        self.arg_specs.extend(specs);
+        self
+    }
+
+    /// Set the next_outputs function.
+    pub fn next_outputs(
+        mut self,
+        f: impl Fn(&P, &A, Option<&S>) -> Result<Vec<ClauseOutput>, ClauseError> + Send + Sync + 'static,
+    ) -> Self {
+        self.next_outputs_fn = Some(Arc::new(f));
+        self
+    }
+
+    /// Build the StandardClause.
+    pub fn build(self) -> Result<StandardClause<P, S, A>, String> {
+        let name = self.name.ok_or("Clause name is required")?;
+        let script = self.script.ok_or("Clause script is required")?;
+
+        Ok(StandardClause::new(
+            name,
+            script,
+            self.arg_specs,
+            self.next_outputs_fn,
+        ))
+    }
+}
+
+impl<P, S, A> Default for StandardClauseBuilder<P, S, A>
+where
+    P: ContractParams + 'static,
+    S: ContractState + 'static,
+    A: ClauseArgs + 'static,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Builder for creating StandardP2TR contracts.
+pub struct StandardP2TRBuilder<P: ContractParams + 'static> {
+    internal_pubkey: Option<XOnlyPublicKey>,
+    taptree: Option<Arc<TapTree>>,
+    clauses: Vec<Arc<dyn ErasedClause>>,
+    _phantom: PhantomData<P>,
+}
+
+impl<P: ContractParams + 'static> StandardP2TRBuilder<P> {
+    /// Create a new builder.
+    pub fn new() -> Self {
+        Self {
+            internal_pubkey: None,
+            taptree: None,
+            clauses: Vec::new(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the internal pubkey.
+    pub fn internal_pubkey(mut self, key: XOnlyPublicKey) -> Self {
+        self.internal_pubkey = Some(key);
+        self
+    }
+
+    /// Set the taptree.
+    pub fn taptree(mut self, tree: Arc<TapTree>) -> Self {
+        self.taptree = Some(tree);
+        self
+    }
+
+    /// Add a clause.
+    pub fn clause(mut self, clause: Arc<dyn ErasedClause>) -> Self {
+        self.clauses.push(clause);
+        self
+    }
+
+    /// Add multiple clauses.
+    pub fn clauses(mut self, clauses: Vec<Arc<dyn ErasedClause>>) -> Self {
+        self.clauses.extend(clauses);
+        self
+    }
+
+    /// Build the StandardP2TR contract.
+    pub fn build(self) -> Result<StandardP2TR<P>, String> {
+        let internal_pubkey = self.internal_pubkey.ok_or("Internal pubkey is required")?;
+        let taptree = self.taptree.ok_or("Taptree is required")?;
+
+        Ok(StandardP2TR::new(internal_pubkey, taptree, self.clauses))
+    }
+}
+
+impl<P: ContractParams + 'static> Default for StandardP2TRBuilder<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Builder for creating StandardAugmentedP2TR contracts.
+pub struct StandardAugmentedP2TRBuilder<P: ContractParams + 'static, S: ContractState + 'static> {
+    naked_internal_pubkey: Option<XOnlyPublicKey>,
+    taptree: Option<Arc<TapTree>>,
+    clauses: Vec<Arc<dyn ErasedClause>>,
+    _phantom: PhantomData<(P, S)>,
+}
+
+impl<P: ContractParams + 'static, S: ContractState + 'static> StandardAugmentedP2TRBuilder<P, S> {
+    /// Create a new builder.
+    pub fn new() -> Self {
+        Self {
+            naked_internal_pubkey: None,
+            taptree: None,
+            clauses: Vec::new(),
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Set the naked internal pubkey.
+    pub fn naked_internal_pubkey(mut self, key: XOnlyPublicKey) -> Self {
+        self.naked_internal_pubkey = Some(key);
+        self
+    }
+
+    /// Set the taptree.
+    pub fn taptree(mut self, tree: Arc<TapTree>) -> Self {
+        self.taptree = Some(tree);
+        self
+    }
+
+    /// Add a clause.
+    pub fn clause(mut self, clause: Arc<dyn ErasedClause>) -> Self {
+        self.clauses.push(clause);
+        self
+    }
+
+    /// Add multiple clauses.
+    pub fn clauses(mut self, clauses: Vec<Arc<dyn ErasedClause>>) -> Self {
+        self.clauses.extend(clauses);
+        self
+    }
+
+    /// Build the StandardAugmentedP2TR contract.
+    pub fn build(self) -> Result<StandardAugmentedP2TR<P, S>, String> {
+        let naked_internal_pubkey = self
+            .naked_internal_pubkey
+            .ok_or("Naked internal pubkey is required")?;
+        let taptree = self.taptree.ok_or("Taptree is required")?;
+
+        Ok(StandardAugmentedP2TR::new(
+            naked_internal_pubkey,
+            taptree,
+            self.clauses,
+        ))
+    }
+}
+
+impl<P: ContractParams + 'static, S: ContractState + 'static> Default
+    for StandardAugmentedP2TRBuilder<P, S>
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
