@@ -6,9 +6,10 @@
 //! 3. Store them in type-erased form for use by a manager
 //! 4. Work with clauses polymorphically at runtime
 
-use mattrs::argtypes::{ArgValue, BytesType, IntType, SignerType};
-use mattrs::contracts::*;
 use bitcoin::ScriptBuf;
+use mattrs::argtypes::{ArgValue, IntType, SignerType};
+use mattrs::contracts::*;
+use mattrs_derive::ContractParams;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -17,37 +18,10 @@ use std::sync::Arc;
 // ============================================================================
 
 /// Parameters for a simple vault contract
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractParams)]
 struct VaultParams {
     owner_pubkey: [u8; 32],
     recovery_pubkey: [u8; 32],
-}
-
-impl ContractParams for VaultParams {
-    fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.owner_pubkey);
-        bytes.extend_from_slice(&self.recovery_pubkey);
-        bytes
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
-        if bytes.len() != 64 {
-            return Err(WitnessError::InvalidData(
-                format!("Expected 64 bytes for VaultParams, got {}", bytes.len())
-            ));
-        }
-
-        let mut owner_pubkey = [0u8; 32];
-        let mut recovery_pubkey = [0u8; 32];
-        owner_pubkey.copy_from_slice(&bytes[0..32]);
-        recovery_pubkey.copy_from_slice(&bytes[32..64]);
-
-        Ok(VaultParams {
-            owner_pubkey,
-            recovery_pubkey,
-        })
-    }
 }
 
 /// State for a vault contract
@@ -67,9 +41,10 @@ impl ContractState for VaultState {
 
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
         if bytes.len() != 12 {
-            return Err(WitnessError::InvalidData(
-                format!("Expected 12 bytes, got {}", bytes.len())
-            ));
+            return Err(WitnessError::InvalidData(format!(
+                "Expected 12 bytes, got {}",
+                bytes.len()
+            )));
         }
 
         let amount = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
@@ -113,19 +88,16 @@ struct WithdrawArgs {
 impl ClauseArgs for WithdrawArgs {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
         use mattrs::script_utils::bn2vch;
-        vec![
-            self.signature.clone(),
-            bn2vch(self.amount),
-        ]
+        vec![self.signature.clone(), bn2vch(self.amount)]
     }
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
         use mattrs::script_utils::vch2bn;
-        
+
         if witness.len() < 2 {
             return Err(WitnessError::InsufficientData);
         }
-        
+
         let signature = witness[0].clone();
         let amount = vch2bn(&witness[1])?;
 
@@ -134,37 +106,41 @@ impl ClauseArgs for WithdrawArgs {
 }
 
 fn main() {
+    use bitcoin::XOnlyPublicKey;
+
     println!("=== Clause and Contract Type Erasure Example ===\n");
 
     // ============================================================================
     // 1. Create Clauses with Compile-Time Types
     // ============================================================================
 
-    let owner_pubkey = [0x02; 32];
-    let recovery_pubkey = [0x03; 32];
+    let owner_pubkey_bytes = [0x02; 32];
+    let recovery_pubkey_bytes = [0x03; 32];
+
+    let owner_key = XOnlyPublicKey::from_slice(&owner_pubkey_bytes).unwrap();
 
     // Create the "trigger" clause
     let trigger_clause = StandardClause::<VaultParams, VaultState, TriggerArgs>::new(
         "trigger".to_string(),
         ScriptBuf::new(), // Placeholder script
-        vec![
-            ArgSpec {
-                name: "sig".to_string(),
-                arg_type: Arc::new(SignerType::new(owner_pubkey)),
+        vec![ArgSpec {
+            name: "sig".to_string(),
+            arg_type: Arc::new(SignerType::new(owner_pubkey_bytes)),
+        }],
+        Some(Arc::new(
+            |params: &VaultParams, args: &TriggerArgs, state: Option<&VaultState>| {
+                println!("  Computing next outputs for 'trigger' clause");
+                println!("    Owner pubkey: {:02x?}", &params.owner_pubkey[..4]);
+                println!("    Signature length: {} bytes", args.signature.len());
+                if let Some(state) = state {
+                    println!("    Current amount: {}", state.amount);
+                    println!("    Unlock time: {}", state.unlock_time);
+                }
+
+                // Return empty outputs for this example
+                Ok(Vec::new())
             },
-        ],
-        Some(Arc::new(|params: &VaultParams, args: &TriggerArgs, state: Option<&VaultState>| {
-            println!("  Computing next outputs for 'trigger' clause");
-            println!("    Owner pubkey: {:02x?}", &params.owner_pubkey[..4]);
-            println!("    Signature length: {} bytes", args.signature.len());
-            if let Some(state) = state {
-                println!("    Current amount: {}", state.amount);
-                println!("    Unlock time: {}", state.unlock_time);
-            }
-            
-            // Return empty outputs for this example
-            Ok(Vec::new())
-        })),
+        )),
     );
 
     // Create the "withdraw" clause
@@ -174,24 +150,26 @@ fn main() {
         vec![
             ArgSpec {
                 name: "sig".to_string(),
-                arg_type: Arc::new(SignerType::new(owner_pubkey)),
+                arg_type: Arc::new(SignerType::new(owner_pubkey_bytes)),
             },
             ArgSpec {
                 name: "amount".to_string(),
                 arg_type: Arc::new(IntType),
             },
         ],
-        Some(Arc::new(|params: &VaultParams, args: &WithdrawArgs, state: Option<&VaultState>| {
-            println!("  Computing next outputs for 'withdraw' clause");
-            println!("    Owner pubkey: {:02x?}", &params.owner_pubkey[..4]);
-            println!("    Signature length: {} bytes", args.signature.len());
-            println!("    Withdraw amount: {}", args.amount);
-            if let Some(state) = state {
-                println!("    Remaining: {}", state.amount as i64 - args.amount);
-            }
-            
-            Ok(Vec::new())
-        })),
+        Some(Arc::new(
+            |params: &VaultParams, args: &WithdrawArgs, state: Option<&VaultState>| {
+                println!("  Computing next outputs for 'withdraw' clause");
+                println!("    Owner pubkey: {:02x?}", &params.owner_pubkey[..4]);
+                println!("    Signature length: {} bytes", args.signature.len());
+                println!("    Withdraw amount: {}", args.amount);
+                if let Some(state) = state {
+                    println!("    Remaining: {}", state.amount as i64 - args.amount);
+                }
+
+                Ok(Vec::new())
+            },
+        )),
     );
 
     // ============================================================================
@@ -205,12 +183,22 @@ fn main() {
     // 3. Create a Contract with Type-Erased Clauses
     // ============================================================================
 
+    // Create a simple taptree
+    let taptree = Arc::new(TapTree::branch(
+        TapTree::leaf("trigger", ScriptBuf::new()),
+        TapTree::leaf("withdraw", ScriptBuf::new()),
+    ));
+
     let contract = StandardAugmentedP2TR::<VaultParams, VaultState>::new(
-        owner_pubkey,
+        owner_key,
+        taptree.clone(),
         vec![trigger_erased.clone(), withdraw_erased.clone()],
     );
 
-    println!("Created contract with {} clauses:", contract.clauses().len());
+    println!(
+        "Created contract with {} clauses:",
+        contract.clauses().len()
+    );
     for clause in contract.clauses() {
         println!("  - {}", clause.name());
     }
@@ -225,11 +213,11 @@ fn main() {
 
     // Create test state
     let params = VaultParams {
-        owner_pubkey,
-        recovery_pubkey,
+        owner_pubkey: owner_pubkey_bytes,
+        recovery_pubkey: recovery_pubkey_bytes,
     };
     let params_bytes = params.encode();
-    
+
     let state = VaultState {
         amount: 100_000,
         unlock_time: 1000,
@@ -240,7 +228,7 @@ fn main() {
     println!("1. Using 'trigger' clause:");
     {
         let clause = contract.get_clause("trigger").unwrap();
-        
+
         let mut args = HashMap::new();
         args.insert("sig".to_string(), ArgValue::Signature(vec![0xaa; 64]));
 
@@ -253,7 +241,9 @@ fn main() {
         println!("  Decoded {} arguments", decoded_args.len());
 
         // Compute next outputs
-        let _outputs = clause.next_outputs_erased(&params_bytes, &args, Some(&state_bytes)).unwrap();
+        let _outputs = clause
+            .next_outputs_erased(&params_bytes, &args, Some(&state_bytes))
+            .unwrap();
         println!();
     }
 
@@ -261,7 +251,7 @@ fn main() {
     println!("2. Using 'withdraw' clause:");
     {
         let clause = contract.get_clause("withdraw").unwrap();
-        
+
         let mut args = HashMap::new();
         args.insert("sig".to_string(), ArgValue::Signature(vec![0xbb; 64]));
         args.insert("amount".to_string(), ArgValue::Int(25_000));
@@ -275,7 +265,9 @@ fn main() {
         println!("  Decoded {} arguments", decoded_args.len());
 
         // Compute next outputs
-        let _outputs = clause.next_outputs_erased(&params_bytes, &args, Some(&state_bytes)).unwrap();
+        let _outputs = clause
+            .next_outputs_erased(&params_bytes, &args, Some(&state_bytes))
+            .unwrap();
         println!();
     }
 
@@ -288,7 +280,8 @@ fn main() {
     let contracts: Vec<Arc<dyn ErasedContract>> = vec![
         Arc::new(contract.clone()),
         Arc::new(StandardP2TR::<VaultParams>::new(
-            owner_pubkey,
+            owner_key,
+            taptree.clone(),
             vec![trigger_erased.clone()],
         )),
     ];

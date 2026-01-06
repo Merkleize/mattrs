@@ -2,6 +2,7 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use mattrs::argtypes::{ArgValue, IntType};
 use mattrs::contracts::*;
 use mattrs::script_utils;
+use mattrs_derive::ContractParams;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -10,29 +11,9 @@ use std::sync::Arc;
 // ============================================================================
 
 // Contract parameters: owner's public key
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractParams)]
 struct VaultParams {
     owner_pubkey: XOnlyPublicKey,
-}
-
-impl ContractParams for VaultParams {
-    fn encode(&self) -> Vec<u8> {
-        self.owner_pubkey.serialize().to_vec()
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
-        if bytes.len() != 32 {
-            return Err(WitnessError::InvalidValue(format!(
-                "Expected 32 bytes for pubkey, got {}",
-                bytes.len()
-            )));
-        }
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(bytes);
-        let owner_pubkey = XOnlyPublicKey::from_slice(&arr)
-            .map_err(|e| WitnessError::InvalidValue(format!("Invalid pubkey: {}", e)))?;
-        Ok(VaultParams { owner_pubkey })
-    }
 }
 
 // Contract state: vault amount
@@ -197,9 +178,9 @@ fn test_params_encoding() {
 
     let params = VaultParams { owner_pubkey };
 
-    // Encode
+    // Encode (includes length prefixes: 4 bytes count + 4 bytes len + 32 bytes data = 40)
     let encoded = params.encode();
-    assert_eq!(encoded.len(), 32);
+    assert_eq!(encoded.len(), 40);
 
     // Decode
     let decoded = VaultParams::decode(&encoded).expect("Failed to decode params");
@@ -248,4 +229,103 @@ fn test_erased_clause_operations() {
         Some(ArgValue::Int(val)) => assert_eq!(*val, 50000),
         _ => panic!("Expected Int value"),
     }
+}
+
+#[test]
+fn test_contract_params_roundtrip() {
+    use mattrs::vault::{UnvaultingParams, VaultParams};
+
+    // NUMS key (nothing-up-my-sleeve point)
+    let nums_key_bytes = [
+        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
+        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
+        0x3a, 0xc0,
+    ];
+    let nums_key = XOnlyPublicKey::from_slice(&nums_key_bytes).unwrap();
+
+    // Test VaultParams with None
+    let params1 = VaultParams {
+        alternate_pk: None,
+        spend_delay: 144,
+        recover_pk: nums_key,
+        unvault_pk: nums_key,
+    };
+
+    let encoded1 = params1.encode();
+    let decoded1 = VaultParams::decode(&encoded1).expect("Failed to decode VaultParams with None");
+
+    assert_eq!(params1.alternate_pk, decoded1.alternate_pk);
+    assert_eq!(params1.spend_delay, decoded1.spend_delay);
+    assert_eq!(
+        params1.recover_pk.serialize(),
+        decoded1.recover_pk.serialize()
+    );
+    assert_eq!(
+        params1.unvault_pk.serialize(),
+        decoded1.unvault_pk.serialize()
+    );
+
+    // Test VaultParams with Some
+    let params2 = VaultParams {
+        alternate_pk: Some(nums_key),
+        spend_delay: 288,
+        recover_pk: nums_key,
+        unvault_pk: nums_key,
+    };
+
+    let encoded2 = params2.encode();
+    let decoded2 = VaultParams::decode(&encoded2).expect("Failed to decode VaultParams with Some");
+
+    assert_eq!(
+        params2.alternate_pk.unwrap().serialize(),
+        decoded2.alternate_pk.unwrap().serialize()
+    );
+    assert_eq!(params2.spend_delay, decoded2.spend_delay);
+    assert_eq!(
+        params2.recover_pk.serialize(),
+        decoded2.recover_pk.serialize()
+    );
+    assert_eq!(
+        params2.unvault_pk.serialize(),
+        decoded2.unvault_pk.serialize()
+    );
+
+    // Test UnvaultingParams with None
+    let params3 = UnvaultingParams {
+        alternate_pk: None,
+        spend_delay: 100,
+        recover_pk: nums_key,
+    };
+
+    let encoded3 = params3.encode();
+    let decoded3 =
+        UnvaultingParams::decode(&encoded3).expect("Failed to decode UnvaultingParams with None");
+
+    assert_eq!(params3.alternate_pk, decoded3.alternate_pk);
+    assert_eq!(params3.spend_delay, decoded3.spend_delay);
+    assert_eq!(
+        params3.recover_pk.serialize(),
+        decoded3.recover_pk.serialize()
+    );
+
+    // Test UnvaultingParams with Some
+    let params4 = UnvaultingParams {
+        alternate_pk: Some(nums_key),
+        spend_delay: 200,
+        recover_pk: nums_key,
+    };
+
+    let encoded4 = params4.encode();
+    let decoded4 =
+        UnvaultingParams::decode(&encoded4).expect("Failed to decode UnvaultingParams with Some");
+
+    assert_eq!(
+        params4.alternate_pk.unwrap().serialize(),
+        decoded4.alternate_pk.unwrap().serialize()
+    );
+    assert_eq!(params4.spend_delay, decoded4.spend_delay);
+    assert_eq!(
+        params4.recover_pk.serialize(),
+        decoded4.recover_pk.serialize()
+    );
 }

@@ -207,6 +207,154 @@ impl WitnessEncodable for Vec<u8> {
     }
 }
 
+impl WitnessEncodable for u8 {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![vec![*self]]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        if witness[0].len() != 1 {
+            return Err(WitnessError::InvalidValue(format!(
+                "Expected 1 byte for u8, got {}",
+                witness[0].len()
+            )));
+        }
+        Ok((witness[0][0], 1))
+    }
+}
+
+impl WitnessEncodable for u16 {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![self.to_le_bytes().to_vec()]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        if witness[0].len() != 2 {
+            return Err(WitnessError::InvalidValue(format!(
+                "Expected 2 bytes for u16, got {}",
+                witness[0].len()
+            )));
+        }
+        let mut bytes = [0u8; 2];
+        bytes.copy_from_slice(&witness[0]);
+        Ok((u16::from_le_bytes(bytes), 1))
+    }
+}
+
+impl WitnessEncodable for u32 {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![self.to_le_bytes().to_vec()]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        if witness[0].len() != 4 {
+            return Err(WitnessError::InvalidValue(format!(
+                "Expected 4 bytes for u32, got {}",
+                witness[0].len()
+            )));
+        }
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&witness[0]);
+        Ok((u32::from_le_bytes(bytes), 1))
+    }
+}
+
+impl WitnessEncodable for u64 {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![self.to_le_bytes().to_vec()]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        if witness[0].len() != 8 {
+            return Err(WitnessError::InvalidValue(format!(
+                "Expected 8 bytes for u64, got {}",
+                witness[0].len()
+            )));
+        }
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&witness[0]);
+        Ok((u64::from_le_bytes(bytes), 1))
+    }
+}
+
+impl WitnessEncodable for bool {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![vec![if *self { 1 } else { 0 }]]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        if witness[0].len() != 1 {
+            return Err(WitnessError::InvalidValue(format!(
+                "Expected 1 byte for bool, got {}",
+                witness[0].len()
+            )));
+        }
+        Ok((witness[0][0] != 0, 1))
+    }
+}
+
+impl WitnessEncodable for XOnlyPublicKey {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![self.serialize().to_vec()]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+        if witness[0].len() != 32 {
+            return Err(WitnessError::InvalidValue(format!(
+                "Expected 32 bytes for XOnlyPublicKey, got {}",
+                witness[0].len()
+            )));
+        }
+        let key = XOnlyPublicKey::from_slice(&witness[0])
+            .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+        Ok((key, 1))
+    }
+}
+
+impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        match self {
+            Some(value) => {
+                let mut result = vec![vec![1u8]]; // presence flag
+                result.extend(value.encode_to_witness());
+                result
+            }
+            None => vec![vec![0u8]], // absence flag
+        }
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        if witness.is_empty() {
+            return Err(WitnessError::StackUnderflow);
+        }
+
+        if witness[0].is_empty() || witness[0][0] == 0 {
+            Ok((None, 1))
+        } else {
+            let (value, consumed) = T::decode_from_witness(&witness[1..])?;
+            Ok((Some(value), consumed + 1))
+        }
+    }
+}
+
 // ============================================================================
 // Marker Trait Implementations
 // ============================================================================

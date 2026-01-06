@@ -74,7 +74,9 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
 }
 
 /// Derive macro for ContractParams trait.
-/// Automatically implements encoding/decoding for contract parameters.
+///
+/// Automatically implements encoding/decoding by encoding each field's witness elements
+/// and flattening them into a single byte vector.
 #[proc_macro_derive(ContractParams)]
 pub fn derive_contract_params(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -88,36 +90,90 @@ pub fn derive_contract_params(input: TokenStream) -> TokenStream {
         _ => panic!("ContractParams can only be derived for structs"),
     };
 
-    let encode_fields = fields.iter().map(|f| {
+    let encode_to_witness_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         quote! {
-            result.extend(self.#field_name.encode_to_witness().into_iter().flatten());
+            result.extend(self.#field_name.encode_to_witness());
         }
     });
 
-    let decode_fields = fields.iter().map(|f| {
+    let decode_from_witness_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         let field_type = &f.ty;
         quote! {
             let (#field_name, consumed) = <#field_type as WitnessEncodable>::decode_from_witness(&witness[offset..])?;
-            let #field_name = *#field_name;
             offset += consumed;
         }
     });
 
+    let encode_to_bytes_fields = fields.iter().map(|f| {
+        let field_name = &f.ident;
+        quote! {
+            // Encode field and prepend witness element count and sizes
+            let field_witness = self.#field_name.encode_to_witness();
+            // Write number of witness elements as varint (just use a u32 for simplicity)
+            bytes.extend(&(field_witness.len() as u32).to_le_bytes());
+            // Write each element with its length prefix
+            for elem in field_witness {
+                bytes.extend(&(elem.len() as u32).to_le_bytes());
+                bytes.extend(&elem);
+            }
+        }
+    });
+
+    let decode_from_bytes_fields = fields.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+        quote! {
+            let (#field_name, consumed_bytes) = {
+                // Read number of witness elements
+                if byte_offset + 4 > bytes.len() {
+                    return Err(WitnessError::InsufficientData);
+                }
+                let mut count_bytes = [0u8; 4];
+                count_bytes.copy_from_slice(&bytes[byte_offset..byte_offset+4]);
+                let element_count = u32::from_le_bytes(count_bytes) as usize;
+                let mut local_offset = byte_offset + 4;
+                
+                // Read witness elements
+                let mut temp_witness = Vec::new();
+                for _ in 0..element_count {
+                    if local_offset + 4 > bytes.len() {
+                        return Err(WitnessError::InsufficientData);
+                    }
+                    let mut len_bytes = [0u8; 4];
+                    len_bytes.copy_from_slice(&bytes[local_offset..local_offset+4]);
+                    let elem_len = u32::from_le_bytes(len_bytes) as usize;
+                    local_offset += 4;
+                    
+                    if local_offset + elem_len > bytes.len() {
+                        return Err(WitnessError::InsufficientData);
+                    }
+                    temp_witness.push(bytes[local_offset..local_offset+elem_len].to_vec());
+                    local_offset += elem_len;
+                }
+                
+                let (value, _) = <#field_type as WitnessEncodable>::decode_from_witness(&temp_witness)?;
+                (value, local_offset - byte_offset)
+            };
+            byte_offset += consumed_bytes;
+        }
+    });
+
     let field_names = fields.iter().map(|f| &f.ident);
+    let field_names_for_bytes = fields.iter().map(|f| &f.ident);
 
     let expanded = quote! {
         impl WitnessEncodable for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
-                #(#encode_fields)*
+                #(#encode_to_witness_fields)*
                 result
             }
 
             fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
                 let mut offset = 0;
-                #(#decode_fields)*
+                #(#decode_from_witness_fields)*
                 Ok((Self {
                     #(#field_names),*
                 }, offset))
@@ -126,14 +182,18 @@ pub fn derive_contract_params(input: TokenStream) -> TokenStream {
 
         impl ContractParams for #name {
             fn encode(&self) -> Vec<u8> {
-                self.encode_to_witness().into_iter().flatten().collect()
+                let mut bytes = Vec::new();
+                #(#encode_to_bytes_fields)*
+                bytes
             }
 
             fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
-                // Convert bytes to witness format (single element)
-                let witness = vec![bytes.to_vec()];
-                let (params, _) = Self::decode_from_witness(&witness)?;
-                Ok(params)
+                let mut byte_offset = 0;
+                #(#decode_from_bytes_fields)*
+                
+                Ok(Self {
+                    #(#field_names_for_bytes),*
+                })
             }
         }
     };
@@ -159,7 +219,7 @@ pub fn derive_contract_state(input: TokenStream) -> TokenStream {
     let encode_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         quote! {
-            result.extend(self.#field_name.encode_to_witness().into_iter().flatten());
+            result.extend(self.#field_name.encode_to_witness());
         }
     });
 
@@ -168,7 +228,6 @@ pub fn derive_contract_state(input: TokenStream) -> TokenStream {
         let field_type = &f.ty;
         quote! {
             let (#field_name, consumed) = <#field_type as WitnessEncodable>::decode_from_witness(&witness[offset..])?;
-            let #field_name = *#field_name;
             offset += consumed;
         }
     });

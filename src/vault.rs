@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
+use mattrs_derive::ContractParams;
 
 use crate::argtypes::{BytesType, IntType, SignerType};
 use crate::contracts::{
@@ -188,66 +189,12 @@ impl ClauseArgs for UnvaultingRecoverArgs {
 // Vault Contract (Non-Augmented)
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractParams)]
 pub struct VaultParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
     pub recover_pk: XOnlyPublicKey,
     pub unvault_pk: XOnlyPublicKey,
-}
-
-impl ContractParams for VaultParams {
-    fn encode(&self) -> Vec<u8> {
-        // Simple encoding - in practice you'd want proper serialization
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(
-            &self
-                .alternate_pk
-                .map(|k| k.serialize())
-                .unwrap_or([0u8; 32]),
-        );
-        bytes.extend_from_slice(&self.spend_delay.to_le_bytes());
-        bytes.extend_from_slice(&self.recover_pk.serialize());
-        bytes.extend_from_slice(&self.unvault_pk.serialize());
-        bytes
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
-        if bytes.len() != 32 + 4 + 32 + 32 {
-            return Err(WitnessError::DecodingFailed(
-                "VaultParams must be 100 bytes".to_string(),
-            ));
-        }
-
-        let mut alternate_pk_bytes = [0u8; 32];
-        alternate_pk_bytes.copy_from_slice(&bytes[0..32]);
-        let alternate_pk = if alternate_pk_bytes == [0u8; 32] {
-            None
-        } else {
-            Some(
-                XOnlyPublicKey::from_slice(&alternate_pk_bytes).map_err(|e| {
-                    WitnessError::DecodingFailed(format!("Invalid alternate_pk: {}", e))
-                })?,
-            )
-        };
-
-        let mut spend_delay_bytes = [0u8; 4];
-        spend_delay_bytes.copy_from_slice(&bytes[32..36]);
-        let spend_delay = u32::from_le_bytes(spend_delay_bytes);
-
-        let recover_pk = XOnlyPublicKey::from_slice(&bytes[36..68])
-            .map_err(|e| WitnessError::DecodingFailed(format!("Invalid recover_pk: {}", e)))?;
-
-        let unvault_pk = XOnlyPublicKey::from_slice(&bytes[68..100])
-            .map_err(|e| WitnessError::DecodingFailed(format!("Invalid unvault_pk: {}", e)))?;
-
-        Ok(VaultParams {
-            alternate_pk,
-            spend_delay,
-            recover_pk,
-            unvault_pk,
-        })
-    }
 }
 
 /// Vault contract structure
@@ -520,59 +467,11 @@ impl Vault {
 // Unvaulting Contract (Augmented)
 // ============================================================================
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractParams)]
 pub struct UnvaultingParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
     pub recover_pk: XOnlyPublicKey,
-}
-
-impl ContractParams for UnvaultingParams {
-    fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(
-            &self
-                .alternate_pk
-                .map(|k| k.serialize())
-                .unwrap_or([0u8; 32]),
-        );
-        bytes.extend_from_slice(&self.spend_delay.to_le_bytes());
-        bytes.extend_from_slice(&self.recover_pk.serialize());
-        bytes
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
-        if bytes.len() != 32 + 4 + 32 {
-            return Err(WitnessError::DecodingFailed(
-                "UnvaultingParams must be 68 bytes".to_string(),
-            ));
-        }
-
-        let mut alternate_pk_bytes = [0u8; 32];
-        alternate_pk_bytes.copy_from_slice(&bytes[0..32]);
-        let alternate_pk = if alternate_pk_bytes == [0u8; 32] {
-            None
-        } else {
-            Some(
-                XOnlyPublicKey::from_slice(&alternate_pk_bytes).map_err(|e| {
-                    WitnessError::DecodingFailed(format!("Invalid alternate_pk: {}", e))
-                })?,
-            )
-        };
-
-        let mut spend_delay_bytes = [0u8; 4];
-        spend_delay_bytes.copy_from_slice(&bytes[32..36]);
-        let spend_delay = u32::from_le_bytes(spend_delay_bytes);
-
-        let recover_pk = XOnlyPublicKey::from_slice(&bytes[36..68])
-            .map_err(|e| WitnessError::DecodingFailed(format!("Invalid recover_pk: {}", e)))?;
-
-        Ok(UnvaultingParams {
-            alternate_pk,
-            spend_delay,
-            recover_pk,
-        })
-    }
 }
 
 #[derive(Debug, Clone)]
