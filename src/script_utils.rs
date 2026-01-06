@@ -16,7 +16,7 @@ use crate::contracts::WitnessError;
 /// use mattrs::script_utils::bn2vch;
 ///
 /// // Small positive numbers
-/// assert_eq!(bn2vch(0), vec![]);
+/// assert_eq!(bn2vch(0), Vec::<u8>::new());
 /// assert_eq!(bn2vch(1), vec![0x01]);
 /// assert_eq!(bn2vch(127), vec![0x7f]);
 ///
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn test_bn2vch_zero() {
-        assert_eq!(bn2vch(0), vec![]);
+        assert_eq!(bn2vch(0), Vec::<u8>::new());
     }
 
     #[test]

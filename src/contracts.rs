@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fmt, fmt::Debug, marker::PhantomData, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, fmt, fmt::Debug, marker::PhantomData, rc::Rc, sync::Arc};
 
 use bitcoin::{
-    ScriptBuf, TapTweakHash, XOnlyPublicKey,
+    OutPoint, ScriptBuf, TapTweakHash, Transaction, Txid, XOnlyPublicKey,
     hashes::{Hash, sha256},
     key::{Secp256k1, TweakedPublicKey},
     taproot::{LeafVersion, TapLeafHash, TapNodeHash},
@@ -75,6 +75,22 @@ impl From<WitnessError> for ClauseError {
         ClauseError::Witness(e)
     }
 }
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/// Opcode for CHECKTEMPLATEVERIFY
+pub const OP_CHECKTEMPLATEVERIFY: u8 = 0xb3;
+
+/// CCV flag: Check the input (validate introspection)
+pub const CCV_FLAG_CHECK_INPUT: i32 = -1;
+
+/// CCV flag: Ignore output amount
+pub const CCV_FLAG_IGNORE_OUTPUT_AMOUNT: i32 = 1;
+
+/// CCV flag: Deduct output amount from current input
+pub const CCV_FLAG_DEDUCT_OUTPUT_AMOUNT: i32 = 2;
 
 // ============================================================================
 // Core Traits
@@ -253,6 +269,8 @@ pub struct ClauseOutput {
     pub n: i32,
     /// The contract of this output.
     pub next_contract: Arc<dyn ErasedContract>,
+    /// The params data for the next contract instance (encoded bytes).
+    pub next_params: Option<Vec<u8>>,
     /// The state data for the next contract instance (encoded bytes).
     pub next_state: Option<Vec<u8>>,
     /// Determines the semantic of the output amount.
@@ -785,6 +803,37 @@ pub trait ErasedContract: Debug + Send + Sync {
 
     /// Get a clause by name.
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
+    
+    /// Execute a clause and get the next outputs.
+    fn execute_clause_erased(
+        &self,
+        clause_name: &str,
+        params_bytes: &[u8],
+        args: HashMap<String, ArgValue>,
+        state_bytes: Option<&[u8]>,
+    ) -> Result<Option<Vec<ClauseOutput>>, ClauseError>;
+    
+    /// Build the witness stack for spending with a specific clause.
+    fn build_witness_stack(
+        &self,
+        clause_name: &str,
+        params_bytes: &[u8],
+        args: &HashMap<String, ArgValue>,
+        state_bytes: Option<&[u8]>,
+    ) -> Result<Vec<Vec<u8>>, ClauseError>;
+    
+    /// Get the script pubkey for this contract (with optional state).
+    fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String>;
+
+    /// Get the internal pubkey for this contract.
+    fn internal_pubkey(&self) -> XOnlyPublicKey;
+
+    /// Get the internal pubkey to use for control block generation.
+    /// For augmented contracts with state, this may be state-tweaked.
+    fn control_block_internal_key(&self, state_bytes: Option<&[u8]>) -> Result<XOnlyPublicKey, String>;
+
+    /// Get the taptree for this contract.
+    fn taptree(&self) -> &Arc<TapTree>;
 
     /// Clone into a Box.
     fn clone_boxed(&self) -> Box<dyn ErasedContract>;
@@ -863,6 +912,52 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
         self.clauses.iter().find(|c| c.name() == name)
+    }
+    
+    fn execute_clause_erased(
+        &self,
+        clause_name: &str,
+        params_bytes: &[u8],
+        args: HashMap<String, ArgValue>,
+        state_bytes: Option<&[u8]>,
+    ) -> Result<Option<Vec<ClauseOutput>>, ClauseError> {
+        let clause = self.get_clause(clause_name)
+            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
+        
+        clause.next_outputs_erased(params_bytes, &args, state_bytes)
+            .map(Some)
+    }
+    
+    fn build_witness_stack(
+        &self,
+        clause_name: &str,
+        _params_bytes: &[u8],
+        args: &HashMap<String, ArgValue>,
+        _state_bytes: Option<&[u8]>,
+    ) -> Result<Vec<Vec<u8>>, ClauseError> {
+        let clause = self.get_clause(clause_name)
+            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
+        
+        let witness_elements = clause.encode_args_to_witness(args)?;
+        Ok(witness_elements)
+    }
+    
+    fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String> {
+        Ok(ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(
+            self.output_key(),
+        )))
+    }
+
+    fn internal_pubkey(&self) -> XOnlyPublicKey {
+        self.internal_pubkey
+    }
+
+    fn control_block_internal_key(&self, _state_bytes: Option<&[u8]>) -> Result<XOnlyPublicKey, String> {
+        Ok(self.internal_pubkey)
+    }
+
+    fn taptree(&self) -> &Arc<TapTree> {
+        &self.taptree
     }
 
     fn clone_boxed(&self) -> Box<dyn ErasedContract> {
@@ -962,6 +1057,61 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
         self.clauses.iter().find(|c| c.name() == name)
+    }
+    
+    fn execute_clause_erased(
+        &self,
+        clause_name: &str,
+        params_bytes: &[u8],
+        args: HashMap<String, ArgValue>,
+        state_bytes: Option<&[u8]>,
+    ) -> Result<Option<Vec<ClauseOutput>>, ClauseError> {
+        let clause = self.get_clause(clause_name)
+            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
+        
+        clause.next_outputs_erased(params_bytes, &args, state_bytes)
+            .map(Some)
+    }
+    
+    fn build_witness_stack(
+        &self,
+        clause_name: &str,
+        _params_bytes: &[u8],
+        args: &HashMap<String, ArgValue>,
+        _state_bytes: Option<&[u8]>,
+    ) -> Result<Vec<Vec<u8>>, ClauseError> {
+        let clause = self.get_clause(clause_name)
+            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
+        
+        let witness_elements = clause.encode_args_to_witness(args)?;
+        Ok(witness_elements)
+    }
+    
+    fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String> {
+        let state_bytes = state_bytes.ok_or("State required for augmented contract")?;
+        let state = S::decode(state_bytes)
+            .map_err(|e| format!("Failed to decode state: {}", e))?;
+        let output_key = self.output_key(&state)?;
+        Ok(ScriptBuf::new_p2tr_tweaked(
+            TweakedPublicKey::dangerous_assume_tweaked(output_key),
+        ))
+    }
+
+    fn internal_pubkey(&self) -> XOnlyPublicKey {
+        // For augmented contracts, we need to return the naked key
+        // Note: This may not be correct for all use cases, but it's what we have
+        self.naked_internal_pubkey
+    }
+
+    fn control_block_internal_key(&self, state_bytes: Option<&[u8]>) -> Result<XOnlyPublicKey, String> {
+        let state_bytes = state_bytes.ok_or("State required for augmented contract")?;
+        let state = S::decode(state_bytes)
+            .map_err(|e| format!("Failed to decode state: {}", e))?;
+        self.compute_internal_key(&state)
+    }
+
+    fn taptree(&self) -> &Arc<TapTree> {
+        &self.taptree
     }
 
     fn clone_boxed(&self) -> Box<dyn ErasedContract> {
@@ -1186,5 +1336,94 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> Default
 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// Contract Instance Management
+// ============================================================================
+
+/// Status of a contract instance in its lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceStatus {
+    /// Instance has been created but not yet funded on-chain.
+    Unfunded,
+    /// Instance has been funded and is available to spend.
+    Funded,
+    /// Instance has been spent in a transaction.
+    Spent,
+}
+
+/// A contract instance representing a specific UTXO with associated contract and state.
+///
+/// Instances track the lifecycle of a contract from creation through funding to spending,
+/// and maintain references to child instances created when spent.
+#[derive(Debug)]
+pub struct ContractInstance {
+    /// The contract template (type-erased for runtime polymorphism).
+    pub contract: Arc<dyn ErasedContract>,
+    
+    /// Serialized contract parameters.
+    pub params_bytes: Vec<u8>,
+    
+    /// Serialized contract state (None for non-augmented contracts).
+    pub state_bytes: Option<Vec<u8>>,
+    
+    /// The outpoint identifying this instance on-chain (None until funded).
+    pub outpoint: Option<OutPoint>,
+    
+    /// The transaction that funded this instance (None until funded).
+    pub funding_tx: Option<Transaction>,
+    
+    /// Current status in the instance lifecycle.
+    pub status: InstanceStatus,
+    
+    /// Transaction ID that spent this instance (None until spent).
+    pub spent_in_tx: Option<Txid>,
+    
+    /// Name of the clause used to spend this instance (None until spent).
+    pub clause_name: Option<String>,
+    
+    /// Child instances created when this instance was spent.
+    pub outputs: Vec<Rc<RefCell<ContractInstance>>>,
+}
+
+impl ContractInstance {
+    /// Create a new unfunded instance.
+    pub fn new(
+        contract: Arc<dyn ErasedContract>,
+        params_bytes: Vec<u8>,
+        state_bytes: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            contract,
+            params_bytes,
+            state_bytes,
+            outpoint: None,
+            funding_tx: None,
+            status: InstanceStatus::Unfunded,
+            spent_in_tx: None,
+            clause_name: None,
+            outputs: Vec::new(),
+        }
+    }
+    
+    /// Mark the instance as funded with the given outpoint and transaction.
+    pub fn mark_funded(&mut self, outpoint: OutPoint, funding_tx: Transaction) {
+        self.outpoint = Some(outpoint);
+        self.funding_tx = Some(funding_tx);
+        self.status = InstanceStatus::Funded;
+    }
+    
+    /// Mark the instance as spent with the given transaction and clause.
+    pub fn mark_spent(&mut self, txid: Txid, clause_name: String) {
+        self.spent_in_tx = Some(txid);
+        self.clause_name = Some(clause_name);
+        self.status = InstanceStatus::Spent;
+    }
+    
+    /// Add a child instance created from spending this instance.
+    pub fn add_output(&mut self, instance: Rc<RefCell<ContractInstance>>) {
+        self.outputs.push(instance);
     }
 }

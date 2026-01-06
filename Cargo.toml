@@ -8,3 +8,4 @@ bitcoin = "0.32.2"
 bitcoincore-rpc = "0.19.0"
 bitcoin-script = { path = "./bitcoin-script"}
 mattrs-derive = { path = "./mattrs-derive" }
+hex = "0.4"
