@@ -117,6 +117,22 @@ impl TapTree {
         }
     }
 
+    /// Finds a clause by its script bytes (used for decoding witness stacks).
+    pub fn get_clause_by_script(&self, script: &bitcoin::ScriptBuf) -> Option<&Clause> {
+        match self {
+            TapTree::Leaf(clause) => {
+                if &clause.script == script {
+                    Some(clause)
+                } else {
+                    None
+                }
+            }
+            TapTree::Branch { left, right } => left
+                .get_clause_by_script(script)
+                .or_else(|| right.get_clause_by_script(script)),
+        }
+    }
+
     pub fn get_clause_names(&self) -> Vec<&str> {
         self.get_leaves()
             .iter()

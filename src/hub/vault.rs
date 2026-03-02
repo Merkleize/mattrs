@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bitcoin::XOnlyPublicKey;
 use bitcoin_script::{define_pushable, script};
 
@@ -70,6 +72,7 @@ pub fn make_vault(params: &VaultParams) -> Contract {
         Clause {
             name: "trigger".into(),
             script,
+            signer_args: HashMap::from([("sig".into(), params.unvault_pk)]),
             args_to_witness: Box::new(|args| {
                 let a = TriggerArgs::from_clause_args(args)?;
                 Ok(vec![a.sig.to_vec(), a.ctv_hash.to_vec(), {
@@ -137,6 +140,7 @@ pub fn make_vault(params: &VaultParams) -> Contract {
         Clause {
             name: "trigger_and_revault".into(),
             script,
+            signer_args: HashMap::from([("sig".into(), params.unvault_pk)]),
             args_to_witness: Box::new(|args| {
                 let a = TriggerAndRevaultArgs::from_clause_args(args)?;
                 Ok(vec![a.sig.to_vec(), a.ctv_hash.to_vec(), {
@@ -216,8 +220,9 @@ pub fn make_vault(params: &VaultParams) -> Contract {
         Clause {
             name: "recover".into(),
             script,
+            signer_args: HashMap::new(),
             args_to_witness: Box::new(|_args| Ok(vec![])),
-            witness_to_args: Box::new(|_stack| Ok(std::collections::HashMap::new())),
+            witness_to_args: Box::new(|_stack| Ok(HashMap::new())),
             next_outputs: Box::new(|_args, _state| Ok(vec![])),
         }
     };
@@ -288,6 +293,7 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
         Clause {
             name: "withdraw".into(),
             script,
+            signer_args: HashMap::new(),
             args_to_witness: Box::new(|args| {
                 let a = WithdrawArgs::from_clause_args(args)?;
                 Ok(vec![a.ctv_hash.to_vec()])
@@ -321,6 +327,7 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
         Clause {
             name: "recover".into(),
             script,
+            signer_args: HashMap::new(),
             args_to_witness: Box::new(|args| {
                 let a = UnvaultingRecoverArgs::from_clause_args(args)?;
                 Ok(vec![a.ctv_hash.to_vec()])

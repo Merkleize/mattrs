@@ -39,6 +39,9 @@ type NextOutputsFn =
 pub struct Clause {
     pub name: String,
     pub script: bitcoin::ScriptBuf,
+    /// Maps arg names that require signatures to the pubkey that should sign.
+    /// The manager fills these args with signature bytes before calling args_to_witness.
+    pub signer_args: HashMap<String, XOnlyPublicKey>,
     pub args_to_witness: Box<ArgsToWitnessFn>,
     pub witness_to_args: Box<WitnessToArgsFn>,
     pub next_outputs: Box<NextOutputsFn>,

@@ -6,7 +6,9 @@ pub mod ctv;
 pub mod hub;
 pub mod macros;
 pub mod manager;
+pub mod signer;
 pub mod taproot;
+pub mod tx;
 
 /// Returns a script that pushes the pubkey or 0 on the stack.
 pub fn optional_key(maybe_pk: Option<XOnlyPublicKey>) -> ScriptBuf {
