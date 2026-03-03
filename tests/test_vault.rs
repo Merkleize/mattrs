@@ -41,7 +41,6 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     // Ensure wallet has funds
     let balance = client.get_balance(None, None)?;
     if balance < Amount::from_sat(100_000_000) {
-        // Mine some blocks to get funds
         let addr = client.get_new_address(None, None)?.assume_checked();
         client.generate_to_address(101, &addr)?;
     }
@@ -62,11 +61,11 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         recover_pk: recover_pubkey,
         unvault_pk: unvault_pubkey,
     };
-    let vault = make_vault(&vault_params);
+    let vault_contract = make_vault(&vault_params);
 
     // Verify address matches pymatt
-    let internal_key = vault.naked_internal_pubkey();
-    let taptree_hash = TapNodeHash::from_byte_array(vault.get_taptree_merkle_root());
+    let internal_key = vault_contract.naked_internal_pubkey();
+    let taptree_hash = TapNodeHash::from_byte_array(vault_contract.get_taptree_merkle_root());
     let address = Address::p2tr(&secp, *internal_key, Some(taptree_hash), KnownHrp::Regtest);
     assert_eq!(
         address.to_string(),
@@ -76,11 +75,11 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let amount = 49_999_900u64;
     let mut manager = ContractManager::new(&client, 0.1, true);
 
-    // --- Step 1: Fund the vault ---
-    let vault_idx = manager.fund_instance(vault.clone(), vec![], amount)?;
-    assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Funded);
-    assert!(manager.instances[vault_idx].outpoint.is_some());
-    println!("Vault funded at {:?}", manager.instances[vault_idx].outpoint.unwrap());
+    // --- Step 1: Fund the vault (typed API) ---
+    let vault = VaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
+    assert_eq!(manager.instances[vault.idx()].status, ContractInstanceStatus::Funded);
+    assert!(manager.instances[vault.idx()].outpoint.is_some());
+    println!("Vault funded at {:?}", manager.instances[vault.idx()].outpoint.unwrap());
 
     // --- Step 2: Set up signers ---
     let mut signers: SignerMap = HashMap::new();
@@ -111,30 +110,16 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         "b288279b3012acaedfde4e4e347ad6f3147d416edbebf76668f16b91f2969215"
     );
 
-    // --- Step 4: Spend vault with "trigger" clause ---
-    let trigger_args = TriggerArgs {
-        sig: [0u8; 64], // placeholder, will be filled by signer
-        ctv_hash,
-        out_i: 0,
-    };
-    let trigger_clause_args = trigger_args.to_clause_args();
-
-    let new_indices = manager.spend_instance(
-        vault_idx,
-        "trigger",
-        trigger_clause_args,
-        Some(&signers),
-    )?;
-
-    assert_eq!(new_indices.len(), 1);
-    let unvaulting_idx = new_indices[0];
+    // --- Step 4: Spend vault with "trigger" clause (typed API) ---
+    let vault_idx = vault.idx();
+    let (unvaulting,) = vault.trigger(&mut manager, ctv_hash, 0, &signers)?;
 
     // Verify the vault instance is now spent
     assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
     assert_eq!(manager.instances[vault_idx].spending_clause.as_deref(), Some("trigger"));
 
     // Verify unvaulting instance
-    let unvaulting_inst = &manager.instances[unvaulting_idx];
+    let unvaulting_inst = &manager.instances[unvaulting.idx()];
     assert_eq!(unvaulting_inst.status, ContractInstanceStatus::Funded);
     assert_eq!(unvaulting_inst.contract.name(), "Unvaulting");
     assert_eq!(unvaulting_inst.data, ctv_hash.to_vec());
@@ -144,12 +129,11 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     manager.mine_blocks(10)?;
 
     // --- Step 6: Withdraw from unvaulting ---
-    // The withdraw clause uses CTV, so we need to manually construct the transaction
-    // with the exact CTV template outputs.
-    let withdraw_args = WithdrawArgs { ctv_hash };
-    let mut clause_args = withdraw_args.to_clause_args();
+    // The withdraw clause uses CTV, so we need to manually construct the transaction.
+    let unvaulting_idx = unvaulting.idx();
+    let mut clause_args = HashMap::new();
+    clause_args.insert("ctv_hash".to_string(), ctv_hash.to_vec());
 
-    // Build the spend tx with CTV template outputs
     let ctv_outputs: Vec<TxOut> = ctv_template
         .iter()
         .map(|(addr, amount)| TxOut {
@@ -246,14 +230,14 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
         recover_pk: recover_pubkey,
         unvault_pk: unvault_pubkey,
     };
-    let vault = make_vault(&vault_params);
+    let vault_contract = make_vault(&vault_params);
 
     let amount = 49_999_900u64;
     let mut manager = ContractManager::new(&client, 0.1, true);
 
-    // Fund the vault
-    let vault_idx = manager.fund_instance(vault.clone(), vec![], amount)?;
-    println!("Vault funded at {:?}", manager.instances[vault_idx].outpoint.unwrap());
+    // Fund the vault (typed API)
+    let vault = VaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
+    println!("Vault funded at {:?}", manager.instances[vault.idx()].outpoint.unwrap());
 
     // Set up signers
     let mut signers: SignerMap = HashMap::new();
@@ -262,7 +246,7 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
         Box::new(HotSigner { privkey: unvault_privkey }),
     );
 
-    // Compute CTV hash (same as above)
+    // Compute CTV hash
     let ctv_template = vec![
         (
             Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?.assume_checked(),
@@ -279,27 +263,19 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let ctv_hash = make_ctv_template_hash(&ctv_template, Sequence(10))?;
 
-    // Spend with "trigger" clause
-    let trigger_args = TriggerArgs {
-        sig: [0u8; 64],
-        ctv_hash,
-        out_i: 0,
-    };
-    let new_indices = manager.spend_instance(
-        vault_idx,
-        "trigger",
-        trigger_args.to_clause_args(),
-        Some(&signers),
-    )?;
+    // Spend with "trigger" clause (typed API)
+    let vault_idx = vault.idx();
+    let (unvaulting,) = vault.trigger(&mut manager, ctv_hash, 0, &signers)?;
 
-    assert_eq!(new_indices.len(), 1);
-    let unvaulting_idx = new_indices[0];
-    assert_eq!(manager.instances[unvaulting_idx].contract.name(), "Unvaulting");
+    assert_eq!(manager.instances[unvaulting.idx()].contract.name(), "Unvaulting");
 
     // Verify the unvaulting instance has the correct CTV hash as state data
-    let decoded_state = UnvaultingState::decode(&manager.instances[unvaulting_idx].data)
+    let decoded_state = UnvaultingState::decode(&manager.instances[unvaulting.idx()].data)
         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
     assert_eq!(decoded_state.ctv_hash, ctv_hash);
+
+    // Verify vault is spent
+    assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
 
     println!("Vault trigger_and_revault test passed! (trigger step verified)");
     Ok(())
@@ -326,30 +302,20 @@ fn test_vault_recover() -> Result<(), Box<dyn std::error::Error>> {
         recover_pk: recover_pubkey,
         unvault_pk: unvault_pubkey,
     };
-    let vault = make_vault(&vault_params);
+    let vault_contract = make_vault(&vault_params);
 
     let amount = 49_999_900u64;
     let mut manager = ContractManager::new(&client, 0.1, true);
 
-    // Fund the vault
-    let vault_idx = manager.fund_instance(vault.clone(), vec![], amount)?;
+    // Fund the vault (typed API)
+    let vault = VaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
+    let vault_idx = vault.idx();
     println!("Vault funded at {:?}", manager.instances[vault_idx].outpoint.unwrap());
 
-    // Spend with "recover" clause (no signers needed)
-    // The recover clause expects out_i as the output index
-    let mut recover_args = HashMap::new();
-    recover_args.insert("out_i".to_string(), vec![]); // out_i = 0 (scriptint: empty = 0)
-
-    let new_indices = manager.spend_instance(
-        vault_idx,
-        "recover",
-        recover_args,
-        None,
-    )?;
+    // Spend with "recover" clause (typed API, no signers needed)
+    vault.recover(&mut manager, 0)?;
 
     // Recover produces an opaque P2TR output
-    assert_eq!(new_indices.len(), 1);
-    assert_eq!(manager.instances[new_indices[0]].contract.name(), "OpaqueP2TR");
     assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
     assert_eq!(manager.instances[vault_idx].spending_clause.as_deref(), Some("recover"));
 

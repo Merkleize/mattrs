@@ -1,14 +1,14 @@
-use std::collections::HashMap;
-
 use bitcoin::XOnlyPublicKey;
 use bitcoin_script::{define_pushable, script};
 
 use crate::ccv::{
     CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY,
 };
-use crate::contracts::{CcvAmountBehaviour, Clause, ClauseOutput, Contract};
+use crate::contracts::{
+    arg_as_bytes, arg_as_int, standard_clause, ArgType, CcvAmountBehaviour, ClauseOutput, Contract,
+};
 use crate::taproot::TapTree;
-use crate::{define_clause_args, define_state, optional_key};
+use crate::{define_state, optional_key, typed_instance};
 
 define_pushable!();
 
@@ -21,25 +21,6 @@ pub struct VaultParams {
     pub recover_pk: XOnlyPublicKey,
     pub unvault_pk: XOnlyPublicKey,
 }
-
-define_clause_args! {
-    TriggerArgs {
-        sig: bytes[64],
-        ctv_hash: bytes[32],
-        out_i: i32,
-    }
-}
-
-define_clause_args! {
-    TriggerAndRevaultArgs {
-        sig: bytes[64],
-        ctv_hash: bytes[32],
-        out_i: i32,
-        revault_out_i: i32,
-    }
-}
-
-// Recover clause has no args (empty witness besides script+control block)
 
 pub fn make_vault(params: &VaultParams) -> Contract {
     let unvaulting = make_unvaulting(&UnvaultingParams {
@@ -55,7 +36,7 @@ pub fn make_vault(params: &VaultParams) -> Contract {
 
     // --- trigger clause ---
     let trigger = {
-        let script = {
+        let trigger_script = {
             let opt_key = optional_key(params.alternate_pk);
             script! {
                 <opt_key>
@@ -69,55 +50,30 @@ pub fn make_vault(params: &VaultParams) -> Contract {
         };
 
         let unvaulting_for_next = unvaulting.clone();
-        Clause {
-            name: "trigger".into(),
-            script,
-            signer_args: HashMap::from([("sig".into(), params.unvault_pk)]),
-            args_to_witness: Box::new(|args| {
-                let a = TriggerArgs::from_clause_args(args)?;
-                Ok(vec![a.sig.to_vec(), a.ctv_hash.to_vec(), {
-                    let mut buf = [0u8; 8];
-                    let len = bitcoin::script::write_scriptint(&mut buf, a.out_i as i64);
-                    buf[..len].to_vec()
-                }])
-            }),
-            witness_to_args: Box::new(|stack| {
-                if stack.len() != 3 {
-                    return Err(format!("trigger: expected 3 witness elements, got {}", stack.len()).into());
-                }
-                let mut sig = [0u8; 64];
-                sig.copy_from_slice(&stack[0]);
-                let mut ctv_hash = [0u8; 32];
-                ctv_hash.copy_from_slice(&stack[1]);
-                let out_i = bitcoin::script::read_scriptint(&stack[2])
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
-                    as i32;
-                Ok(TriggerArgs { sig, ctv_hash, out_i }.to_clause_args())
-            }),
-            next_outputs: Box::new(move |args, _state| {
-                let ctv_hash = args.get("ctv_hash")
-                    .ok_or("Missing ctv_hash")?
-                    .clone();
-                let out_i_bytes = args.get("out_i")
-                    .ok_or("Missing out_i")?;
-                let out_i = bitcoin::script::read_scriptint(out_i_bytes)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
-                    as i32;
+        standard_clause(
+            "trigger",
+            trigger_script,
+            vec![
+                ("sig", ArgType::Signer(params.unvault_pk)),
+                ("ctv_hash", ArgType::Bytes(32)),
+                ("out_i", ArgType::Int),
+            ],
+            move |args, _state| {
                 Ok(vec![ClauseOutput {
-                    n: out_i,
+                    n: arg_as_int(args, "out_i")?,
                     next_contract: unvaulting_for_next.clone(),
-                    next_state: ctv_hash,
+                    next_state: arg_as_bytes(args, "ctv_hash")?.clone(),
                     amount_behaviour: CcvAmountBehaviour::Preserve,
                 }])
-            }),
-        }
+            },
+        )
     };
 
     // --- trigger_and_revault clause ---
     let trigger_and_revault = {
         let vault_params = params.clone();
         let unvaulting_for_next = unvaulting.clone();
-        let script = {
+        let tar_script = {
             let opt_key = optional_key(params.alternate_pk);
             script! {
                 0 OP_SWAP  // no data tweak
@@ -137,75 +93,38 @@ pub fn make_vault(params: &VaultParams) -> Contract {
             }
         };
 
-        Clause {
-            name: "trigger_and_revault".into(),
-            script,
-            signer_args: HashMap::from([("sig".into(), params.unvault_pk)]),
-            args_to_witness: Box::new(|args| {
-                let a = TriggerAndRevaultArgs::from_clause_args(args)?;
-                Ok(vec![a.sig.to_vec(), a.ctv_hash.to_vec(), {
-                    let mut buf = [0u8; 8];
-                    let len = bitcoin::script::write_scriptint(&mut buf, a.out_i as i64);
-                    buf[..len].to_vec()
-                }, {
-                    let mut buf = [0u8; 8];
-                    let len = bitcoin::script::write_scriptint(&mut buf, a.revault_out_i as i64);
-                    buf[..len].to_vec()
-                }])
-            }),
-            witness_to_args: Box::new(|stack| {
-                if stack.len() != 4 {
-                    return Err(format!("trigger_and_revault: expected 4 witness elements, got {}", stack.len()).into());
-                }
-                let mut sig = [0u8; 64];
-                sig.copy_from_slice(&stack[0]);
-                let mut ctv_hash = [0u8; 32];
-                ctv_hash.copy_from_slice(&stack[1]);
-                let out_i = bitcoin::script::read_scriptint(&stack[2])
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
-                    as i32;
-                let revault_out_i = bitcoin::script::read_scriptint(&stack[3])
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
-                    as i32;
-                Ok(TriggerAndRevaultArgs { sig, ctv_hash, out_i, revault_out_i }.to_clause_args())
-            }),
-            next_outputs: Box::new(move |args, _state| {
-                let ctv_hash = args.get("ctv_hash")
-                    .ok_or("Missing ctv_hash")?
-                    .clone();
-                let out_i_bytes = args.get("out_i")
-                    .ok_or("Missing out_i")?;
-                let out_i = bitcoin::script::read_scriptint(out_i_bytes)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
-                    as i32;
-                let revault_out_i_bytes = args.get("revault_out_i")
-                    .ok_or("Missing revault_out_i")?;
-                let revault_out_i = bitcoin::script::read_scriptint(revault_out_i_bytes)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
-                    as i32;
-
+        standard_clause(
+            "trigger_and_revault",
+            tar_script,
+            vec![
+                ("sig", ArgType::Signer(params.unvault_pk)),
+                ("ctv_hash", ArgType::Bytes(32)),
+                ("out_i", ArgType::Int),
+                ("revault_out_i", ArgType::Int),
+            ],
+            move |args, _state| {
                 let revault_contract = make_vault(&vault_params);
                 Ok(vec![
                     ClauseOutput {
-                        n: revault_out_i,
+                        n: arg_as_int(args, "revault_out_i")?,
                         next_contract: revault_contract,
                         next_state: vec![],
                         amount_behaviour: CcvAmountBehaviour::Deduct,
                     },
                     ClauseOutput {
-                        n: out_i,
+                        n: arg_as_int(args, "out_i")?,
                         next_contract: unvaulting_for_next.clone(),
-                        next_state: ctv_hash,
+                        next_state: arg_as_bytes(args, "ctv_hash")?.clone(),
                         amount_behaviour: CcvAmountBehaviour::Preserve,
                     },
                 ])
-            }),
-        }
+            },
+        )
     };
 
     // --- recover clause ---
     let recover = {
-        let script = {
+        let recover_script = {
             script! {
                 0    // data
                 SWAP // <out_i> (from witness)
@@ -218,35 +137,19 @@ pub fn make_vault(params: &VaultParams) -> Contract {
         };
 
         let recover_pk = params.recover_pk;
-        Clause {
-            name: "recover".into(),
-            script,
-            signer_args: HashMap::new(),
-            args_to_witness: Box::new(|args| {
-                let out_i_bytes = args.get("out_i").ok_or("Missing out_i")?;
-                Ok(vec![out_i_bytes.clone()])
-            }),
-            witness_to_args: Box::new(|stack| {
-                if stack.len() != 1 {
-                    return Err(format!("recover: expected 1 witness element, got {}", stack.len()).into());
-                }
-                let mut args = HashMap::new();
-                args.insert("out_i".into(), stack[0].clone());
-                Ok(args)
-            }),
-            next_outputs: Box::new(move |args, _state| {
-                let out_i_bytes = args.get("out_i").ok_or("Missing out_i")?;
-                let out_i = bitcoin::script::read_scriptint(out_i_bytes)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
-                    as i32;
+        standard_clause(
+            "recover",
+            recover_script,
+            vec![("out_i", ArgType::Int)],
+            move |args, _state| {
                 Ok(vec![ClauseOutput {
-                    n: out_i,
+                    n: arg_as_int(args, "out_i")?,
                     next_contract: Contract::new_opaque_p2tr(recover_pk),
                     next_state: vec![],
                     amount_behaviour: CcvAmountBehaviour::Preserve,
                 }])
-            }),
-        }
+            },
+        )
     };
 
     Contract::new(
@@ -277,13 +180,6 @@ define_state! {
     }
 }
 
-define_clause_args! {
-    WithdrawArgs {
-        ctv_hash: bytes[32],
-    }
-}
-
-
 pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
     let pk = params
         .alternate_pk
@@ -291,7 +187,7 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
 
     // --- withdraw clause ---
     let withdraw = {
-        let script = {
+        let withdraw_script = {
             let opt_key = optional_key(params.alternate_pk);
             script! {
                 DUP
@@ -307,29 +203,17 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
             }
         };
 
-        Clause {
-            name: "withdraw".into(),
-            script,
-            signer_args: HashMap::new(),
-            args_to_witness: Box::new(|args| {
-                let a = WithdrawArgs::from_clause_args(args)?;
-                Ok(vec![a.ctv_hash.to_vec()])
-            }),
-            witness_to_args: Box::new(|stack| {
-                if stack.len() != 1 {
-                    return Err(format!("withdraw: expected 1 witness element, got {}", stack.len()).into());
-                }
-                let mut ctv_hash = [0u8; 32];
-                ctv_hash.copy_from_slice(&stack[0]);
-                Ok(WithdrawArgs { ctv_hash }.to_clause_args())
-            }),
-            next_outputs: Box::new(|_args, _state| Ok(vec![])),
-        }
+        standard_clause(
+            "withdraw",
+            withdraw_script,
+            vec![("ctv_hash", ArgType::Bytes(32))],
+            |_args, _state| Ok(vec![]),
+        )
     };
 
     // --- recover clause ---
     let recover = {
-        let script = {
+        let recover_script = {
             script! {
                 0    // data
                 SWAP // <out_i> (from witness)
@@ -342,35 +226,19 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
         };
 
         let recover_pk = params.recover_pk;
-        Clause {
-            name: "recover".into(),
-            script,
-            signer_args: HashMap::new(),
-            args_to_witness: Box::new(|args| {
-                let out_i_bytes = args.get("out_i").ok_or("Missing out_i")?;
-                Ok(vec![out_i_bytes.clone()])
-            }),
-            witness_to_args: Box::new(|stack| {
-                if stack.len() != 1 {
-                    return Err(format!("recover: expected 1 witness element, got {}", stack.len()).into());
-                }
-                let mut args = HashMap::new();
-                args.insert("out_i".into(), stack[0].clone());
-                Ok(args)
-            }),
-            next_outputs: Box::new(move |args, _state| {
-                let out_i_bytes = args.get("out_i").ok_or("Missing out_i")?;
-                let out_i = bitcoin::script::read_scriptint(out_i_bytes)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
-                    as i32;
+        standard_clause(
+            "recover",
+            recover_script,
+            vec![("out_i", ArgType::Int)],
+            move |args, _state| {
                 Ok(vec![ClauseOutput {
-                    n: out_i,
+                    n: arg_as_int(args, "out_i")?,
                     next_contract: Contract::new_opaque_p2tr(recover_pk),
                     next_state: vec![],
                     amount_behaviour: CcvAmountBehaviour::Preserve,
                 }])
-            }),
-        }
+            },
+        )
     };
 
     Contract::new(
@@ -381,6 +249,22 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
             right: Box::new(TapTree::Leaf(recover)),
         },
     )
+}
+
+// --- Typed instance wrappers ---
+
+typed_instance! {
+    VaultInstance {
+        fn trigger(ctv_hash: bytes[32], out_i: i32) [signed] -> (UnvaultingInstance);
+        fn trigger_and_revault(ctv_hash: bytes[32], out_i: i32, revault_out_i: i32) [signed] -> (VaultInstance, UnvaultingInstance);
+        fn recover(out_i: i32) -> ();
+    }
+}
+
+typed_instance! {
+    UnvaultingInstance {
+        fn recover(out_i: i32) -> ();
+    }
 }
 
 #[cfg(test)]
@@ -422,22 +306,6 @@ mod tests {
             taproot_address.to_string(),
             "bcrt1plkh3clum5e2rynql75ufxxqxw898arfumqnua60hwr76q4y0jeksu88u3m"
         );
-    }
-
-    #[test]
-    fn test_trigger_args_roundtrip() {
-        let original = TriggerArgs {
-            sig: [0xAB; 64],
-            ctv_hash: [0xCD; 32],
-            out_i: 42,
-        };
-
-        let clause_args = original.to_clause_args();
-        let decoded = TriggerArgs::from_clause_args(&clause_args).unwrap();
-
-        assert_eq!(original.sig, decoded.sig);
-        assert_eq!(original.ctv_hash, decoded.ctv_hash);
-        assert_eq!(original.out_i, decoded.out_i);
     }
 
     #[test]
@@ -486,12 +354,12 @@ mod tests {
             unvault_pk: unvault_pubkey.into(),
         });
 
-        let args = TriggerArgs {
-            sig: [0u8; 64],
-            ctv_hash: [0xAA; 32],
-            out_i: 0,
-        };
-        let clause_args = args.to_clause_args();
+        // Build clause args manually (matching what standard_clause expects)
+        let mut clause_args = std::collections::HashMap::new();
+        clause_args.insert("sig".to_string(), [0u8; 64].to_vec());
+        clause_args.insert("ctv_hash".to_string(), [0xAA; 32].to_vec());
+        clause_args.insert("out_i".to_string(), vec![]); // scriptint 0 = empty
+
         if let TapTree::Branch { left, .. } = vault.taptree() {
             if let TapTree::Leaf(ref clause) = **left {
                 assert_eq!(clause.name, "trigger");

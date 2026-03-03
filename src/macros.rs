@@ -137,3 +137,124 @@ macro_rules! define_clause_args {
             as i32
     }};
 }
+
+/// Generates typed newtype wrappers around instance indices with typed clause methods.
+///
+/// Each clause method encodes args, calls `manager.spend_instance()`, and returns
+/// a tuple of typed next-instances. `self` is consumed so a spent instance can't be reused.
+///
+/// # Syntax
+/// ```ignore
+/// typed_instance! {
+///     VaultInstance {
+///         fn trigger(ctv_hash: bytes[32], out_i: i32) [signed] -> (UnvaultingInstance);
+///         fn recover(out_i: i32) -> ();
+///     }
+/// }
+/// ```
+///
+/// - `[signed]` adds a `signers: &SignerMap` parameter
+/// - `-> (Type1, Type2)` returns a tuple of typed instances from `spend_instance` indices
+/// - `-> ()` is a terminal clause (no tracked outputs)
+#[macro_export]
+macro_rules! typed_instance {
+    (
+        $name:ident {
+            $( fn $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* $(,)? ) $( [ $modifier:ident ] )? -> ( $( $ret:ident ),* $(,)? ) ; )*
+        }
+    ) => {
+        pub struct $name(pub usize);
+
+        impl $name {
+            /// Fund a new instance of this contract type.
+            pub fn fund(
+                manager: &mut $crate::manager::ContractManager,
+                contract: $crate::contracts::Contract,
+                data: $crate::contracts::StateData,
+                amount: u64,
+            ) -> Result<Self, Box<dyn std::error::Error>> {
+                Ok(Self(manager.fund_instance(contract, data, amount)?))
+            }
+
+            /// Access the raw instance index for manual tx construction.
+            pub fn idx(&self) -> usize { self.0 }
+
+            $(
+                typed_instance!(@method $name, $method ( $( $arg : $atype $( [ $alen ] )? ),* ) $( [ $modifier ] )? -> ( $( $ret ),* ) );
+            )*
+        }
+    };
+
+    // Method with [signed] modifier
+    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) [ signed ] -> ( $( $ret:ident ),* ) ) => {
+        pub fn $method(
+            self,
+            manager: &mut $crate::manager::ContractManager,
+            $( $arg : typed_instance!(@rust_type $atype $( [ $alen ] )? ), )*
+            signers: &$crate::signer::SignerMap,
+        ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
+            let mut args = std::collections::HashMap::new();
+            $(
+                typed_instance!(@encode args, $arg, $atype $( [ $alen ] )? );
+            )*
+            let _indices = manager.spend_instance(self.0, stringify!($method), args, Some(signers))?;
+            typed_instance!(@return _indices, 0usize, $( $ret ),* )
+        }
+    };
+
+    // Method without modifier (unsigned)
+    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) -> ( $( $ret:ident ),* ) ) => {
+        pub fn $method(
+            self,
+            manager: &mut $crate::manager::ContractManager,
+            $( $arg : typed_instance!(@rust_type $atype $( [ $alen ] )? ), )*
+        ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
+            let mut args = std::collections::HashMap::new();
+            $(
+                typed_instance!(@encode args, $arg, $atype $( [ $alen ] )? );
+            )*
+            let _indices = manager.spend_instance(self.0, stringify!($method), args, None)?;
+            typed_instance!(@return _indices, 0usize, $( $ret ),* )
+        }
+    };
+
+    // Rust type mapping
+    (@rust_type bytes [ $len:expr ]) => { [u8; $len] };
+    (@rust_type i32) => { i32 };
+
+    // Arg encoding: bytes
+    (@encode $map:ident, $arg:ident, bytes [ $len:expr ]) => {
+        $map.insert(stringify!($arg).to_string(), $arg.to_vec());
+    };
+    // Arg encoding: i32
+    (@encode $map:ident, $arg:ident, i32) => {
+        {
+            let mut _buf = [0u8; 8];
+            let _len = bitcoin::script::write_scriptint(&mut _buf, $arg as i64);
+            $map.insert(stringify!($arg).to_string(), _buf[.._len].to_vec());
+        }
+    };
+
+    // Return tuple construction: base case (no more types)
+    (@return $indices:ident, $i:expr, ) => {
+        Ok(())
+    };
+    // Return tuple construction: one or more types
+    (@return $indices:ident, $i:expr, $first:ident $( , $rest:ident )* ) => {
+        {
+            let _first_val = $first($indices[$i]);
+            typed_instance!(@return_acc $indices, ($i + 1usize), ( _first_val, ) $( $rest ),* )
+        }
+    };
+    // Accumulator: done
+    (@return_acc $indices:ident, $i:expr, ( $( $acc:expr, )* ) ) => {
+        Ok(( $( $acc, )* ))
+    };
+    // Accumulator: more types
+    (@return_acc $indices:ident, $i:expr, ( $( $acc:expr, )* ) $next:ident $( , $rest:ident )* ) => {
+        {
+            let _next_val = $next($indices[$i]);
+            typed_instance!(@return_acc $indices, ($i + 1usize), ( $( $acc, )* _next_val, ) $( $rest ),* )
+        }
+    };
+}
