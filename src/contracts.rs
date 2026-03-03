@@ -276,6 +276,12 @@ impl<const N: usize> ClauseArg for [u8; N] {
     }
 }
 
+impl ClauseArg for Vec<u8> {
+    fn arg_type() -> ArgType { ArgType::Bytes(0) }
+    fn to_bytes(&self) -> Vec<u8> { self.clone() }
+    fn from_bytes(data: &[u8]) -> Result<Self, BoxError> { Ok(data.to_vec()) }
+}
+
 impl ClauseArg for i32 {
     fn arg_type() -> ArgType { ArgType::Int }
     fn to_bytes(&self) -> Vec<u8> {
