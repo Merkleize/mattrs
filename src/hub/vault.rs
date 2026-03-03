@@ -217,13 +217,35 @@ pub fn make_vault(params: &VaultParams) -> Contract {
             }
         };
 
+        let recover_pk = params.recover_pk;
         Clause {
             name: "recover".into(),
             script,
             signer_args: HashMap::new(),
-            args_to_witness: Box::new(|_args| Ok(vec![])),
-            witness_to_args: Box::new(|_stack| Ok(HashMap::new())),
-            next_outputs: Box::new(|_args, _state| Ok(vec![])),
+            args_to_witness: Box::new(|args| {
+                let out_i_bytes = args.get("out_i").ok_or("Missing out_i")?;
+                Ok(vec![out_i_bytes.clone()])
+            }),
+            witness_to_args: Box::new(|stack| {
+                if stack.len() != 1 {
+                    return Err(format!("recover: expected 1 witness element, got {}", stack.len()).into());
+                }
+                let mut args = HashMap::new();
+                args.insert("out_i".into(), stack[0].clone());
+                Ok(args)
+            }),
+            next_outputs: Box::new(move |args, _state| {
+                let out_i_bytes = args.get("out_i").ok_or("Missing out_i")?;
+                let out_i = bitcoin::script::read_scriptint(out_i_bytes)
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
+                    as i32;
+                Ok(vec![ClauseOutput {
+                    n: out_i,
+                    next_contract: Contract::new_opaque_p2tr(recover_pk),
+                    next_state: vec![],
+                    amount_behaviour: CcvAmountBehaviour::Preserve,
+                }])
+            }),
         }
     };
 
@@ -261,11 +283,6 @@ define_clause_args! {
     }
 }
 
-define_clause_args! {
-    UnvaultingRecoverArgs {
-        ctv_hash: bytes[32],
-    }
-}
 
 pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
     let pk = params
@@ -324,23 +341,35 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
             }
         };
 
+        let recover_pk = params.recover_pk;
         Clause {
             name: "recover".into(),
             script,
             signer_args: HashMap::new(),
             args_to_witness: Box::new(|args| {
-                let a = UnvaultingRecoverArgs::from_clause_args(args)?;
-                Ok(vec![a.ctv_hash.to_vec()])
+                let out_i_bytes = args.get("out_i").ok_or("Missing out_i")?;
+                Ok(vec![out_i_bytes.clone()])
             }),
             witness_to_args: Box::new(|stack| {
                 if stack.len() != 1 {
                     return Err(format!("recover: expected 1 witness element, got {}", stack.len()).into());
                 }
-                let mut ctv_hash = [0u8; 32];
-                ctv_hash.copy_from_slice(&stack[0]);
-                Ok(UnvaultingRecoverArgs { ctv_hash }.to_clause_args())
+                let mut args = HashMap::new();
+                args.insert("out_i".into(), stack[0].clone());
+                Ok(args)
             }),
-            next_outputs: Box::new(|_args, _state| Ok(vec![])),
+            next_outputs: Box::new(move |args, _state| {
+                let out_i_bytes = args.get("out_i").ok_or("Missing out_i")?;
+                let out_i = bitcoin::script::read_scriptint(out_i_bytes)
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?
+                    as i32;
+                Ok(vec![ClauseOutput {
+                    n: out_i,
+                    next_contract: Contract::new_opaque_p2tr(recover_pk),
+                    next_state: vec![],
+                    amount_behaviour: CcvAmountBehaviour::Preserve,
+                }])
+            }),
         }
     };
 

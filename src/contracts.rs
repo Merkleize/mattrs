@@ -59,7 +59,7 @@ impl std::fmt::Debug for Clause {
 struct ContractInner {
     name: String,
     naked_internal_pubkey: XOnlyPublicKey,
-    taptree: TapTree,
+    taptree: Option<TapTree>,
 }
 
 /// A contract "template" -- the program of the state machine.
@@ -80,7 +80,17 @@ impl Contract {
         Contract(Arc::new(ContractInner {
             name: name.into(),
             naked_internal_pubkey,
-            taptree,
+            taptree: Some(taptree),
+        }))
+    }
+
+    /// Creates an opaque P2TR contract (key-only, no script tree).
+    /// Used for outputs that are not tracked by the contract manager.
+    pub fn new_opaque_p2tr(pubkey: XOnlyPublicKey) -> Self {
+        Contract(Arc::new(ContractInner {
+            name: "OpaqueP2TR".into(),
+            naked_internal_pubkey: pubkey,
+            taptree: None,
         }))
     }
 
@@ -93,7 +103,7 @@ impl Contract {
     }
 
     pub fn taptree(&self) -> &TapTree {
-        &self.0.taptree
+        self.0.taptree.as_ref().expect("Contract has no taptree (opaque P2TR)")
     }
 
     /// Get the internal pubkey for a specific state (data embedded in the UTXO).
@@ -109,28 +119,45 @@ impl Contract {
     /// Get the taproot address for a specific state.
     pub fn get_address(&self, data: &StateData) -> Address {
         let internal_pk = self.get_internal_pubkey(data);
-        get_taproot_address(&internal_pk, &self.0.taptree)
+        match &self.0.taptree {
+            Some(taptree) => get_taproot_address(&internal_pk, taptree),
+            None => {
+                // OpaqueP2TR: raw witness v1 output with untweaked pubkey.
+                // This matches pymatt's OpaqueP2TR which skips the taproot tweak.
+                let script = bitcoin::ScriptBuf::new_witness_program(
+                    &bitcoin::WitnessProgram::new(
+                        bitcoin::WitnessVersion::V1,
+                        &internal_pk.serialize(),
+                    ).expect("valid witness program"),
+                );
+                Address::from_script(&script, bitcoin::Network::Regtest)
+                    .expect("valid address")
+            }
+        }
     }
 
     /// Get the taptree merkle root hash.
     pub fn get_taptree_merkle_root(&self) -> [u8; 32] {
-        self.0.taptree.get_root_hash()
+        self.taptree().get_root_hash()
     }
 
     /// Find a clause by name (searches taptree leaves).
     pub fn get_clause(&self, name: &str) -> Option<&Clause> {
-        self.0.taptree.get_clause(name)
+        self.0.taptree.as_ref().and_then(|t| t.get_clause(name))
     }
 
     /// Get all leaf names.
     pub fn clause_names(&self) -> Vec<&str> {
-        self.0.taptree.get_clause_names()
+        match &self.0.taptree {
+            Some(t) => t.get_clause_names(),
+            None => vec![],
+        }
     }
 
     /// Get the control block for a specific clause and state.
     pub fn get_control_block(&self, clause_name: &str, data: &StateData) -> Vec<u8> {
         let internal_pk = self.get_internal_pubkey(data);
-        self.0.taptree.get_control_block(&internal_pk, clause_name)
+        self.taptree().get_control_block(&internal_pk, clause_name)
     }
 }
 

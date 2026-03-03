@@ -43,10 +43,10 @@ impl TapTree {
             }
             TapTree::Branch { left, right } => {
                 if let Some(mut proof) = left.get_merkle_proof_by_name(target_name) {
-                    proof.insert(0, right.get_root_hash());
+                    proof.push(right.get_root_hash());
                     Some(proof)
                 } else if let Some(mut proof) = right.get_merkle_proof_by_name(target_name) {
-                    proof.insert(0, left.get_root_hash());
+                    proof.push(left.get_root_hash());
                     Some(proof)
                 } else {
                     None
