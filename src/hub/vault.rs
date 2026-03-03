@@ -1,14 +1,10 @@
 use bitcoin::XOnlyPublicKey;
 use bitcoin_script::{define_pushable, script};
 
-use crate::ccv::{
-    CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY,
-};
-use crate::contracts::{
-    arg_as_bytes, arg_as_int, standard_clause, ArgType, CcvAmountBehaviour, ClauseOutput, Contract,
-};
+use crate::ccv::{CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY};
+use crate::contracts::Contract;
 use crate::taproot::TapTree;
-use crate::{define_state, optional_key, typed_instance};
+use crate::{ccv_outputs, contract, define_state, optional_key};
 
 define_pushable!();
 
@@ -50,22 +46,10 @@ pub fn make_vault(params: &VaultParams) -> Contract {
         };
 
         let unvaulting_for_next = unvaulting.clone();
-        standard_clause(
-            "trigger",
+        VaultClause::trigger(
             trigger_script,
-            vec![
-                ("sig", ArgType::Signer(params.unvault_pk)),
-                ("ctv_hash", ArgType::Bytes(32)),
-                ("out_i", ArgType::Int),
-            ],
-            move |args, _state| {
-                Ok(vec![ClauseOutput {
-                    n: arg_as_int(args, "out_i")?,
-                    next_contract: unvaulting_for_next.clone(),
-                    next_state: arg_as_bytes(args, "ctv_hash")?.clone(),
-                    amount_behaviour: CcvAmountBehaviour::Preserve,
-                }])
-            },
+            params.unvault_pk,
+            ccv_outputs!(out_i => unvaulting_for_next.clone(), state: ctv_hash),
         )
     };
 
@@ -93,32 +77,13 @@ pub fn make_vault(params: &VaultParams) -> Contract {
             }
         };
 
-        standard_clause(
-            "trigger_and_revault",
+        VaultClause::trigger_and_revault(
             tar_script,
-            vec![
-                ("sig", ArgType::Signer(params.unvault_pk)),
-                ("ctv_hash", ArgType::Bytes(32)),
-                ("out_i", ArgType::Int),
-                ("revault_out_i", ArgType::Int),
-            ],
-            move |args, _state| {
-                let revault_contract = make_vault(&vault_params);
-                Ok(vec![
-                    ClauseOutput {
-                        n: arg_as_int(args, "revault_out_i")?,
-                        next_contract: revault_contract,
-                        next_state: vec![],
-                        amount_behaviour: CcvAmountBehaviour::Deduct,
-                    },
-                    ClauseOutput {
-                        n: arg_as_int(args, "out_i")?,
-                        next_contract: unvaulting_for_next.clone(),
-                        next_state: arg_as_bytes(args, "ctv_hash")?.clone(),
-                        amount_behaviour: CcvAmountBehaviour::Preserve,
-                    },
-                ])
-            },
+            params.unvault_pk,
+            ccv_outputs!(
+                revault_out_i => make_vault(&vault_params), deduct;
+                out_i => unvaulting_for_next.clone(), state: ctv_hash
+            ),
         )
     };
 
@@ -137,18 +102,9 @@ pub fn make_vault(params: &VaultParams) -> Contract {
         };
 
         let recover_pk = params.recover_pk;
-        standard_clause(
-            "recover",
+        VaultClause::recover(
             recover_script,
-            vec![("out_i", ArgType::Int)],
-            move |args, _state| {
-                Ok(vec![ClauseOutput {
-                    n: arg_as_int(args, "out_i")?,
-                    next_contract: Contract::new_opaque_p2tr(recover_pk),
-                    next_state: vec![],
-                    amount_behaviour: CcvAmountBehaviour::Preserve,
-                }])
-            },
+            ccv_outputs!(out_i => Contract::new_opaque_p2tr(recover_pk)),
         )
     };
 
@@ -203,11 +159,9 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
             }
         };
 
-        standard_clause(
-            "withdraw",
+        UnvaultingClause::withdraw(
             withdraw_script,
-            vec![("ctv_hash", ArgType::Bytes(32))],
-            |_args, _state| Ok(vec![]),
+            ccv_outputs!(),
         )
     };
 
@@ -226,18 +180,9 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
         };
 
         let recover_pk = params.recover_pk;
-        standard_clause(
-            "recover",
+        UnvaultingClause::recover(
             recover_script,
-            vec![("out_i", ArgType::Int)],
-            move |args, _state| {
-                Ok(vec![ClauseOutput {
-                    n: arg_as_int(args, "out_i")?,
-                    next_contract: Contract::new_opaque_p2tr(recover_pk),
-                    next_state: vec![],
-                    amount_behaviour: CcvAmountBehaviour::Preserve,
-                }])
-            },
+            ccv_outputs!(out_i => Contract::new_opaque_p2tr(recover_pk)),
         )
     };
 
@@ -253,16 +198,17 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
 
 // --- Typed instance wrappers ---
 
-typed_instance! {
-    VaultInstance {
-        fn trigger(ctv_hash: bytes[32], out_i: i32) [signed] -> (UnvaultingInstance);
-        fn trigger_and_revault(ctv_hash: bytes[32], out_i: i32, revault_out_i: i32) [signed] -> (VaultInstance, UnvaultingInstance);
+contract! {
+    VaultInstance, VaultClause {
+        fn trigger(ctv_hash: bytes[32], out_i: i32) [signed(sig)] -> (UnvaultingInstance);
+        fn trigger_and_revault(ctv_hash: bytes[32], out_i: i32, revault_out_i: i32) [signed(sig)] -> (VaultInstance, UnvaultingInstance);
         fn recover(out_i: i32) -> ();
     }
 }
 
-typed_instance! {
-    UnvaultingInstance {
+contract! {
+    UnvaultingInstance, UnvaultingClause {
+        fn withdraw(ctv_hash: bytes[32]) -> ();
         fn recover(out_i: i32) -> ();
     }
 }
@@ -272,6 +218,8 @@ mod tests {
     use std::str::FromStr;
 
     use bitcoin::{bip32::Xpriv, hashes::Hash, key::Secp256k1, Address, KnownHrp, TapNodeHash};
+
+    use crate::contracts::CcvAmountBehaviour;
 
     use super::*;
 

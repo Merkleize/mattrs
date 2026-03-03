@@ -138,34 +138,114 @@ macro_rules! define_clause_args {
     }};
 }
 
-/// Generates typed newtype wrappers around instance indices with typed clause methods.
-///
-/// Each clause method encodes args, calls `manager.spend_instance()`, and returns
-/// a tuple of typed next-instances. `self` is consumed so a spent instance can't be reused.
+/// Generates a `next_outputs` closure from a compact declaration.
 ///
 /// # Syntax
 /// ```ignore
-/// typed_instance! {
-///     VaultInstance {
-///         fn trigger(ctv_hash: bytes[32], out_i: i32) [signed] -> (UnvaultingInstance);
+/// // Terminal clause (no outputs):
+/// ccv_outputs!()
+///
+/// // One or more outputs, semicolon-separated:
+/// ccv_outputs!(
+///     index_arg => contract_expr;                           // basic
+///     index_arg => contract_expr, state: state_arg;         // with state
+///     index_arg => contract_expr, deduct;                   // deduct amount
+///     index_arg => contract_expr, state: state_arg, deduct; // both
+/// )
+/// ```
+#[macro_export]
+macro_rules! ccv_outputs {
+    // Empty: terminal clause with no outputs
+    () => {
+        |_args: &$crate::contracts::ClauseArgs,
+         _state: &$crate::contracts::StateData|
+         -> Result<Vec<$crate::contracts::ClauseOutput>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(vec![])
+        }
+    };
+
+    // One or more output specs, semicolon-separated
+    ( $( $index_arg:ident => $contract:expr $( , $tag:tt $( : $tag_val:ident )? )* );+ $(;)? ) => {
+        move |args: &$crate::contracts::ClauseArgs,
+              _state: &$crate::contracts::StateData|
+              -> Result<Vec<$crate::contracts::ClauseOutput>, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(vec![
+                $( ccv_outputs!(@single args, $index_arg, $contract $(, $tag $( : $tag_val )? )* ), )+
+            ])
+        }
+    };
+
+    // Internal: single output with state + deduct
+    (@single $args:ident, $index_arg:ident, $contract:expr, state: $state_arg:ident, deduct) => {
+        $crate::contracts::ClauseOutput {
+            n: $crate::contracts::arg_as_int($args, stringify!($index_arg))?,
+            next_contract: $contract,
+            next_state: $crate::contracts::arg_as_bytes($args, stringify!($state_arg))?.clone(),
+            amount_behaviour: $crate::contracts::CcvAmountBehaviour::Deduct,
+        }
+    };
+    // Internal: single output with state only
+    (@single $args:ident, $index_arg:ident, $contract:expr, state: $state_arg:ident) => {
+        $crate::contracts::ClauseOutput {
+            n: $crate::contracts::arg_as_int($args, stringify!($index_arg))?,
+            next_contract: $contract,
+            next_state: $crate::contracts::arg_as_bytes($args, stringify!($state_arg))?.clone(),
+            amount_behaviour: $crate::contracts::CcvAmountBehaviour::Preserve,
+        }
+    };
+    // Internal: single output with deduct only
+    (@single $args:ident, $index_arg:ident, $contract:expr, deduct) => {
+        $crate::contracts::ClauseOutput {
+            n: $crate::contracts::arg_as_int($args, stringify!($index_arg))?,
+            next_contract: $contract,
+            next_state: vec![],
+            amount_behaviour: $crate::contracts::CcvAmountBehaviour::Deduct,
+        }
+    };
+    // Internal: single output, basic (no state, no deduct)
+    (@single $args:ident, $index_arg:ident, $contract:expr) => {
+        $crate::contracts::ClauseOutput {
+            n: $crate::contracts::arg_as_int($args, stringify!($index_arg))?,
+            next_contract: $contract,
+            next_state: vec![],
+            amount_behaviour: $crate::contracts::CcvAmountBehaviour::Preserve,
+        }
+    };
+}
+
+/// Generates a typed instance wrapper and a clause constructor namespace from a single declaration.
+///
+/// Each clause's arg names and types are declared **once** and used to generate both:
+/// 1. Typed spend methods on the instance struct (for the `ContractManager` API)
+/// 2. Clause constructor functions on the namespace struct (replacing manual `standard_clause()` calls)
+///
+/// # Syntax
+/// ```ignore
+/// contract! {
+///     VaultInstance, VaultClause {
+///         fn trigger(ctv_hash: bytes[32], out_i: i32) [signed(sig)] -> (UnvaultingInstance);
 ///         fn recover(out_i: i32) -> ();
 ///     }
 /// }
 /// ```
 ///
-/// - `[signed]` adds a `signers: &SignerMap` parameter
-/// - `-> (Type1, Type2)` returns a tuple of typed instances from `spend_instance` indices
+/// - `[signed(sig)]` means the clause has a 64-byte signature arg named `sig`
+///   - Adds `signers: &SignerMap` to the typed spend method
+///   - Adds `sig: XOnlyPublicKey` parameter to the clause constructor
+/// - `-> (Type1, Type2)` returns typed instances from `spend_instance` indices
 /// - `-> ()` is a terminal clause (no tracked outputs)
 #[macro_export]
-macro_rules! typed_instance {
+macro_rules! contract {
+    // ── Main entry point ────────────────────────────────────────────────
     (
-        $name:ident {
-            $( fn $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* $(,)? ) $( [ $modifier:ident ] )? -> ( $( $ret:ident ),* $(,)? ) ; )*
+        $instance:ident, $clause_ns:ident {
+            $( fn $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* $(,)? ) $( [ signed( $signer:ident ) ] )? -> ( $( $ret:ident ),* $(,)? ) ; )*
         }
     ) => {
-        pub struct $name(pub usize);
+        // 1. Typed instance struct with spend methods
+        pub struct $instance(pub usize);
 
-        impl $name {
+        impl $instance {
             /// Fund a new instance of this contract type.
             pub fn fund(
                 manager: &mut $crate::manager::ContractManager,
@@ -180,25 +260,36 @@ macro_rules! typed_instance {
             pub fn idx(&self) -> usize { self.0 }
 
             $(
-                typed_instance!(@method $name, $method ( $( $arg : $atype $( [ $alen ] )? ),* ) $( [ $modifier ] )? -> ( $( $ret ),* ) );
+                contract!(@method $instance, $method ( $( $arg : $atype $( [ $alen ] )? ),* ) $( [ signed( $signer ) ] )? -> ( $( $ret ),* ) );
+            )*
+        }
+
+        // 2. Clause constructor namespace
+        pub struct $clause_ns;
+
+        impl $clause_ns {
+            $(
+                contract!(@clause_method $method ( $( $arg : $atype $( [ $alen ] )? ),* ) $( [ signed( $signer ) ] )? );
             )*
         }
     };
 
-    // Method with [signed] modifier
-    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) [ signed ] -> ( $( $ret:ident ),* ) ) => {
+    // ── Typed spend methods (instance struct) ───────────────────────────
+
+    // Method with [signed(name)] modifier
+    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) [ signed( $signer:ident ) ] -> ( $( $ret:ident ),* ) ) => {
         pub fn $method(
             self,
             manager: &mut $crate::manager::ContractManager,
-            $( $arg : typed_instance!(@rust_type $atype $( [ $alen ] )? ), )*
+            $( $arg : contract!(@rust_type $atype $( [ $alen ] )? ), )*
             signers: &$crate::signer::SignerMap,
         ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
             let mut args = std::collections::HashMap::new();
             $(
-                typed_instance!(@encode args, $arg, $atype $( [ $alen ] )? );
+                contract!(@encode args, $arg, $atype $( [ $alen ] )? );
             )*
             let _indices = manager.spend_instance(self.0, stringify!($method), args, Some(signers))?;
-            typed_instance!(@return _indices, 0usize, $( $ret ),* )
+            contract!(@return _indices, 0usize, $( $ret ),* )
         }
     };
 
@@ -207,26 +298,68 @@ macro_rules! typed_instance {
         pub fn $method(
             self,
             manager: &mut $crate::manager::ContractManager,
-            $( $arg : typed_instance!(@rust_type $atype $( [ $alen ] )? ), )*
+            $( $arg : contract!(@rust_type $atype $( [ $alen ] )? ), )*
         ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
             let mut args = std::collections::HashMap::new();
             $(
-                typed_instance!(@encode args, $arg, $atype $( [ $alen ] )? );
+                contract!(@encode args, $arg, $atype $( [ $alen ] )? );
             )*
             let _indices = manager.spend_instance(self.0, stringify!($method), args, None)?;
-            typed_instance!(@return _indices, 0usize, $( $ret ),* )
+            contract!(@return _indices, 0usize, $( $ret ),* )
         }
     };
 
-    // Rust type mapping
+    // ── Clause constructor methods (namespace struct) ───────────────────
+
+    // Signed clause: adds signer key parameter
+    (@clause_method $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) [ signed( $signer:ident ) ] ) => {
+        #[allow(clippy::too_many_arguments)]
+        pub fn $method(
+            script: bitcoin::ScriptBuf,
+            $signer: bitcoin::XOnlyPublicKey,
+            next_outputs: impl Fn(&$crate::contracts::ClauseArgs, &$crate::contracts::StateData) -> Result<Vec<$crate::contracts::ClauseOutput>, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+        ) -> $crate::contracts::Clause {
+            $crate::contracts::standard_clause(
+                stringify!($method),
+                script,
+                vec![
+                    (stringify!($signer), $crate::contracts::ArgType::Signer($signer)),
+                    $( (stringify!($arg), contract!(@arg_spec $atype $( [ $alen ] )? )), )*
+                ],
+                next_outputs,
+            )
+        }
+    };
+
+    // Unsigned clause
+    (@clause_method $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) ) => {
+        pub fn $method(
+            script: bitcoin::ScriptBuf,
+            next_outputs: impl Fn(&$crate::contracts::ClauseArgs, &$crate::contracts::StateData) -> Result<Vec<$crate::contracts::ClauseOutput>, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+        ) -> $crate::contracts::Clause {
+            $crate::contracts::standard_clause(
+                stringify!($method),
+                script,
+                vec![
+                    $( (stringify!($arg), contract!(@arg_spec $atype $( [ $alen ] )? )), )*
+                ],
+                next_outputs,
+            )
+        }
+    };
+
+    // ── ArgType mapping (for clause constructors) ───────────────────────
+    (@arg_spec bytes [ $len:expr ]) => { $crate::contracts::ArgType::Bytes($len) };
+    (@arg_spec i32) => { $crate::contracts::ArgType::Int };
+
+    // ── Rust type mapping (for spend methods) ───────────────────────────
     (@rust_type bytes [ $len:expr ]) => { [u8; $len] };
     (@rust_type i32) => { i32 };
 
-    // Arg encoding: bytes
+    // ── Arg encoding (for spend methods) ────────────────────────────────
     (@encode $map:ident, $arg:ident, bytes [ $len:expr ]) => {
         $map.insert(stringify!($arg).to_string(), $arg.to_vec());
     };
-    // Arg encoding: i32
     (@encode $map:ident, $arg:ident, i32) => {
         {
             let mut _buf = [0u8; 8];
@@ -235,15 +368,16 @@ macro_rules! typed_instance {
         }
     };
 
-    // Return tuple construction: base case (no more types)
+    // ── Return tuple construction ───────────────────────────────────────
+    // Base case: no return types
     (@return $indices:ident, $i:expr, ) => {
         Ok(())
     };
-    // Return tuple construction: one or more types
+    // One or more return types
     (@return $indices:ident, $i:expr, $first:ident $( , $rest:ident )* ) => {
         {
             let _first_val = $first($indices[$i]);
-            typed_instance!(@return_acc $indices, ($i + 1usize), ( _first_val, ) $( $rest ),* )
+            contract!(@return_acc $indices, ($i + 1usize), ( _first_val, ) $( $rest ),* )
         }
     };
     // Accumulator: done
@@ -254,7 +388,7 @@ macro_rules! typed_instance {
     (@return_acc $indices:ident, $i:expr, ( $( $acc:expr, )* ) $next:ident $( , $rest:ident )* ) => {
         {
             let _next_val = $next($indices[$i]);
-            typed_instance!(@return_acc $indices, ($i + 1usize), ( $( $acc, )* _next_val, ) $( $rest ),* )
+            contract!(@return_acc $indices, ($i + 1usize), ( $( $acc, )* _next_val, ) $( $rest ),* )
         }
     };
 }
