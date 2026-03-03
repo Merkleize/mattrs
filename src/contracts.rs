@@ -255,6 +255,40 @@ pub fn arg_as_bytes<'a>(args: &'a ClauseArgs, name: &str) -> Result<&'a Vec<u8>,
         .ok_or_else(|| format!("Missing arg '{}'", name).into())
 }
 
+// ---------------------------------------------------------------------------
+// ClauseArg trait: extensible type support for contract!/define_clause_args!
+// ---------------------------------------------------------------------------
+
+/// Trait for types that can be used as clause arguments.
+/// Implement this for new types to use them in `contract!` and `define_clause_args!`
+/// without modifying the macros.
+pub trait ClauseArg: Sized {
+    fn arg_type() -> ArgType;
+    fn to_bytes(&self) -> Vec<u8>;
+    fn from_bytes(data: &[u8]) -> Result<Self, BoxError>;
+}
+
+impl<const N: usize> ClauseArg for [u8; N] {
+    fn arg_type() -> ArgType { ArgType::Bytes(N) }
+    fn to_bytes(&self) -> Vec<u8> { self.to_vec() }
+    fn from_bytes(data: &[u8]) -> Result<Self, BoxError> {
+        data.try_into().map_err(|_| format!("expected {} bytes, got {}", N, data.len()).into())
+    }
+}
+
+impl ClauseArg for i32 {
+    fn arg_type() -> ArgType { ArgType::Int }
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = [0u8; 8];
+        let len = bitcoin::script::write_scriptint(&mut buf, *self as i64);
+        buf[..len].to_vec()
+    }
+    fn from_bytes(data: &[u8]) -> Result<Self, BoxError> {
+        Ok(bitcoin::script::read_scriptint(data)
+            .map_err(|e| -> BoxError { e.to_string().into() })? as i32)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractInstanceStatus {
     Abstract,

@@ -53,16 +53,14 @@ macro_rules! define_state {
 
 /// Generates a typed clause-args struct with to_clause_args/from_clause_args helpers.
 ///
-/// Supported field types:
-/// - `[u8; N]`: fixed-size byte arrays
-/// - `i32`: script integers (encoded via bitcoin's scriptint)
+/// Uses the `ClauseArg` trait for type-extensible encoding/decoding.
 ///
 /// # Example
 /// ```ignore
 /// define_clause_args! {
 ///     TriggerArgs {
-///         sig: bytes[64],
-///         ctv_hash: bytes[32],
+///         sig: [u8; 64],
+///         ctv_hash: [u8; 32],
 ///         out_i: i32,
 ///     }
 /// }
@@ -71,19 +69,19 @@ macro_rules! define_state {
 macro_rules! define_clause_args {
     (
         $name:ident {
-            $( $field:ident : $ftype:tt $( [ $len:expr ] )? ),* $(,)?
+            $( $field:ident : $ftype:ty ),* $(,)?
         }
     ) => {
         #[derive(Debug, Clone)]
         pub struct $name {
-            $( pub $field: define_clause_args!(@field_type $ftype $( [ $len ] )? ), )*
+            $( pub $field: $ftype, )*
         }
 
         impl $name {
             pub fn to_clause_args(&self) -> $crate::contracts::ClauseArgs {
                 let mut args = std::collections::HashMap::new();
                 $(
-                    define_clause_args!(@encode self, args, $field, $ftype $( [ $len ] )? );
+                    args.insert(stringify!($field).to_string(), $crate::contracts::ClauseArg::to_bytes(&self.$field));
                 )*
                 args
             }
@@ -91,7 +89,11 @@ macro_rules! define_clause_args {
             pub fn from_clause_args(args: &$crate::contracts::ClauseArgs) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
                 Ok(Self {
                     $(
-                        $field: define_clause_args!(@decode args, $field, $ftype $( [ $len ] )? ),
+                        $field: {
+                            let v = args.get(stringify!($field))
+                                .ok_or_else(|| format!("Missing arg '{}'", stringify!($field)))?;
+                            <$ftype as $crate::contracts::ClauseArg>::from_bytes(v)?
+                        },
                     )*
                 })
             }
@@ -101,41 +103,6 @@ macro_rules! define_clause_args {
             }
         }
     };
-
-    // Field type resolution
-    (@field_type bytes [ $len:expr ]) => { [u8; $len] };
-    (@field_type i32) => { i32 };
-
-    // Encoding: bytes
-    (@encode $self:ident, $map:ident, $field:ident, bytes [ $len:expr ]) => {
-        $map.insert(stringify!($field).to_string(), $self.$field.to_vec());
-    };
-    // Encoding: i32
-    (@encode $self:ident, $map:ident, $field:ident, i32) => {
-        let mut buf = [0u8; 8];
-        let len = bitcoin::script::write_scriptint(&mut buf, $self.$field as i64);
-        $map.insert(stringify!($field).to_string(), buf[..len].to_vec());
-    };
-
-    // Decoding: bytes
-    (@decode $map:ident, $field:ident, bytes [ $len:expr ]) => {{
-        let v = $map.get(stringify!($field))
-            .ok_or_else(|| format!("Missing arg '{}'", stringify!($field)))?;
-        let mut arr = [0u8; $len];
-        if v.len() != $len {
-            return Err(format!("Arg '{}': expected {} bytes, got {}", stringify!($field), $len, v.len()).into());
-        }
-        arr.copy_from_slice(v);
-        arr
-    }};
-    // Decoding: i32
-    (@decode $map:ident, $field:ident, i32) => {{
-        let v = $map.get(stringify!($field))
-            .ok_or_else(|| format!("Missing arg '{}'", stringify!($field)))?;
-        bitcoin::script::read_scriptint(v)
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { format!("Arg '{}': {}", stringify!($field), e).into() })?
-            as i32
-    }};
 }
 
 /// Generates a `next_outputs` closure from a compact declaration.
@@ -223,7 +190,7 @@ macro_rules! ccv_outputs {
 /// ```ignore
 /// contract! {
 ///     VaultInstance, VaultClause {
-///         fn trigger(ctv_hash: bytes[32], out_i: i32) [signed(sig)] -> (UnvaultingInstance);
+///         fn trigger(ctv_hash: [u8; 32], out_i: i32) [signed(sig)] -> (UnvaultingInstance);
 ///         fn recover(out_i: i32) -> ();
 ///     }
 /// }
@@ -239,7 +206,7 @@ macro_rules! contract {
     // ── Main entry point ────────────────────────────────────────────────
     (
         $instance:ident, $clause_ns:ident {
-            $( fn $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* $(,)? ) $( [ signed( $signer:ident ) ] )? -> ( $( $ret:ident ),* $(,)? ) ; )*
+            $( fn $method:ident ( $( $arg:ident : $atype:ty ),* $(,)? ) $( [ signed( $signer:ident ) ] )? -> ( $( $ret:ident ),* $(,)? ) ; )*
         }
     ) => {
         // 1. Typed instance struct with spend methods
@@ -260,7 +227,7 @@ macro_rules! contract {
             pub fn idx(&self) -> usize { self.0 }
 
             $(
-                contract!(@method $instance, $method ( $( $arg : $atype $( [ $alen ] )? ),* ) $( [ signed( $signer ) ] )? -> ( $( $ret ),* ) );
+                contract!(@method $instance, $method ( $( $arg : $atype ),* ) $( [ signed( $signer ) ] )? -> ( $( $ret ),* ) );
             )*
         }
 
@@ -269,7 +236,7 @@ macro_rules! contract {
 
         impl $clause_ns {
             $(
-                contract!(@clause_method $method ( $( $arg : $atype $( [ $alen ] )? ),* ) $( [ signed( $signer ) ] )? );
+                contract!(@clause_method $method ( $( $arg : $atype ),* ) $( [ signed( $signer ) ] )? );
             )*
         }
     };
@@ -277,16 +244,16 @@ macro_rules! contract {
     // ── Typed spend methods (instance struct) ───────────────────────────
 
     // Method with [signed(name)] modifier
-    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) [ signed( $signer:ident ) ] -> ( $( $ret:ident ),* ) ) => {
+    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:ty ),* ) [ signed( $signer:ident ) ] -> ( $( $ret:ident ),* ) ) => {
         pub fn $method(
             self,
             manager: &mut $crate::manager::ContractManager,
-            $( $arg : contract!(@rust_type $atype $( [ $alen ] )? ), )*
+            $( $arg : $atype, )*
             signers: &$crate::signer::SignerMap,
         ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
             let mut args = std::collections::HashMap::new();
             $(
-                contract!(@encode args, $arg, $atype $( [ $alen ] )? );
+                args.insert(stringify!($arg).to_string(), <$atype as $crate::contracts::ClauseArg>::to_bytes(&$arg));
             )*
             let _indices = manager.spend_instance(self.0, stringify!($method), args, Some(signers))?;
             contract!(@return _indices, 0usize, $( $ret ),* )
@@ -294,15 +261,15 @@ macro_rules! contract {
     };
 
     // Method without modifier (unsigned)
-    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) -> ( $( $ret:ident ),* ) ) => {
+    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:ty ),* ) -> ( $( $ret:ident ),* ) ) => {
         pub fn $method(
             self,
             manager: &mut $crate::manager::ContractManager,
-            $( $arg : contract!(@rust_type $atype $( [ $alen ] )? ), )*
+            $( $arg : $atype, )*
         ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
             let mut args = std::collections::HashMap::new();
             $(
-                contract!(@encode args, $arg, $atype $( [ $alen ] )? );
+                args.insert(stringify!($arg).to_string(), <$atype as $crate::contracts::ClauseArg>::to_bytes(&$arg));
             )*
             let _indices = manager.spend_instance(self.0, stringify!($method), args, None)?;
             contract!(@return _indices, 0usize, $( $ret ),* )
@@ -312,7 +279,7 @@ macro_rules! contract {
     // ── Clause constructor methods (namespace struct) ───────────────────
 
     // Signed clause: adds signer key parameter
-    (@clause_method $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) [ signed( $signer:ident ) ] ) => {
+    (@clause_method $method:ident ( $( $arg:ident : $atype:ty ),* ) [ signed( $signer:ident ) ] ) => {
         #[allow(clippy::too_many_arguments)]
         pub fn $method(
             script: bitcoin::ScriptBuf,
@@ -324,7 +291,7 @@ macro_rules! contract {
                 script,
                 vec![
                     (stringify!($signer), $crate::contracts::ArgType::Signer($signer)),
-                    $( (stringify!($arg), contract!(@arg_spec $atype $( [ $alen ] )? )), )*
+                    $( (stringify!($arg), <$atype as $crate::contracts::ClauseArg>::arg_type()), )*
                 ],
                 next_outputs,
             )
@@ -332,7 +299,7 @@ macro_rules! contract {
     };
 
     // Unsigned clause
-    (@clause_method $method:ident ( $( $arg:ident : $atype:tt $( [ $alen:expr ] )? ),* ) ) => {
+    (@clause_method $method:ident ( $( $arg:ident : $atype:ty ),* ) ) => {
         pub fn $method(
             script: bitcoin::ScriptBuf,
             next_outputs: impl Fn(&$crate::contracts::ClauseArgs, &$crate::contracts::StateData) -> Result<Vec<$crate::contracts::ClauseOutput>, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
@@ -341,30 +308,10 @@ macro_rules! contract {
                 stringify!($method),
                 script,
                 vec![
-                    $( (stringify!($arg), contract!(@arg_spec $atype $( [ $alen ] )? )), )*
+                    $( (stringify!($arg), <$atype as $crate::contracts::ClauseArg>::arg_type()), )*
                 ],
                 next_outputs,
             )
-        }
-    };
-
-    // ── ArgType mapping (for clause constructors) ───────────────────────
-    (@arg_spec bytes [ $len:expr ]) => { $crate::contracts::ArgType::Bytes($len) };
-    (@arg_spec i32) => { $crate::contracts::ArgType::Int };
-
-    // ── Rust type mapping (for spend methods) ───────────────────────────
-    (@rust_type bytes [ $len:expr ]) => { [u8; $len] };
-    (@rust_type i32) => { i32 };
-
-    // ── Arg encoding (for spend methods) ────────────────────────────────
-    (@encode $map:ident, $arg:ident, bytes [ $len:expr ]) => {
-        $map.insert(stringify!($arg).to_string(), $arg.to_vec());
-    };
-    (@encode $map:ident, $arg:ident, i32) => {
-        {
-            let mut _buf = [0u8; 8];
-            let _len = bitcoin::script::write_scriptint(&mut _buf, $arg as i64);
-            $map.insert(stringify!($arg).to_string(), _buf[.._len].to_vec());
         }
     };
 

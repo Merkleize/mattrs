@@ -200,15 +200,15 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
 
 contract! {
     VaultInstance, VaultClause {
-        fn trigger(ctv_hash: bytes[32], out_i: i32) [signed(sig)] -> (UnvaultingInstance);
-        fn trigger_and_revault(ctv_hash: bytes[32], out_i: i32, revault_out_i: i32) [signed(sig)] -> (VaultInstance, UnvaultingInstance);
+        fn trigger(ctv_hash: [u8; 32], out_i: i32) [signed(sig)] -> (UnvaultingInstance);
+        fn trigger_and_revault(ctv_hash: [u8; 32], out_i: i32, revault_out_i: i32) [signed(sig)] -> (VaultInstance, UnvaultingInstance);
         fn recover(out_i: i32) -> ();
     }
 }
 
 contract! {
     UnvaultingInstance, UnvaultingClause {
-        fn withdraw(ctv_hash: bytes[32]) -> ();
+        fn withdraw(ctv_hash: [u8; 32]) -> ();
         fn recover(out_i: i32) -> ();
     }
 }
