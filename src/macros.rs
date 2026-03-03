@@ -190,15 +190,16 @@ macro_rules! ccv_outputs {
 /// ```ignore
 /// contract! {
 ///     VaultInstance, VaultClause {
-///         fn trigger(ctv_hash: [u8; 32], out_i: i32) [signed(sig)] -> (UnvaultingInstance);
+///         fn trigger(sig: signed, ctv_hash: [u8; 32], out_i: i32) -> (UnvaultingInstance);
 ///         fn recover(out_i: i32) -> ();
 ///     }
 /// }
 /// ```
 ///
-/// - `[signed(sig)]` means the clause has a 64-byte signature arg named `sig`
-///   - Adds `signers: &SignerMap` to the typed spend method
-///   - Adds `sig: XOnlyPublicKey` parameter to the clause constructor
+/// - `name: sig` means the arg is a 64-byte Schnorr signature.
+///   Signature args can appear at any position and multiple are supported.
+///   - In the spend method, sig args are omitted from params; a `signers: &SignerMap` param is appended.
+///   - In the clause constructor, each sig becomes an `impl Fn(&ClauseArgs, &StateData) -> XOnlyPublicKey` param.
 /// - `-> (Type1, Type2)` returns typed instances from `spend_instance` indices
 /// - `-> ()` is a terminal clause (no tracked outputs)
 #[macro_export]
@@ -206,7 +207,7 @@ macro_rules! contract {
     // ── Main entry point ────────────────────────────────────────────────
     (
         $instance:ident, $clause_ns:ident {
-            $( fn $method:ident ( $( $arg:ident : $atype:ty ),* $(,)? ) $( [ signed( $signer:ident ) ] )? -> ( $( $ret:ident ),* $(,)? ) ; )*
+            $( fn $method:ident ( $( $arg:ident : $atype:tt ),* $(,)? ) -> ( $( $ret:ident ),* $(,)? ) ; )*
         }
     ) => {
         // 1. Typed instance struct with spend methods
@@ -227,7 +228,7 @@ macro_rules! contract {
             pub fn idx(&self) -> usize { self.0 }
 
             $(
-                contract!(@method $instance, $method ( $( $arg : $atype ),* ) $( [ signed( $signer ) ] )? -> ( $( $ret ),* ) );
+                contract!(@method $instance, $method [ $( $arg : $atype ),* ] -> ( $( $ret ),* ) );
             )*
         }
 
@@ -236,80 +237,180 @@ macro_rules! contract {
 
         impl $clause_ns {
             $(
-                contract!(@clause_method $method ( $( $arg : $atype ),* ) $( [ signed( $signer ) ] )? );
+                contract!(@clause_method $method [ $( $arg : $atype ),* ] );
             )*
         }
     };
 
     // ── Typed spend methods (instance struct) ───────────────────────────
+    // TT muncher entry: start processing args
+    (@method $name:ident, $method:ident [ $( $arg:ident : $atype:tt ),* ] -> ( $( $ret:ident ),* ) ) => {
+        contract!(@method_munch $name, $method,
+            args_left: [ $( $arg : $atype ),* ],
+            params: [],
+            inserts: [],
+            has_signer: false,
+            -> ( $( $ret ),* )
+        );
+    };
 
-    // Method with [signed(name)] modifier
-    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:ty ),* ) [ signed( $signer:ident ) ] -> ( $( $ret:ident ),* ) ) => {
+    // Method muncher: sig arg
+    (@method_munch $name:ident, $method:ident,
+        args_left: [ $arg:ident : sig $( , $rest_arg:ident : $rest_atype:tt )* ],
+        params: [ $( $param:ident : $ptype:ty ),* ],
+        inserts: [ $( $ins:expr ),* ],
+        has_signer: $hs:tt,
+        -> ( $( $ret:ident ),* )
+    ) => {
+        contract!(@method_munch $name, $method,
+            args_left: [ $( $rest_arg : $rest_atype ),* ],
+            params: [ $( $param : $ptype ),* ],
+            inserts: [ $( $ins ),* ],
+            has_signer: true,
+            -> ( $( $ret ),* )
+        );
+    };
+
+    // Method muncher: typed arg (array type like [u8; 32])
+    (@method_munch $name:ident, $method:ident,
+        args_left: [ $arg:ident : [ $( $arr_tt:tt )* ] $( , $rest_arg:ident : $rest_atype:tt )* ],
+        params: [ $( $param:ident : $ptype:ty ),* ],
+        inserts: [ $( $ins:expr ),* ],
+        has_signer: $hs:tt,
+        -> ( $( $ret:ident ),* )
+    ) => {
+        contract!(@method_munch $name, $method,
+            args_left: [ $( $rest_arg : $rest_atype ),* ],
+            params: [ $( $param : $ptype, )* $arg : [ $( $arr_tt )* ] ],
+            inserts: [ $( $ins, )* (stringify!($arg), <[ $( $arr_tt )* ] as $crate::contracts::ClauseArg>::to_bytes(& $arg)) ],
+            has_signer: $hs,
+            -> ( $( $ret ),* )
+        );
+    };
+
+    // Method muncher: typed arg (simple ident type like i32, Vec<u8>)
+    (@method_munch $name:ident, $method:ident,
+        args_left: [ $arg:ident : $atype:ident $( , $rest_arg:ident : $rest_atype:tt )* ],
+        params: [ $( $param:ident : $ptype:ty ),* ],
+        inserts: [ $( $ins:expr ),* ],
+        has_signer: $hs:tt,
+        -> ( $( $ret:ident ),* )
+    ) => {
+        contract!(@method_munch $name, $method,
+            args_left: [ $( $rest_arg : $rest_atype ),* ],
+            params: [ $( $param : $ptype, )* $arg : $atype ],
+            inserts: [ $( $ins, )* (stringify!($arg), <$atype as $crate::contracts::ClauseArg>::to_bytes(& $arg)) ],
+            has_signer: $hs,
+            -> ( $( $ret ),* )
+        );
+    };
+
+    // Method muncher done: has signers
+    (@method_munch $name:ident, $method:ident,
+        args_left: [],
+        params: [ $( $param:ident : $ptype:ty ),* ],
+        inserts: [ $( $ins:expr ),* ],
+        has_signer: true,
+        -> ( $( $ret:ident ),* )
+    ) => {
         pub fn $method(
             self,
             manager: &mut $crate::manager::ContractManager,
-            $( $arg : $atype, )*
+            $( $param : $ptype, )*
             signers: &$crate::signer::SignerMap,
         ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
             let mut args = std::collections::HashMap::new();
-            $(
-                args.insert(stringify!($arg).to_string(), <$atype as $crate::contracts::ClauseArg>::to_bytes(&$arg));
-            )*
+            $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
             let _indices = manager.spend_instance(self.0, stringify!($method), args, Some(signers))?;
             contract!(@return _indices, 0usize, $( $ret ),* )
         }
     };
 
-    // Method without modifier (unsigned)
-    (@method $name:ident, $method:ident ( $( $arg:ident : $atype:ty ),* ) -> ( $( $ret:ident ),* ) ) => {
+    // Method muncher done: no signers
+    (@method_munch $name:ident, $method:ident,
+        args_left: [],
+        params: [ $( $param:ident : $ptype:ty ),* ],
+        inserts: [ $( $ins:expr ),* ],
+        has_signer: false,
+        -> ( $( $ret:ident ),* )
+    ) => {
         pub fn $method(
             self,
             manager: &mut $crate::manager::ContractManager,
-            $( $arg : $atype, )*
+            $( $param : $ptype, )*
         ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
             let mut args = std::collections::HashMap::new();
-            $(
-                args.insert(stringify!($arg).to_string(), <$atype as $crate::contracts::ClauseArg>::to_bytes(&$arg));
-            )*
+            $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
             let _indices = manager.spend_instance(self.0, stringify!($method), args, None)?;
             contract!(@return _indices, 0usize, $( $ret ),* )
         }
     };
 
     // ── Clause constructor methods (namespace struct) ───────────────────
+    // TT muncher entry
+    (@clause_method $method:ident [ $( $arg:ident : $atype:tt ),* ] ) => {
+        contract!(@clause_munch $method,
+            args_left: [ $( $arg : $atype ),* ],
+            signer_params: [],
+            arg_specs: []
+        );
+    };
 
-    // Signed clause: adds signer key parameter
-    (@clause_method $method:ident ( $( $arg:ident : $atype:ty ),* ) [ signed( $signer:ident ) ] ) => {
+    // Clause muncher: sig arg
+    (@clause_munch $method:ident,
+        args_left: [ $arg:ident : sig $( , $rest_arg:ident : $rest_atype:tt )* ],
+        signer_params: [ $( $sp:ident ),* ],
+        arg_specs: [ $( $spec:expr ),* ]
+    ) => {
+        contract!(@clause_munch $method,
+            args_left: [ $( $rest_arg : $rest_atype ),* ],
+            signer_params: [ $( $sp, )* $arg ],
+            arg_specs: [ $( $spec, )* (stringify!($arg), $crate::contracts::ArgType::Signer(std::sync::Arc::new($arg))) ]
+        );
+    };
+
+    // Clause muncher: array type arg
+    (@clause_munch $method:ident,
+        args_left: [ $arg:ident : [ $( $arr_tt:tt )* ] $( , $rest_arg:ident : $rest_atype:tt )* ],
+        signer_params: [ $( $sp:ident ),* ],
+        arg_specs: [ $( $spec:expr ),* ]
+    ) => {
+        contract!(@clause_munch $method,
+            args_left: [ $( $rest_arg : $rest_atype ),* ],
+            signer_params: [ $( $sp ),* ],
+            arg_specs: [ $( $spec, )* (stringify!($arg), <[ $( $arr_tt )* ] as $crate::contracts::ClauseArg>::arg_type()) ]
+        );
+    };
+
+    // Clause muncher: simple ident type arg
+    (@clause_munch $method:ident,
+        args_left: [ $arg:ident : $atype:ident $( , $rest_arg:ident : $rest_atype:tt )* ],
+        signer_params: [ $( $sp:ident ),* ],
+        arg_specs: [ $( $spec:expr ),* ]
+    ) => {
+        contract!(@clause_munch $method,
+            args_left: [ $( $rest_arg : $rest_atype ),* ],
+            signer_params: [ $( $sp ),* ],
+            arg_specs: [ $( $spec, )* (stringify!($arg), <$atype as $crate::contracts::ClauseArg>::arg_type()) ]
+        );
+    };
+
+    // Clause muncher done: emit function
+    (@clause_munch $method:ident,
+        args_left: [],
+        signer_params: [ $( $sp:ident ),* ],
+        arg_specs: [ $( $spec:expr ),* ]
+    ) => {
         #[allow(clippy::too_many_arguments)]
         pub fn $method(
             script: bitcoin::ScriptBuf,
-            $signer: bitcoin::XOnlyPublicKey,
+            $( $sp: impl Fn(&$crate::contracts::ClauseArgs, &$crate::contracts::StateData) -> bitcoin::XOnlyPublicKey + Send + Sync + 'static, )*
             next_outputs: impl Fn(&$crate::contracts::ClauseArgs, &$crate::contracts::StateData) -> Result<Vec<$crate::contracts::ClauseOutput>, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
         ) -> $crate::contracts::Clause {
             $crate::contracts::standard_clause(
                 stringify!($method),
                 script,
-                vec![
-                    (stringify!($signer), $crate::contracts::ArgType::Signer($signer)),
-                    $( (stringify!($arg), <$atype as $crate::contracts::ClauseArg>::arg_type()), )*
-                ],
-                next_outputs,
-            )
-        }
-    };
-
-    // Unsigned clause
-    (@clause_method $method:ident ( $( $arg:ident : $atype:ty ),* ) ) => {
-        pub fn $method(
-            script: bitcoin::ScriptBuf,
-            next_outputs: impl Fn(&$crate::contracts::ClauseArgs, &$crate::contracts::StateData) -> Result<Vec<$crate::contracts::ClauseOutput>, Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
-        ) -> $crate::contracts::Clause {
-            $crate::contracts::standard_clause(
-                stringify!($method),
-                script,
-                vec![
-                    $( (stringify!($arg), <$atype as $crate::contracts::ClauseArg>::arg_type()), )*
-                ],
+                vec![ $( $spec, )* ],
                 next_outputs,
             )
         }

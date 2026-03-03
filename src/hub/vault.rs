@@ -46,9 +46,10 @@ pub fn make_vault(params: &VaultParams) -> Contract {
         };
 
         let unvaulting_for_next = unvaulting.clone();
+        let unvault_pk = params.unvault_pk;
         VaultClause::trigger(
             trigger_script,
-            params.unvault_pk,
+            move |_args, _state| unvault_pk,
             ccv_outputs!(out_i => unvaulting_for_next.clone(), state: ctv_hash),
         )
     };
@@ -77,9 +78,10 @@ pub fn make_vault(params: &VaultParams) -> Contract {
             }
         };
 
+        let unvault_pk = params.unvault_pk;
         VaultClause::trigger_and_revault(
             tar_script,
-            params.unvault_pk,
+            move |_args, _state| unvault_pk,
             ccv_outputs!(
                 revault_out_i => make_vault(&vault_params), deduct;
                 out_i => unvaulting_for_next.clone(), state: ctv_hash
@@ -200,8 +202,8 @@ pub fn make_unvaulting(params: &UnvaultingParams) -> Contract {
 
 contract! {
     VaultInstance, VaultClause {
-        fn trigger(ctv_hash: [u8; 32], out_i: i32) [signed(sig)] -> (UnvaultingInstance);
-        fn trigger_and_revault(ctv_hash: [u8; 32], out_i: i32, revault_out_i: i32) [signed(sig)] -> (VaultInstance, UnvaultingInstance);
+        fn trigger(sig: sig, ctv_hash: [u8; 32], out_i: i32) -> (UnvaultingInstance);
+        fn trigger_and_revault(sig: sig, ctv_hash: [u8; 32], out_i: i32, revault_out_i: i32) -> (VaultInstance, UnvaultingInstance);
         fn recover(out_i: i32) -> ();
     }
 }

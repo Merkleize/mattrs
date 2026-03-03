@@ -3,7 +3,7 @@ use bitcoin_script::{define_pushable, script};
 
 use crate::ccv::{CCV_FLAG_CHECK_INPUT, NUMS_KEY};
 use crate::contracts::{
-    arg_as_int, CcvAmountBehaviour, ClauseArg, ClauseOutput, Contract,
+    arg_as_int, Bytes, CcvAmountBehaviour, ClauseArg, ClauseOutput, Contract,
 };
 use crate::ctv::make_ctv_template_hash;
 use crate::taproot::TapTree;
@@ -52,21 +52,22 @@ pub fn make_rps_s0(params: &RpsParams) -> Contract {
     let s1_taptree_root = s1.get_taptree_merkle_root();
 
     // bob_move clause
-    // Witness order (from contract! macro): [bob_sig, m_b]
-    // Stack (bottom→top): bob_sig, m_b
+    // Witness order (from contract! macro): [m_b, bob_sig]
+    // Stack (bottom→top): m_b, bob_sig
     let bob_move = {
         let bob_move_script = script! {
-            // m_b is on top of stack
+            <params.bob_pk> CHECKSIG        // consume bob_sig (top of stack)
+            SWAP                            // swap result with m_b
             DUP 0 3 WITHIN VERIFY          // check m_b ∈ {0,1,2}
             SHA256                          // state = SHA256(scriptint(m_b))
             0 0 <s1_taptree_root> 0 CHECKCONTRACTVERIFY  // check output 0 is S1 with that state
-            <params.bob_pk> CHECKSIG        // verify bob's signature (bob_sig at stack bottom)
         };
 
         let s1_for_next = s1.clone();
+        let bob_pk = params.bob_pk;
         RpsS0Clause::bob_move(
             bob_move_script,
-            params.bob_pk,
+            move |_args, _state| bob_pk,
             move |args, _state| {
                 let m_b = arg_as_int(args, "m_b")?;
                 let m_b_scriptint = <i32 as ClauseArg>::to_bytes(&m_b);
@@ -172,15 +173,15 @@ pub fn make_rps_s1(params: &RpsParams) -> Contract {
 
 contract! {
     RpsS0Instance, RpsS0Clause {
-        fn bob_move(m_b: i32) [signed(bob_sig)] -> (RpsS1Instance);
+        fn bob_move(m_b: i32, bob_sig: sig) -> (RpsS1Instance);
     }
 }
 
 contract! {
     RpsS1Instance, RpsS1Clause {
-        fn alice_wins(m_b: i32, m_a: i32, r_a: Vec<u8>) -> ();
-        fn bob_wins(m_b: i32, m_a: i32, r_a: Vec<u8>) -> ();
-        fn tie(m_b: i32, m_a: i32, r_a: Vec<u8>) -> ();
+        fn alice_wins(m_b: i32, m_a: i32, r_a: Bytes) -> ();
+        fn bob_wins(m_b: i32, m_a: i32, r_a: Bytes) -> ();
+        fn tie(m_b: i32, m_a: i32, r_a: Bytes) -> ();
     }
 }
 

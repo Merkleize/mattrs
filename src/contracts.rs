@@ -12,6 +12,9 @@ pub type StateData = Vec<u8>;
 /// Clause arguments are named byte buffers.
 pub type ClauseArgs = HashMap<String, Vec<u8>>;
 
+/// Alias for `Vec<u8>` usable in `contract!` macro (which requires single-token-tree types).
+pub type Bytes = Vec<u8>;
+
 /// How an output's amount is handled by CCV.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CcvAmountBehaviour {
@@ -39,9 +42,9 @@ type NextOutputsFn =
 pub struct Clause {
     pub name: String,
     pub script: bitcoin::ScriptBuf,
-    /// Maps arg names that require signatures to the pubkey that should sign.
-    /// The manager fills these args with signature bytes before calling args_to_witness.
-    pub signer_args: HashMap<String, XOnlyPublicKey>,
+    /// Maps arg names that require signatures to a closure that computes the pubkey.
+    /// The manager evaluates these at spend time to determine which signer is needed.
+    pub signer_args: HashMap<String, SignerPkFn>,
     pub args_to_witness: Box<ArgsToWitnessFn>,
     pub witness_to_args: Box<WitnessToArgsFn>,
     pub next_outputs: Box<NextOutputsFn>,
@@ -165,15 +168,37 @@ impl Contract {
 // Layer 1: standard_clause() + ArgType
 // ---------------------------------------------------------------------------
 
+/// A closure that computes the signer pubkey from clause args and state data.
+pub type SignerPkFn = Arc<dyn Fn(&ClauseArgs, &StateData) -> XOnlyPublicKey + Send + Sync>;
+
 /// Describes the type of a clause argument for automatic witness encoding/decoding.
-#[derive(Debug, Clone)]
 pub enum ArgType {
     /// Fixed-size byte array.
     Bytes(usize),
     /// Script integer (encoded via bitcoin's scriptint).
     Int,
-    /// 64-byte Schnorr signature; auto-populates `signer_args`.
-    Signer(XOnlyPublicKey),
+    /// 64-byte Schnorr signature; pubkey resolved by closure at spend time.
+    Signer(SignerPkFn),
+}
+
+impl Clone for ArgType {
+    fn clone(&self) -> Self {
+        match self {
+            ArgType::Bytes(n) => ArgType::Bytes(*n),
+            ArgType::Int => ArgType::Int,
+            ArgType::Signer(f) => ArgType::Signer(Arc::clone(f)),
+        }
+    }
+}
+
+impl std::fmt::Debug for ArgType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArgType::Bytes(n) => write!(f, "Bytes({})", n),
+            ArgType::Int => write!(f, "Int"),
+            ArgType::Signer(_) => write!(f, "Signer(<fn>)"),
+        }
+    }
 }
 
 /// Build a `Clause` from argument type descriptors, auto-generating
@@ -190,8 +215,8 @@ pub fn standard_clause(
     // Build signer_args from Signer specs
     let mut signer_args = HashMap::new();
     for (arg_name, arg_type) in &arg_specs {
-        if let ArgType::Signer(pk) = arg_type {
-            signer_args.insert((*arg_name).to_string(), *pk);
+        if let ArgType::Signer(pk_fn) = arg_type {
+            signer_args.insert((*arg_name).to_string(), Arc::clone(pk_fn));
         }
     }
 

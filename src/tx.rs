@@ -223,11 +223,12 @@ pub fn build_witness(
         .get_clause(clause_name)
         .ok_or_else(|| SpendTxError::ClauseNotFound(clause_name.to_string()))?;
 
-    // Fill in signature args
-    for (arg_name, pk) in &clause.signer_args {
+    // Fill in signature args by evaluating the pubkey closures
+    for (arg_name, pk_fn) in &clause.signer_args {
+        let pk = pk_fn(args, &instance.data);
         let signer = signers
             .ok_or(SpendTxError::NoSigners)?
-            .get(pk)
+            .get(&pk)
             .ok_or_else(|| SpendTxError::SignerNotFound(pk.to_string()))?;
         let sig = signer.sign(*sighash);
         args.insert(arg_name.clone(), sig.serialize().to_vec());
