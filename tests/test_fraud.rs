@@ -19,6 +19,7 @@ use mattrs::{
     hub::game256::*,
     manager::ContractManager,
     merkle::is_power_of_2,
+    report::{format_tx_markdown, Report},
     signer::{HotSigner, SignerMap},
     sha256, tx,
 };
@@ -202,6 +203,11 @@ fn test_leaf_reveal_alice() -> Result<(), Box<dyn std::error::Error>> {
         manager.instances[leaf_idx].status,
         ContractInstanceStatus::Spent
     );
+
+    let mut report = Report::new();
+    report.write("Leaf reveal (Alice)", format_tx_markdown(&spend_tx, "Leaf reveal (Alice wins)"));
+    report.finalize("reports/report_fraud_leaf_alice.md");
+
     println!("test_leaf_reveal_alice passed!");
     Ok(())
 }
@@ -248,6 +254,11 @@ fn test_leaf_reveal_bob() -> Result<(), Box<dyn std::error::Error>> {
         manager.instances[leaf_idx].status,
         ContractInstanceStatus::Spent
     );
+
+    let mut report = Report::new();
+    report.write("Leaf reveal (Bob)", format_tx_markdown(&spend_tx, "Leaf reveal (Bob wins)"));
+    report.finalize("reports/report_fraud_leaf_bob.md");
+
     println!("test_leaf_reveal_bob passed!");
     Ok(())
 }
@@ -301,10 +312,16 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
 
     let s0_contract = make_g256_s0(&params);
     let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut report = Report::new();
 
     // --- Step 1: Fund S0, Bob chooses x=2 ---
     let s0 = G256S0Instance::fund(&mut manager, s0_contract, vec![], AMOUNT)?;
+    let s0_idx = s0.idx();
     let (s1,) = s0.choose(&mut manager, x, &bob_signers)?;
+    report.write("Fraud proof", format_tx_markdown(
+        manager.instances[s0_idx].spending_tx.as_ref().unwrap(),
+        "S0 → S1 (Bob chooses x)",
+    ));
 
     assert_eq!(manager.instances[s1.idx()].contract.name(), "G256_S1");
     let expected_s1_state = sha256(&<i32 as ClauseArg>::to_bytes(&x));
@@ -313,6 +330,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Step 2: Alice reveals y=508 ---
     let t_a_root = t_a(0, n - 1);
+    let s1_idx = s1.idx();
     let (s2,) = s1.reveal(
         &mut manager,
         t_a_root.to_vec(),
@@ -325,6 +343,10 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
     let expected_s2_state = g256_s2_state(&t_a_root, y, x);
     assert_eq!(manager.instances[s2.idx()].data, expected_s2_state);
     println!("S1 → S2 (Alice claims y={})", y);
+    report.write("Fraud proof", format_tx_markdown(
+        manager.instances[s1_idx].spending_tx.as_ref().unwrap(),
+        "S1 → S2 (Alice reveals y)",
+    ));
 
     // --- Step 3: Bob starts challenge with z=512 ---
     let s2_idx = s2.idx();
@@ -346,6 +368,10 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
         let expected_state = bisect1_state(h_a[0], h_a[n], h_b[n], t_a(0, n - 1), t_b(0, n - 1));
         assert_eq!(manager.instances[bisect_idx].data, expected_state);
         println!("S2 → Bisect_1[0,7]");
+        report.write("Fraud proof", format_tx_markdown(
+            manager.instances[s2_idx].spending_tx.as_ref().unwrap(),
+            "S2 → Bisect_1 (Bob starts challenge)",
+        ));
 
         // --- Bisection protocol ---
         // Interval [0, 7], m = 4
@@ -354,6 +380,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
 
         // Step 4: Alice reveals → Bisect_2[0,7]
         {
+            let prev_idx = cur_idx;
             let m = (cur_j - cur_i + 1) / 2;
             let mut args: ClauseArgs = HashMap::new();
             args.insert("h_start".to_string(), h_a[cur_i].to_vec());
@@ -371,10 +398,15 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             cur_idx = new_indices[0];
             assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
             println!("Bisect_1[{},{}] → Bisect_2[{},{}] (Alice reveals)", cur_i, cur_j, cur_i, cur_j);
+            report.write("Fraud proof", format_tx_markdown(
+                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+                &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
+            ));
         }
 
         // Step 5: Bob reveals right (midstates agree at index 4) → Bisect_1[4,7]
         {
+            let prev_idx = cur_idx;
             let m = (cur_j - cur_i + 1) / 2;
             // h_a[cur_i+m] == h_b[cur_i+m] (both are h(32)), so right child
             assert_eq!(h_a[cur_i + m], h_b[cur_i + m]); // they agree at midpoint 4
@@ -402,10 +434,15 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_1");
             assert_eq!((cur_i, cur_j), (4, 7));
             println!("Bisect_2[0,7] → Bisect_1[4,7] (Bob reveals right)");
+            report.write("Fraud proof", format_tx_markdown(
+                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+                "Bisection (Bob, right child)",
+            ));
         }
 
         // Step 6: Alice reveals → Bisect_2[4,7]
         {
+            let prev_idx = cur_idx;
             let m = (cur_j - cur_i + 1) / 2;
             let mut args: ClauseArgs = HashMap::new();
             args.insert("h_start".to_string(), h_a[cur_i].to_vec());
@@ -423,10 +460,15 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             cur_idx = new_indices[0];
             assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
             println!("Bisect_1[4,7] → Bisect_2[4,7] (Alice reveals)");
+            report.write("Fraud proof", format_tx_markdown(
+                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+                &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
+            ));
         }
 
         // Step 7: Bob reveals left (midstates differ at index 6) → Bisect_1[4,5]
         {
+            let prev_idx = cur_idx;
             let m = (cur_j - cur_i + 1) / 2;
             // h_a[cur_i+m] = h_a[6] = h(127), h_b[cur_i+m] = h_b[6] = h(128)
             assert_ne!(h_a[cur_i + m], h_b[cur_i + m]); // they differ at midpoint 6
@@ -454,10 +496,15 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_1");
             assert_eq!((cur_i, cur_j), (4, 5));
             println!("Bisect_2[4,7] → Bisect_1[4,5] (Bob reveals left)");
+            report.write("Fraud proof", format_tx_markdown(
+                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+                "Bisection (Bob, left child)",
+            ));
         }
 
         // Step 8: Alice reveals → Bisect_2[4,5]
         {
+            let prev_idx = cur_idx;
             let m = (cur_j - cur_i + 1) / 2;
             let mut args: ClauseArgs = HashMap::new();
             args.insert("h_start".to_string(), h_a[cur_i].to_vec());
@@ -475,10 +522,15 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             cur_idx = new_indices[0];
             assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
             println!("Bisect_1[4,5] → Bisect_2[4,5] (Alice reveals)");
+            report.write("Fraud proof", format_tx_markdown(
+                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+                &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
+            ));
         }
 
         // Step 9: Bob reveals right (midstates agree at index 5) → Leaf
         {
+            let prev_idx = cur_idx;
             let m = (cur_j - cur_i + 1) / 2;
             assert_eq!(h_a[cur_i + m], h_b[cur_i + m]); // agree at 5
 
@@ -501,6 +553,10 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             cur_idx = new_indices[0];
             assert_eq!(manager.instances[cur_idx].contract.name(), "Leaf");
             println!("Bisect_2[4,5] → Leaf (Bob reveals right)");
+            report.write("Fraud proof", format_tx_markdown(
+                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+                "Bisection (Bob, right child)",
+            ));
         }
 
         // Step 10: Bob proves correct computation on the leaf
@@ -525,9 +581,11 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             let result = manager.spend_and_wait(&[cur_idx], &spend_tx)?;
             assert_eq!(result.len(), 0); // terminal
             println!("Leaf → Bob wins! (proved 2*64=128)");
+            report.write("Fraud proof", format_tx_markdown(&spend_tx, "Leaf reveal"));
         }
     }
 
+    report.finalize("reports/report_fraud.md");
     println!("test_fraud_proof_full passed!");
     Ok(())
 }

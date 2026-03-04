@@ -15,6 +15,7 @@ use mattrs::{
     contracts::{ClauseArg, ContractInstanceStatus, Contract},
     hub::rps::*,
     manager::ContractManager,
+    report::{format_tx_markdown, Report},
     signer::{HotSigner, SignerMap},
     tx,
 };
@@ -144,6 +145,7 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
 
     let s0_contract = make_rps_s0(&params);
     let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut report = Report::new();
 
     // --- Step 1: Fund S0 ---
     let s0 = RpsS0Instance::fund(&mut manager, s0_contract, vec![], 2 * stake)?;
@@ -164,6 +166,10 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
     // Verify S0 is spent
     assert_eq!(manager.instances[s0_idx].status, ContractInstanceStatus::Spent);
     assert_eq!(manager.instances[s0_idx].spending_clause.as_deref(), Some("bob_move"));
+    report.write("RPS", format_tx_markdown(
+        manager.instances[s0_idx].spending_tx.as_ref().unwrap(),
+        "Bob move",
+    ));
 
     // Verify S1 instance is funded with correct state: SHA256(scriptint(m_b))
     let s1_inst = &manager.instances[s1.idx()];
@@ -233,8 +239,11 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(final_indices.len(), 0);
         assert_eq!(manager.instances[s1_idx].status, ContractInstanceStatus::Spent);
         assert_eq!(manager.instances[s1_idx].spending_clause.as_deref(), Some("bob_wins"));
+
+        report.write("RPS", format_tx_markdown(&spend_tx, "Bob wins"));
     }
 
+    report.finalize("reports/report_rps.md");
     println!("RPS test passed! Rock vs Paper => Bob wins correctly adjudicated.");
     Ok(())
 }

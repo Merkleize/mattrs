@@ -17,6 +17,7 @@ use mattrs::{
     ctv::make_ctv_template_hash,
     hub::vault::*,
     manager::ContractManager,
+    report::{format_tx_markdown, Report},
     signer::{HotSigner, SignerMap},
     tx,
 };
@@ -74,6 +75,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     let amount = 49_999_900u64;
     let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut report = Report::new();
 
     // --- Step 1: Fund the vault (typed API) ---
     let vault = VaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
@@ -117,6 +119,10 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     // Verify the vault instance is now spent
     assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
     assert_eq!(manager.instances[vault_idx].spending_clause.as_deref(), Some("trigger"));
+    report.write("Vault", format_tx_markdown(
+        manager.instances[vault_idx].spending_tx.as_ref().unwrap(),
+        "Trigger",
+    ));
 
     // Verify unvaulting instance
     let unvaulting_inst = &manager.instances[unvaulting.idx()];
@@ -204,6 +210,9 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(final_indices.len(), 0);
     assert_eq!(manager.instances[unvaulting_idx].status, ContractInstanceStatus::Spent);
     assert_eq!(manager.instances[unvaulting_idx].spending_clause.as_deref(), Some("withdraw"));
+
+    report.write("Vault", format_tx_markdown(&spend_tx, "Withdraw [3 outputs]"));
+    report.finalize("reports/report_vault.md");
 
     println!("Vault trigger + withdraw test passed!");
     Ok(())
@@ -318,6 +327,13 @@ fn test_vault_recover() -> Result<(), Box<dyn std::error::Error>> {
     // Recover produces an opaque P2TR output
     assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
     assert_eq!(manager.instances[vault_idx].spending_clause.as_deref(), Some("recover"));
+
+    let mut report = Report::new();
+    report.write("Vault", format_tx_markdown(
+        manager.instances[vault_idx].spending_tx.as_ref().unwrap(),
+        "Recovery from vault",
+    ));
+    report.finalize("reports/report_vault_recover.md");
 
     println!("Vault recover test passed!");
     Ok(())

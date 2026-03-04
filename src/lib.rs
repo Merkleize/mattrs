@@ -1,6 +1,7 @@
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
 pub mod ccv;
+pub mod report;
 pub mod contracts;
 pub mod ctv;
 pub mod hub;
