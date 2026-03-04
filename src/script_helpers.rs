@@ -89,7 +89,7 @@ pub fn encoder_script(n: usize) -> ScriptBuf {
 // ---------------------------------------------------------------------------
 
 /// Push a script integer to the byte vector (minimal encoding).
-fn push_number(bytes: &mut Vec<u8>, n: i64) {
+pub fn push_number(bytes: &mut Vec<u8>, n: i64) {
     match n {
         -1 => bytes.push(OP_PUSHNUM_NEG1.to_u8()),
         0 => bytes.push(OP_PUSHBYTES_0.to_u8()),

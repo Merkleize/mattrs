@@ -26,7 +26,7 @@ fn largest_power_of_2_less_than(n: usize) -> usize {
     }
 }
 
-fn floor_lg(n: usize) -> u32 {
+pub fn floor_lg(n: usize) -> u32 {
     assert!(n > 0);
     let mut r = 0;
     let mut t = 1;
@@ -56,6 +56,186 @@ fn merkle_root_slice(leaves: &[[u8; 32]]) -> [u8; 32] {
             let right = merkle_root_slice(&leaves[split..]);
             combine_hashes(&left, &right)
         }
+    }
+}
+
+pub fn ceil_lg(n: usize) -> u32 {
+    assert!(n > 0);
+    let mut r = 0;
+    let mut t = 1;
+    while t < n {
+        t *= 2;
+        r += 1;
+    }
+    r
+}
+
+/// Returns root-to-leaf path directions in a left-complete binary tree.
+/// `true` = right child, `false` = left child.
+pub fn get_directions(size: usize, index: usize) -> Vec<bool> {
+    assert!(size > 0);
+    assert!(index < size);
+
+    let mut directions = Vec::new();
+    if size == 1 {
+        return directions;
+    }
+
+    let mut size = size;
+    let mut index = index;
+
+    while size > 1 {
+        let depth = ceil_lg(size);
+        let mask = 1usize << (depth - 1);
+        let right_child = index & mask != 0;
+        directions.push(right_child);
+        if right_child {
+            size -= mask;
+            index -= mask;
+        } else {
+            size = mask;
+        }
+    }
+
+    directions
+}
+
+/// A Merkle proof: sibling hashes along the path from root to leaf,
+/// directions at each level, and the leaf value.
+#[derive(Debug, Clone)]
+pub struct MerkleProof {
+    pub hashes: Vec<[u8; 32]>,
+    pub directions: Vec<bool>,
+    pub x: [u8; 32],
+}
+
+impl MerkleProof {
+    pub fn new(hashes: Vec<[u8; 32]>, directions: Vec<bool>, x: [u8; 32]) -> Self {
+        assert_eq!(hashes.len(), directions.len());
+        Self { hashes, directions, x }
+    }
+
+    /// Reconstruct the leaf index from the directions.
+    pub fn get_leaf_index(&self) -> usize {
+        let mut i = 0;
+        for &d in &self.directions {
+            i = 2 * i + d as usize;
+        }
+        i
+    }
+
+    /// Compute the new merkle root if the leaf is replaced with `new_value`.
+    pub fn get_new_root_after_update(&self, new_value: &[u8; 32]) -> [u8; 32] {
+        let mut r = *new_value;
+        for (d, h) in self.directions.iter().rev().zip(self.hashes.iter().rev()) {
+            if !d {
+                // left child: r || h
+                r = combine_hashes(&r, h);
+            } else {
+                // right child: h || r
+                r = combine_hashes(h, &r);
+            }
+        }
+        r
+    }
+
+    /// Encode the proof as witness stack elements:
+    /// `[h_1, d_1, h_2, d_2, ..., h_n, d_n, x]`
+    /// Directions: 0 = `[]` (empty), 1 = `[0x01]`.
+    pub fn to_witness_stack(&self) -> Vec<Vec<u8>> {
+        let mut stack = Vec::with_capacity(2 * self.hashes.len() + 1);
+        for (h, &d) in self.hashes.iter().zip(&self.directions) {
+            stack.push(h.to_vec());
+            if d {
+                stack.push(vec![0x01]);
+            } else {
+                stack.push(vec![]);
+            }
+        }
+        stack.push(self.x.to_vec());
+        stack
+    }
+
+    /// Decode a proof from witness stack elements.
+    pub fn from_witness_stack(stack: &[Vec<u8>]) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if stack.len() < 3 || stack.len() % 2 == 0 {
+            return Err("Witness stack must contain an odd number of elements (>= 3)".into());
+        }
+        let x: [u8; 32] = stack.last().unwrap().as_slice().try_into()
+            .map_err(|_| "Leaf value must be 32 bytes")?;
+        let pairs = &stack[..stack.len() - 1];
+        let n = pairs.len() / 2;
+        let mut hashes = Vec::with_capacity(n);
+        let mut directions = Vec::with_capacity(n);
+        for i in 0..n {
+            let h: [u8; 32] = pairs[2 * i].as_slice().try_into()
+                .map_err(|_| format!("Hash {} must be 32 bytes", i))?;
+            hashes.push(h);
+            let d_bytes = &pairs[2 * i + 1];
+            let d = if d_bytes.is_empty() {
+                false
+            } else {
+                bitcoin::script::read_scriptint(d_bytes)
+                    .map_err(|e| format!("Direction {}: {}", i, e))? != 0
+            };
+            directions.push(d);
+        }
+        Ok(Self { hashes, directions, x })
+    }
+}
+
+/// A simple Merkle tree over `[u8; 32]` leaves. Recomputes root/proofs on demand.
+pub struct MerkleTree {
+    leaves: Vec<[u8; 32]>,
+}
+
+impl MerkleTree {
+    pub fn new(leaves: Vec<[u8; 32]>) -> Self {
+        assert!(!leaves.is_empty());
+        Self { leaves }
+    }
+
+    pub fn root(&self) -> [u8; 32] {
+        merkle_root(&self.leaves)
+    }
+
+    pub fn len(&self) -> usize {
+        self.leaves.len()
+    }
+
+    pub fn get(&self, i: usize) -> &[u8; 32] {
+        &self.leaves[i]
+    }
+
+    pub fn set(&mut self, i: usize, val: [u8; 32]) {
+        self.leaves[i] = val;
+    }
+
+    /// Produce a Merkle proof for the leaf at `index`.
+    pub fn prove_leaf(&self, index: usize) -> MerkleProof {
+        assert!(index < self.leaves.len());
+        let siblings = collect_siblings(&self.leaves, index);
+        // siblings are collected leaf-to-root; reverse for root-to-leaf
+        let siblings_rev: Vec<[u8; 32]> = siblings.into_iter().rev().collect();
+        let directions = get_directions(self.leaves.len(), index);
+        MerkleProof::new(siblings_rev, directions, self.leaves[index])
+    }
+}
+
+/// Recursively collect sibling hashes from leaf to root for the given index.
+fn collect_siblings(leaves: &[[u8; 32]], index: usize) -> Vec<[u8; 32]> {
+    if leaves.len() <= 1 {
+        return vec![];
+    }
+    let split = largest_power_of_2_less_than(leaves.len());
+    if index < split {
+        let mut sibs = collect_siblings(&leaves[..split], index);
+        sibs.push(merkle_root_slice(&leaves[split..]));
+        sibs
+    } else {
+        let mut sibs = collect_siblings(&leaves[split..], index - split);
+        sibs.push(merkle_root_slice(&leaves[..split]));
+        sibs
     }
 }
 
@@ -182,5 +362,87 @@ mod tests {
         assert!(!is_power_of_2(3));
         assert!(!is_power_of_2(5));
         assert!(!is_power_of_2(6));
+    }
+
+    #[test]
+    fn test_get_directions() {
+        // Size 8 (power of 2): binary tree is complete
+        assert_eq!(get_directions(8, 0), vec![false, false, false]);
+        assert_eq!(get_directions(8, 7), vec![true, true, true]);
+        assert_eq!(get_directions(8, 4), vec![true, false, false]);
+        // Size 1: no directions
+        assert_eq!(get_directions(1, 0), Vec::<bool>::new());
+        // Size 5: left subtree has 4, right has 1
+        assert_eq!(get_directions(5, 4), vec![true]);
+        assert_eq!(get_directions(5, 0), vec![false, false, false]);
+        assert_eq!(get_directions(5, 3), vec![false, true, true]);
+    }
+
+    #[test]
+    fn test_merkle_proof_roundtrip() {
+        for size in [2, 3, 5, 8, 16] {
+            let leaves: Vec<[u8; 32]> = (0..size).map(|i| sha256(&[i as u8])).collect();
+            let tree = MerkleTree::new(leaves.clone());
+            for idx in 0..size {
+                let proof = tree.prove_leaf(idx);
+                // Witness roundtrip
+                let stack = proof.to_witness_stack();
+                let decoded = MerkleProof::from_witness_stack(&stack).unwrap();
+                assert_eq!(decoded.hashes, proof.hashes);
+                assert_eq!(decoded.directions, proof.directions);
+                assert_eq!(decoded.x, proof.x);
+                // Leaf index (only valid for power-of-2 sizes)
+                if is_power_of_2(size) {
+                    assert_eq!(proof.get_leaf_index(), idx);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_merkle_proof_root_verification() {
+        for size in [2, 4, 8, 16] {
+            let leaves: Vec<[u8; 32]> = (0..size).map(|i| sha256(&[i as u8])).collect();
+            let tree = MerkleTree::new(leaves);
+            let root = tree.root();
+            for idx in 0..size {
+                let proof = tree.prove_leaf(idx);
+                // Verify: updating with same value gives same root
+                let recomputed = proof.get_new_root_after_update(&proof.x);
+                assert_eq!(recomputed, root, "Root mismatch for size={}, idx={}", size, idx);
+            }
+        }
+    }
+
+    #[test]
+    fn test_merkle_proof_update() {
+        let size = 8;
+        let leaves: Vec<[u8; 32]> = (0..size).map(|i| sha256(&[i as u8])).collect();
+        let tree = MerkleTree::new(leaves.clone());
+        let new_val = sha256(b"new");
+
+        for idx in 0..size {
+            let proof = tree.prove_leaf(idx);
+            let new_root = proof.get_new_root_after_update(&new_val);
+            // Build expected by modifying the leaves directly
+            let mut modified = leaves.clone();
+            modified[idx] = new_val;
+            assert_eq!(new_root, merkle_root(&modified), "Update mismatch at idx={}", idx);
+        }
+    }
+
+    #[test]
+    fn test_merkle_tree_prove_various_sizes() {
+        for size in [1, 2, 3, 5, 7, 8, 9, 15, 16] {
+            let leaves: Vec<[u8; 32]> = (0..size).map(|i| sha256(&[i as u8])).collect();
+            let tree = MerkleTree::new(leaves.clone());
+            let root = tree.root();
+            assert_eq!(root, merkle_root(&leaves));
+            for idx in 0..size {
+                let proof = tree.prove_leaf(idx);
+                let recomputed = proof.get_new_root_after_update(&proof.x);
+                assert_eq!(recomputed, root, "size={}, idx={}", size, idx);
+            }
+        }
     }
 }
