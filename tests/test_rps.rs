@@ -1,38 +1,18 @@
-use std::collections::HashMap;
-use std::str::FromStr;
+mod common;
 
-use bitcoin::{
-    bip32::Xpriv,
-    hashes::Hash,
-    key::Secp256k1,
-    sighash::SighashCache,
-    taproot::LeafVersion,
-    Amount, Sequence, TapLeafHash, TxOut, XOnlyPublicKey,
-};
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use std::collections::HashMap;
+
+use bitcoin::{Amount, Sequence, TxOut};
+use bitcoincore_rpc::RpcApi;
 
 use mattrs::{
-    contracts::{ClauseArg, ContractInstanceStatus, Contract},
+    contracts::{ClauseArg, ClauseArgs, ContractInstanceStatus, Contract},
     hub::rps::*,
     manager::ContractManager,
     report::{format_tx_markdown, Report},
-    signer::{HotSigner, SignerMap},
-    tx,
+    signer::SignerMap,
 };
 
-fn get_rpc_client(wallet_name: &str) -> Client {
-    let rpc_url = std::env::var("BITCOIN_RPC_URL")
-        .unwrap_or_else(|_| "http://localhost:18443".to_string());
-    let rpc_user = std::env::var("BITCOIN_RPC_USER")
-        .unwrap_or_else(|_| "rpcuser".to_string());
-    let rpc_pass = std::env::var("BITCOIN_RPC_PASS")
-        .unwrap_or_else(|_| "rpcpass".to_string());
-
-    let url = format!("{}/wallet/{}", rpc_url, wallet_name);
-    Client::new(&url, Auth::UserPass(rpc_user, rpc_pass)).expect("Failed to create RPC client")
-}
-
-/// Build a fully-signed spend tx for a terminal CTV clause on S1.
 fn build_s1_spend_tx(
     manager: &ContractManager,
     s1_idx: usize,
@@ -42,88 +22,27 @@ fn build_s1_spend_tx(
     r_a: &[u8],
     ctv_outputs: &[TxOut],
 ) -> Result<bitcoin::Transaction, Box<dyn std::error::Error>> {
-    let mut clause_args = HashMap::new();
+    let mut clause_args: ClauseArgs = HashMap::new();
     clause_args.insert("m_b".to_string(), <i32 as ClauseArg>::to_bytes(&m_b));
     clause_args.insert("m_a".to_string(), <i32 as ClauseArg>::to_bytes(&m_a));
     clause_args.insert("r_a".to_string(), r_a.to_vec());
 
-    let spend_spec = tx::SpendSpec {
-        instance_idx: s1_idx,
-        clause_name: clause_name.to_string(),
-        args: clause_args.clone(),
-    };
-
-    let (mut spend_tx, _) = tx::create_spend_tx(
-        &manager.instances,
-        &[spend_spec],
-        &HashMap::new(),
-        ctv_outputs,
-    )?;
-
-    // CTV requires these specific values
-    spend_tx.lock_time = bitcoin::absolute::LockTime::ZERO;
-    spend_tx.input[0].sequence = Sequence::ZERO;
-    spend_tx.version = bitcoin::transaction::Version::TWO;
-
-    // Recompute sighash after setting CTV fields
-    let spent_utxos: Vec<TxOut> = {
-        let inst = &manager.instances[s1_idx];
-        let funding_tx = inst.funding_tx.as_ref().unwrap();
-        let outpoint = inst.outpoint.unwrap();
-        vec![funding_tx.output[outpoint.vout as usize].clone()]
-    };
-
-    let leaf_script = manager.instances[s1_idx]
-        .contract
-        .get_clause(clause_name)
-        .unwrap()
-        .script
-        .clone();
-
-    let mut sighash_cache = SighashCache::new(spend_tx.clone());
-    let sighash = sighash_cache
-        .taproot_script_spend_signature_hash(
-            0,
-            &bitcoin::sighash::Prevouts::All(&spent_utxos),
-            TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript),
-            bitcoin::TapSighashType::Default,
-        )
-        .map(|h| h.to_byte_array())
-        .map_err(|e| format!("Sighash failed: {}", e))?;
-
-    spend_tx.input[0].witness = tx::build_witness(
-        &manager.instances[s1_idx],
+    common::build_terminal_spend_tx(
+        manager,
+        s1_idx,
         clause_name,
-        &mut clause_args,
-        &sighash,
+        clause_args,
+        ctv_outputs,
         None,
-    )?;
-
-    Ok(spend_tx)
+        Sequence::ZERO,
+    )
 }
 
 #[test]
 fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
-    let secp = Secp256k1::new();
-    let client = get_rpc_client("testwallet");
-
-    // Ensure wallet has funds
-    let balance = client.get_balance(None, None)?;
-    if balance < Amount::from_sat(100_000_000) {
-        let addr = client.get_new_address(None, None)?.assume_checked();
-        client.generate_to_address(101, &addr)?;
-    }
-
-    // Keys: alice = unvault_privkey, bob = recover_privkey (matching vault test keys)
-    let alice_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )?;
-    let alice_pk: XOnlyPublicKey = alice_privkey.to_priv().public_key(&secp).into();
-
-    let bob_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )?;
-    let bob_pk: XOnlyPublicKey = bob_privkey.to_priv().public_key(&secp).into();
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
+    let (_alice_privkey, alice_pk, bob_privkey, bob_pk) = common::get_keys();
 
     // Alice picks rock (m_a=0), generates random r_a, computes commitment
     let m_a: i32 = 0; // rock
@@ -153,11 +72,7 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
     println!("S0 funded at {:?}", manager.instances[s0.idx()].outpoint.unwrap());
 
     // --- Step 2: Bob plays paper (m_b=1) ---
-    let mut signers: SignerMap = HashMap::new();
-    signers.insert(
-        bob_pk,
-        Box::new(HotSigner { privkey: bob_privkey }),
-    );
+    let signers: SignerMap = common::make_signers(&[(bob_pk, bob_privkey)]);
 
     let m_b: i32 = 1; // paper
     let s0_idx = s0.idx();

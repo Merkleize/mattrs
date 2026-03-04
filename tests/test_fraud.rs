@@ -1,15 +1,8 @@
-use std::collections::HashMap;
-use std::str::FromStr;
+mod common;
 
-use bitcoin::{
-    bip32::Xpriv,
-    hashes::Hash,
-    key::Secp256k1,
-    sighash::SighashCache,
-    taproot::LeafVersion,
-    Amount, Sequence, TapLeafHash, TxOut, XOnlyPublicKey,
-};
-use bitcoincore_rpc::{Auth, Client, RpcApi};
+use std::collections::HashMap;
+
+use bitcoin::{Amount, Sequence, TxOut, XOnlyPublicKey};
 
 use mattrs::{
     contracts::{ClauseArg, ClauseArgs, Contract, ContractInstanceStatus},
@@ -20,111 +13,10 @@ use mattrs::{
     manager::ContractManager,
     merkle::is_power_of_2,
     report::{format_tx_markdown, Report},
-    signer::{HotSigner, SignerMap},
-    sha256, tx,
+    sha256,
 };
 
 const AMOUNT: u64 = 20_000;
-
-fn get_rpc_client(wallet_name: &str) -> Client {
-    let rpc_url = std::env::var("BITCOIN_RPC_URL")
-        .unwrap_or_else(|_| "http://localhost:18443".to_string());
-    let rpc_user =
-        std::env::var("BITCOIN_RPC_USER").unwrap_or_else(|_| "rpcuser".to_string());
-    let rpc_pass =
-        std::env::var("BITCOIN_RPC_PASS").unwrap_or_else(|_| "rpcpass".to_string());
-
-    let url = format!("{}/wallet/{}", rpc_url, wallet_name);
-    Client::new(&url, Auth::UserPass(rpc_user, rpc_pass)).expect("Failed to create RPC client")
-}
-
-fn ensure_funds(client: &Client) {
-    let balance = client.get_balance(None, None).unwrap();
-    if balance < Amount::from_sat(100_000_000) {
-        let addr = client.get_new_address(None, None).unwrap().assume_checked();
-        client.generate_to_address(101, &addr).unwrap();
-    }
-}
-
-fn get_keys() -> (Xpriv, XOnlyPublicKey, Xpriv, XOnlyPublicKey) {
-    let secp = Secp256k1::new();
-    let alice_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )
-    .unwrap();
-    let alice_pk: XOnlyPublicKey = alice_privkey.to_priv().public_key(&secp).into();
-
-    let bob_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )
-    .unwrap();
-    let bob_pk: XOnlyPublicKey = bob_privkey.to_priv().public_key(&secp).into();
-
-    (alice_privkey, alice_pk, bob_privkey, bob_pk)
-}
-
-/// Build a terminal spend tx for a Leaf contract (no tracked CCV outputs).
-fn build_leaf_spend_tx(
-    manager: &ContractManager,
-    instance_idx: usize,
-    clause_name: &str,
-    mut clause_args: ClauseArgs,
-    winner_pk: XOnlyPublicKey,
-    signers: &SignerMap,
-) -> Result<bitcoin::Transaction, Box<dyn std::error::Error>> {
-    let winner_addr = Contract::new_opaque_p2tr(winner_pk).get_address(&vec![]);
-    let outputs = vec![TxOut {
-        script_pubkey: winner_addr.script_pubkey(),
-        value: Amount::from_sat(AMOUNT),
-    }];
-
-    let spend_spec = tx::SpendSpec {
-        instance_idx,
-        clause_name: clause_name.to_string(),
-        args: clause_args.clone(),
-    };
-
-    let (mut spend_tx, _) =
-        tx::create_spend_tx(&manager.instances, &[spend_spec], &HashMap::new(), &outputs)?;
-
-    spend_tx.lock_time = bitcoin::absolute::LockTime::ZERO;
-    spend_tx.input[0].sequence = Sequence::ZERO;
-    spend_tx.version = bitcoin::transaction::Version::TWO;
-
-    // Recompute sighash
-    let inst = &manager.instances[instance_idx];
-    let funding_tx = inst.funding_tx.as_ref().unwrap();
-    let outpoint = inst.outpoint.unwrap();
-    let spent_utxos = vec![funding_tx.output[outpoint.vout as usize].clone()];
-
-    let leaf_script = inst
-        .contract
-        .get_clause(clause_name)
-        .unwrap()
-        .script
-        .clone();
-
-    let mut sighash_cache = SighashCache::new(spend_tx.clone());
-    let sighash = sighash_cache
-        .taproot_script_spend_signature_hash(
-            0,
-            &bitcoin::sighash::Prevouts::All(&spent_utxos),
-            TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript),
-            bitcoin::TapSighashType::Default,
-        )
-        .map(|h| h.to_byte_array())
-        .map_err(|e| format!("Sighash failed: {}", e))?;
-
-    spend_tx.input[0].witness = tx::build_witness(
-        inst,
-        clause_name,
-        &mut clause_args,
-        &sighash,
-        Some(signers),
-    )?;
-
-    Ok(spend_tx)
-}
 
 // ---------------------------------------------------------------------------
 // Trace computation helper
@@ -156,15 +48,40 @@ fn t_from_trace(trace: &[[u8; 32]], i: usize, j: usize) -> [u8; 32] {
     }
 }
 
+fn build_leaf_spend_tx(
+    manager: &ContractManager,
+    instance_idx: usize,
+    clause_name: &str,
+    clause_args: ClauseArgs,
+    winner_pk: XOnlyPublicKey,
+    signers: &mattrs::signer::SignerMap,
+) -> Result<bitcoin::Transaction, Box<dyn std::error::Error>> {
+    let winner_addr = Contract::new_opaque_p2tr(winner_pk).get_address(&vec![]);
+    let outputs = vec![TxOut {
+        script_pubkey: winner_addr.script_pubkey(),
+        value: Amount::from_sat(AMOUNT),
+    }];
+
+    common::build_terminal_spend_tx(
+        manager,
+        instance_idx,
+        clause_name,
+        clause_args,
+        &outputs,
+        Some(signers),
+        Sequence::ZERO,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_leaf_reveal_alice() -> Result<(), Box<dyn std::error::Error>> {
-    let client = get_rpc_client("testwallet");
-    ensure_funds(&client);
-    let (alice_privkey, alice_pk, _bob_privkey, bob_pk) = get_keys();
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
+    let (alice_privkey, alice_pk, _bob_privkey, bob_pk) = common::get_keys();
 
     let computer = compute_2x();
     let leaf = make_leaf(alice_pk, bob_pk, &computer);
@@ -186,13 +103,7 @@ fn test_leaf_reveal_alice() -> Result<(), Box<dyn std::error::Error>> {
     args.insert("x".to_string(), <i32 as ClauseArg>::to_bytes(&x_start));
     args.insert("h_y_b".to_string(), h_end_bob.to_vec());
 
-    let mut signers: SignerMap = HashMap::new();
-    signers.insert(
-        alice_pk,
-        Box::new(HotSigner {
-            privkey: alice_privkey,
-        }),
-    );
+    let signers = common::make_signers(&[(alice_pk, alice_privkey)]);
 
     let spend_tx =
         build_leaf_spend_tx(&manager, leaf_idx, "alice_reveal", args, alice_pk, &signers)?;
@@ -214,9 +125,9 @@ fn test_leaf_reveal_alice() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_leaf_reveal_bob() -> Result<(), Box<dyn std::error::Error>> {
-    let client = get_rpc_client("testwallet");
-    ensure_funds(&client);
-    let (_alice_privkey, alice_pk, bob_privkey, bob_pk) = get_keys();
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
+    let (_alice_privkey, alice_pk, bob_privkey, bob_pk) = common::get_keys();
 
     let computer = compute_2x();
     let leaf = make_leaf(alice_pk, bob_pk, &computer);
@@ -237,13 +148,7 @@ fn test_leaf_reveal_bob() -> Result<(), Box<dyn std::error::Error>> {
     args.insert("x".to_string(), <i32 as ClauseArg>::to_bytes(&x_start));
     args.insert("h_y_a".to_string(), h_end_alice.to_vec());
 
-    let mut signers: SignerMap = HashMap::new();
-    signers.insert(
-        bob_pk,
-        Box::new(HotSigner {
-            privkey: bob_privkey,
-        }),
-    );
+    let signers = common::make_signers(&[(bob_pk, bob_privkey)]);
 
     let spend_tx =
         build_leaf_spend_tx(&manager, leaf_idx, "bob_reveal", args, bob_pk, &signers)?;
@@ -265,9 +170,9 @@ fn test_leaf_reveal_bob() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
-    let client = get_rpc_client("testwallet");
-    ensure_funds(&client);
-    let (alice_privkey, alice_pk, bob_privkey, bob_pk) = get_keys();
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
+    let (alice_privkey, alice_pk, bob_privkey, bob_pk) = common::get_keys();
 
     let alice_trace: Vec<i32> = vec![2, 4, 8, 16, 32, 64, 127, 254, 508]; // diverges at step 6
     let bob_trace: Vec<i32> = vec![2, 4, 8, 16, 32, 64, 128, 256, 512]; // correct
@@ -294,21 +199,8 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
         forfait_timeout: 10,
     };
 
-    let mut alice_signers: SignerMap = HashMap::new();
-    alice_signers.insert(
-        alice_pk,
-        Box::new(HotSigner {
-            privkey: alice_privkey,
-        }),
-    );
-
-    let mut bob_signers: SignerMap = HashMap::new();
-    bob_signers.insert(
-        bob_pk,
-        Box::new(HotSigner {
-            privkey: bob_privkey,
-        }),
-    );
+    let alice_signers = common::make_signers(&[(alice_pk, alice_privkey)]);
+    let bob_signers = common::make_signers(&[(bob_pk, bob_privkey)]);
 
     let s0_contract = make_g256_s0(&params);
     let mut manager = ContractManager::new(&client, 0.1, true);

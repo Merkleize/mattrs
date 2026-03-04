@@ -1,7 +1,8 @@
+mod common;
+
 use std::collections::HashMap;
 
 use bitcoin::{Amount, Sequence, TxOut};
-use bitcoincore_rpc::{Auth, Client, RpcApi};
 
 use mattrs::{
     contracts::{ClauseArgs, ContractInstanceStatus},
@@ -9,35 +10,11 @@ use mattrs::{
     manager::ContractManager,
     merkle::MerkleTree,
     report::{format_tx_markdown, Report},
-    sha256, tx,
+    sha256,
 };
 
 const AMOUNT: u64 = 20_000;
 
-fn get_rpc_client(wallet_name: &str) -> Client {
-    let rpc_url =
-        std::env::var("BITCOIN_RPC_URL").unwrap_or_else(|_| "http://localhost:18443".to_string());
-    let rpc_user =
-        std::env::var("BITCOIN_RPC_USER").unwrap_or_else(|_| "rpcuser".to_string());
-    let rpc_pass =
-        std::env::var("BITCOIN_RPC_PASS").unwrap_or_else(|_| "rpcpass".to_string());
-
-    let url = format!("{}/wallet/{}", rpc_url, wallet_name);
-    Client::new(&url, Auth::UserPass(rpc_user, rpc_pass)).expect("Failed to create RPC client")
-}
-
-fn ensure_funds(client: &Client) {
-    let balance = client.get_balance(None, None).unwrap();
-    if balance < Amount::from_sat(100_000_000) {
-        let addr = client
-            .get_new_address(None, None)
-            .unwrap()
-            .assume_checked();
-        client.generate_to_address(101, &addr).unwrap();
-    }
-}
-
-/// Build a terminal spend tx for the "withdraw" clause (no CCV outputs).
 fn build_withdraw_tx(
     manager: &ContractManager,
     instance_idx: usize,
@@ -56,49 +33,21 @@ fn build_withdraw_tx(
         value: Amount::from_sat(AMOUNT),
     }];
 
-    let spend_spec = tx::SpendSpec {
+    common::build_terminal_spend_tx(
+        manager,
         instance_idx,
-        clause_name: "withdraw".to_string(),
-        args: args.clone(),
-    };
-
-    let (mut spend_tx, _) =
-        tx::create_spend_tx(&manager.instances, &[spend_spec], &HashMap::new(), &outputs)?;
-
-    spend_tx.lock_time = bitcoin::absolute::LockTime::ZERO;
-    spend_tx.input[0].sequence = Sequence::ZERO;
-    spend_tx.version = bitcoin::transaction::Version::TWO;
-
-    // Build witness (no signers needed)
-    let inst = &manager.instances[instance_idx];
-    let mut args_mut = args;
-    let funding_tx = inst.funding_tx.as_ref().unwrap();
-    let outpoint = inst.outpoint.unwrap();
-    let spent_utxos = vec![funding_tx.output[outpoint.vout as usize].clone()];
-
-    let leaf_script = inst.contract.get_clause("withdraw").unwrap().script.clone();
-
-    let mut sighash_cache = bitcoin::sighash::SighashCache::new(spend_tx.clone());
-    let sighash = sighash_cache
-        .taproot_script_spend_signature_hash(
-            0,
-            &bitcoin::sighash::Prevouts::All(&spent_utxos),
-            bitcoin::TapLeafHash::from_script(&leaf_script, bitcoin::taproot::LeafVersion::TapScript),
-            bitcoin::TapSighashType::Default,
-        )
-        .map(|h| bitcoin::hashes::Hash::to_byte_array(h))
-        .map_err(|e| format!("Sighash failed: {}", e))?;
-
-    spend_tx.input[0].witness =
-        tx::build_witness(inst, "withdraw", &mut args_mut, &sighash, None)?;
-
-    Ok(spend_tx)
+        "withdraw",
+        args,
+        &outputs,
+        None,
+        Sequence::ZERO,
+    )
 }
 
 #[test]
 fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
-    let client = get_rpc_client("testwallet");
-    ensure_funds(&client);
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
 
     for size in [8, 16] {
         for &leaf_index in &[0usize, 1, 4, size - 2, size - 1] {
@@ -135,8 +84,8 @@ fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_write() -> Result<(), Box<dyn std::error::Error>> {
-    let client = get_rpc_client("testwallet");
-    ensure_funds(&client);
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
 
     let size = 8;
     let leaf_index = 5;
@@ -180,8 +129,8 @@ fn test_write() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
-    let client = get_rpc_client("testwallet");
-    ensure_funds(&client);
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
 
     let size = 8usize;
     let mut leaves: Vec<[u8; 32]> = (0..size).map(|i| sha256(&[i as u8])).collect();

@@ -1,16 +1,14 @@
+mod common;
+
 use std::collections::HashMap;
 use std::str::FromStr;
 
 use bitcoin::{
-    bip32::Xpriv,
     hashes::Hash,
     hex::DisplayHex,
     key::Secp256k1,
-    sighash::SighashCache,
-    taproot::LeafVersion,
-    Address, Amount, KnownHrp, Sequence, TapLeafHash, TapNodeHash, TxOut, XOnlyPublicKey,
+    Address, Amount, KnownHrp, Sequence, TapNodeHash, TxOut,
 };
-use bitcoincore_rpc::{Auth, Client, RpcApi};
 
 use mattrs::{
     contracts::ContractInstanceStatus,
@@ -18,43 +16,15 @@ use mattrs::{
     hub::vault::*,
     manager::ContractManager,
     report::{format_tx_markdown, Report},
-    signer::{HotSigner, SignerMap},
-    tx,
 };
-
-fn get_rpc_client(wallet_name: &str) -> Client {
-    let rpc_url = std::env::var("BITCOIN_RPC_URL")
-        .unwrap_or_else(|_| "http://localhost:18443".to_string());
-    let rpc_user = std::env::var("BITCOIN_RPC_USER")
-        .unwrap_or_else(|_| "rpcuser".to_string());
-    let rpc_pass = std::env::var("BITCOIN_RPC_PASS")
-        .unwrap_or_else(|_| "rpcpass".to_string());
-
-    let url = format!("{}/wallet/{}", rpc_url, wallet_name);
-    Client::new(&url, Auth::UserPass(rpc_user, rpc_pass)).expect("Failed to create RPC client")
-}
 
 #[test]
 fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let secp = Secp256k1::new();
-    let client = get_rpc_client("testwallet");
-
-    // Ensure wallet has funds
-    let balance = client.get_balance(None, None)?;
-    if balance < Amount::from_sat(100_000_000) {
-        let addr = client.get_new_address(None, None)?.assume_checked();
-        client.generate_to_address(101, &addr)?;
-    }
-
-    let unvault_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )?;
-    let unvault_pubkey: XOnlyPublicKey = unvault_privkey.to_priv().public_key(&secp).into();
-
-    let recover_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )?;
-    let recover_pubkey: XOnlyPublicKey = recover_privkey.to_priv().public_key(&secp).into();
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
+    let (unvault_privkey, unvault_pubkey, recover_privkey, recover_pubkey) = common::get_keys();
+    let _ = recover_privkey; // unused in this test
 
     let vault_params = VaultParams {
         alternate_pk: None,
@@ -84,11 +54,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     println!("Vault funded at {:?}", manager.instances[vault.idx()].outpoint.unwrap());
 
     // --- Step 2: Set up signers ---
-    let mut signers: SignerMap = HashMap::new();
-    signers.insert(
-        unvault_pubkey,
-        Box::new(HotSigner { privkey: unvault_privkey }),
-    );
+    let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
 
     // --- Step 3: Compute CTV hash ---
     let ctv_template = vec![
@@ -135,7 +101,6 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     manager.mine_blocks(10)?;
 
     // --- Step 6: Withdraw from unvaulting ---
-    // The withdraw clause uses CTV, so we need to manually construct the transaction.
     let unvaulting_idx = unvaulting.idx();
     let mut clause_args = HashMap::new();
     clause_args.insert("ctv_hash".to_string(), ctv_hash.to_vec());
@@ -148,57 +113,14 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let spend_spec = tx::SpendSpec {
-        instance_idx: unvaulting_idx,
-        clause_name: "withdraw".to_string(),
-        args: clause_args.clone(),
-    };
-
-    let (mut spend_tx, _sighashes) = tx::create_spend_tx(
-        &manager.instances,
-        &[spend_spec],
-        &HashMap::new(),
-        &ctv_outputs,
-    )?;
-
-    // Set CTV-required tx fields
-    spend_tx.lock_time = bitcoin::absolute::LockTime::ZERO;
-    spend_tx.input[0].sequence = Sequence(10);
-    spend_tx.version = bitcoin::transaction::Version::TWO;
-
-    // The sighash must be recomputed after modifying the tx
-    let spent_utxos: Vec<TxOut> = {
-        let inst = &manager.instances[unvaulting_idx];
-        let funding_tx = inst.funding_tx.as_ref().unwrap();
-        let outpoint = inst.outpoint.unwrap();
-        vec![funding_tx.output[outpoint.vout as usize].clone()]
-    };
-
-    let leaf_script = manager.instances[unvaulting_idx]
-        .contract
-        .get_clause("withdraw")
-        .unwrap()
-        .script
-        .clone();
-
-    let mut sighash_cache = SighashCache::new(spend_tx.clone());
-    let sighash = sighash_cache
-        .taproot_script_spend_signature_hash(
-            0,
-            &bitcoin::sighash::Prevouts::All(&spent_utxos),
-            TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript),
-            bitcoin::TapSighashType::Default,
-        )
-        .map(|h| h.to_byte_array())
-        .map_err(|e| format!("Sighash failed: {}", e))?;
-
-    // Build witness (withdraw has no signer_args, so no signing needed)
-    spend_tx.input[0].witness = tx::build_witness(
-        &manager.instances[unvaulting_idx],
+    let spend_tx = common::build_terminal_spend_tx(
+        &manager,
+        unvaulting_idx,
         "withdraw",
-        &mut clause_args,
-        &sighash,
+        clause_args,
+        &ctv_outputs,
         None,
+        Sequence(10),
     )?;
 
     println!("Withdraw tx witness: {:?}", spend_tx.input[0].witness);
@@ -220,18 +142,9 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
-    let secp = Secp256k1::new();
-    let client = get_rpc_client("testwallet");
-
-    let unvault_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )?;
-    let unvault_pubkey: XOnlyPublicKey = unvault_privkey.to_priv().public_key(&secp).into();
-
-    let recover_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )?;
-    let recover_pubkey: XOnlyPublicKey = recover_privkey.to_priv().public_key(&secp).into();
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
+    let (unvault_privkey, unvault_pubkey, _recover_privkey, recover_pubkey) = common::get_keys();
 
     let vault_params = VaultParams {
         alternate_pk: None,
@@ -249,11 +162,7 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
     println!("Vault funded at {:?}", manager.instances[vault.idx()].outpoint.unwrap());
 
     // Set up signers
-    let mut signers: SignerMap = HashMap::new();
-    signers.insert(
-        unvault_pubkey,
-        Box::new(HotSigner { privkey: unvault_privkey }),
-    );
+    let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
 
     // Compute CTV hash
     let ctv_template = vec![
@@ -292,18 +201,9 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_vault_recover() -> Result<(), Box<dyn std::error::Error>> {
-    let secp = Secp256k1::new();
-    let client = get_rpc_client("testwallet");
-
-    let unvault_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )?;
-    let unvault_pubkey: XOnlyPublicKey = unvault_privkey.to_priv().public_key(&secp).into();
-
-    let recover_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )?;
-    let recover_pubkey: XOnlyPublicKey = recover_privkey.to_priv().public_key(&secp).into();
+    let client = common::get_rpc_client("testwallet");
+    common::ensure_funds(&client);
+    let (_unvault_privkey, unvault_pubkey, _recover_privkey, recover_pubkey) = common::get_keys();
 
     let vault_params = VaultParams {
         alternate_pk: None,
