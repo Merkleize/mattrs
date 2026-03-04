@@ -1,0 +1,12 @@
+[package]
+name = "rps"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mattrs = { path = ".." }
+bitcoin = { version = "0.32", features = ["rand-std"] }
+bitcoincore-rpc = "0.19"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+serde_json = "1"

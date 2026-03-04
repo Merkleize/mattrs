@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// Polls the blockchain for an output matching the given scriptPubKey.
-fn wait_for_output(
+pub fn wait_for_output(
     rpc: &Client,
     script_pub_key: &Script,
     poll_interval: f64,
@@ -57,8 +57,7 @@ fn wait_for_output(
 }
 
 /// Polls the blockchain for a transaction spending the given outpoint.
-#[allow(dead_code)]
-fn wait_for_spending_tx(
+pub fn wait_for_spending_tx(
     rpc: &Client,
     outpoint: OutPoint,
     starting_height: u64,
