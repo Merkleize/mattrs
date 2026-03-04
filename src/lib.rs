@@ -6,6 +6,8 @@ pub mod ctv;
 pub mod hub;
 pub mod macros;
 pub mod manager;
+pub mod merkle;
+pub mod script_helpers;
 pub mod signer;
 pub mod taproot;
 pub mod tx;
