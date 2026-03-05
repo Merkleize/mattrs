@@ -2,7 +2,7 @@ mod common;
 
 use std::collections::HashMap;
 
-use bitcoin::{Amount, Sequence, TxOut};
+use bitcoin::{Amount, TxOut};
 
 use mattrs::{
     contracts::{ClauseArgs, ContractInstanceStatus},
@@ -33,14 +33,13 @@ fn build_withdraw_tx(
         value: Amount::from_sat(AMOUNT),
     }];
 
-    common::build_terminal_spend_tx(
-        manager,
+    manager.build_spend_tx(
         instance_idx,
         "withdraw",
         args,
-        &outputs,
+        Some(&outputs),
         None,
-        Sequence::ZERO,
+        None,
     )
 }
 
@@ -105,7 +104,7 @@ fn test_write() -> Result<(), Box<dyn std::error::Error>> {
     args.insert("new_value".to_string(), new_value.to_vec());
     args.insert("merkle_root".to_string(), mt.root().to_vec());
 
-    let new_indices = manager.spend_instance(ram_idx, "write", args, None)?;
+    let new_indices = manager.spend_instance(ram_idx, "write", args, None, None, None)?;
 
     assert_eq!(new_indices.len(), 1);
     let new_idx = new_indices[0];
@@ -154,7 +153,7 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
         args.insert("new_value".to_string(), new_value.to_vec());
         args.insert("merkle_root".to_string(), mt.root().to_vec());
 
-        let new_indices = manager.spend_instance(cur_idx, "write", args, None)?;
+        let new_indices = manager.spend_instance(cur_idx, "write", args, None, None, None)?;
 
         assert_eq!(new_indices.len(), 1);
         let new_idx = new_indices[0];

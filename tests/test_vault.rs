@@ -113,27 +113,24 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let spend_tx = common::build_terminal_spend_tx(
-        &manager,
+    let final_indices = manager.spend_instance(
         unvaulting_idx,
         "withdraw",
         clause_args,
-        &ctv_outputs,
         None,
-        Sequence(10),
+        Some(&ctv_outputs),
+        Some(Sequence(10)),
     )?;
-
-    println!("Withdraw tx witness: {:?}", spend_tx.input[0].witness);
-
-    // Broadcast and wait
-    let final_indices = manager.spend_and_wait(&[unvaulting_idx], &spend_tx)?;
 
     // Withdraw is terminal (no next outputs)
     assert_eq!(final_indices.len(), 0);
     assert_eq!(manager.instances[unvaulting_idx].status, ContractInstanceStatus::Spent);
     assert_eq!(manager.instances[unvaulting_idx].spending_clause.as_deref(), Some("withdraw"));
 
-    report.write("Vault", format_tx_markdown(&spend_tx, "Withdraw [3 outputs]"));
+    report.write("Vault", format_tx_markdown(
+        manager.instances[unvaulting_idx].spending_tx.as_ref().unwrap(),
+        "Withdraw [3 outputs]",
+    ));
     report.finalize("reports/report_vault.md");
 
     println!("Vault trigger + withdraw test passed!");

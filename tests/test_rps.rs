@@ -2,7 +2,7 @@ mod common;
 
 use std::collections::HashMap;
 
-use bitcoin::{Amount, Sequence, TxOut};
+use bitcoin::{Amount, TxOut};
 use bitcoincore_rpc::RpcApi;
 
 use mattrs::{
@@ -27,14 +27,13 @@ fn build_s1_spend_tx(
     clause_args.insert("m_a".to_string(), <i32 as ClauseArg>::to_bytes(&m_a));
     clause_args.insert("r_a".to_string(), r_a.to_vec());
 
-    common::build_terminal_spend_tx(
-        manager,
+    manager.build_spend_tx(
         s1_idx,
         clause_name,
         clause_args,
-        ctv_outputs,
+        Some(ctv_outputs),
         None,
-        Sequence::ZERO,
+        None,
     )
 }
 

@@ -2,7 +2,7 @@ mod common;
 
 use std::collections::HashMap;
 
-use bitcoin::{Amount, Sequence, TxOut, XOnlyPublicKey};
+use bitcoin::{Amount, TxOut, XOnlyPublicKey};
 
 use mattrs::{
     contracts::{ClauseArg, ClauseArgs, Contract, ContractInstanceStatus},
@@ -62,14 +62,13 @@ fn build_leaf_spend_tx(
         value: Amount::from_sat(AMOUNT),
     }];
 
-    common::build_terminal_spend_tx(
-        manager,
+    manager.build_spend_tx(
         instance_idx,
         clause_name,
         clause_args,
-        &outputs,
+        Some(&outputs),
         Some(signers),
-        Sequence::ZERO,
+        None,
     )
 }
 
@@ -252,7 +251,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
         args.insert("t_b".to_string(), t_b_root.to_vec());
 
         let new_indices =
-            manager.spend_instance(s2_idx, "start_challenge", args, Some(&bob_signers))?;
+            manager.spend_instance(s2_idx, "start_challenge", args, Some(&bob_signers), None, None)?;
         assert_eq!(new_indices.len(), 1);
 
         let bisect_idx = new_indices[0];
@@ -285,7 +284,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
 
             let new_indices =
-                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers))?;
+                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers), None, None)?;
             assert_eq!(new_indices.len(), 1);
             cur_idx = new_indices[0];
             assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
@@ -317,7 +316,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             args.insert("trace_right_b".to_string(), t_b(cur_i + m, cur_j).to_vec());
 
             let new_indices =
-                manager.spend_instance(cur_idx, "bob_reveal_right", args, Some(&bob_signers))?;
+                manager.spend_instance(cur_idx, "bob_reveal_right", args, Some(&bob_signers), None, None)?;
             assert_eq!(new_indices.len(), 1);
 
             // Update interval to right child [i+m, j]
@@ -347,7 +346,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
 
             let new_indices =
-                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers))?;
+                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers), None, None)?;
             assert_eq!(new_indices.len(), 1);
             cur_idx = new_indices[0];
             assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
@@ -379,7 +378,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             args.insert("trace_right_b".to_string(), t_b(cur_i + m, cur_j).to_vec());
 
             let new_indices =
-                manager.spend_instance(cur_idx, "bob_reveal_left", args, Some(&bob_signers))?;
+                manager.spend_instance(cur_idx, "bob_reveal_left", args, Some(&bob_signers), None, None)?;
             assert_eq!(new_indices.len(), 1);
 
             // Update interval to left child [i, i+m-1]
@@ -409,7 +408,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
 
             let new_indices =
-                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers))?;
+                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers), None, None)?;
             assert_eq!(new_indices.len(), 1);
             cur_idx = new_indices[0];
             assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
@@ -440,7 +439,7 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
             args.insert("trace_right_b".to_string(), t_b(cur_i + m, cur_j).to_vec());
 
             let new_indices =
-                manager.spend_instance(cur_idx, "bob_reveal_right", args, Some(&bob_signers))?;
+                manager.spend_instance(cur_idx, "bob_reveal_right", args, Some(&bob_signers), None, None)?;
             assert_eq!(new_indices.len(), 1);
             cur_idx = new_indices[0];
             assert_eq!(manager.instances[cur_idx].contract.name(), "Leaf");

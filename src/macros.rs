@@ -321,7 +321,7 @@ macro_rules! contract {
         ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
             let mut args = std::collections::HashMap::new();
             $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
-            let _indices = manager.spend_instance(self.0, stringify!($method), args, Some(signers))?;
+            let _indices = manager.spend_instance(self.0, stringify!($method), args, Some(signers), None, None)?;
             contract!(@return _indices, 0usize, $( $ret ),* )
         }
     };
@@ -341,7 +341,7 @@ macro_rules! contract {
         ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
             let mut args = std::collections::HashMap::new();
             $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
-            let _indices = manager.spend_instance(self.0, stringify!($method), args, None)?;
+            let _indices = manager.spend_instance(self.0, stringify!($method), args, None, None, None)?;
             contract!(@return _indices, 0usize, $( $ret ),* )
         }
     };

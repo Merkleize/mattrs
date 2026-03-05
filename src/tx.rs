@@ -52,6 +52,7 @@ pub struct SpendSpec {
     pub instance_idx: usize,
     pub clause_name: String,
     pub args: ClauseArgs,
+    pub sequence: Sequence,
 }
 
 /// Constructs a spend transaction from one or more spend specifications.
@@ -84,7 +85,7 @@ pub fn create_spend_tx(
         tx.input.push(TxIn {
             previous_output: outpoint,
             script_sig: ScriptBuf::new(),
-            sequence: Sequence::ZERO,
+            sequence: spend.sequence,
             witness: Witness::default(),
         });
     }
@@ -261,6 +262,7 @@ pub fn get_spend_tx(
     mut args: ClauseArgs,
     extra_outputs: Option<&[TxOut]>,
     signers: Option<&SignerMap>,
+    sequence: Sequence,
 ) -> Result<Transaction, SpendTxError> {
     let instance = &instances[instance_idx];
     if instance.status != ContractInstanceStatus::Funded {
@@ -271,6 +273,7 @@ pub fn get_spend_tx(
         instance_idx,
         clause_name: clause_name.to_string(),
         args: args.clone(),
+        sequence,
     };
 
     let (mut tx, sighashes) = create_spend_tx(

@@ -5,12 +5,9 @@ use std::str::FromStr;
 
 use bitcoin::{
     bip32::Xpriv,
-    hashes::Hash,
     key::Secp256k1,
     secp256k1::rand::{thread_rng, RngCore},
-    sighash::SighashCache,
-    taproot::LeafVersion,
-    Amount, Sequence, TapLeafHash, TxOut, XOnlyPublicKey,
+    Amount, TxOut, XOnlyPublicKey,
 };
 use bitcoincore_rpc::{Auth, Client, RpcApi};
 use clap::Parser;
@@ -20,7 +17,6 @@ use mattrs::{
     hub::rps::*,
     manager::{self, ContractManager},
     signer::{HotSigner, SignerMap},
-    tx,
 };
 
 const ALICE_TPRV: &str = "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN";
@@ -112,57 +108,6 @@ fn get_keys() -> (Xpriv, XOnlyPublicKey, Xpriv, XOnlyPublicKey) {
     let bob_privkey = Xpriv::from_str(BOB_TPRV).unwrap();
     let bob_pk: XOnlyPublicKey = bob_privkey.to_priv().public_key(&secp).into();
     (alice_privkey, alice_pk, bob_privkey, bob_pk)
-}
-
-fn build_terminal_spend_tx(
-    manager: &ContractManager,
-    instance_idx: usize,
-    clause_name: &str,
-    mut clause_args: ClauseArgs,
-    outputs: &[TxOut],
-    signers: Option<&SignerMap>,
-    sequence: Sequence,
-) -> Result<bitcoin::Transaction, Box<dyn std::error::Error>> {
-    let spend_spec = tx::SpendSpec {
-        instance_idx,
-        clause_name: clause_name.to_string(),
-        args: clause_args.clone(),
-    };
-
-    let (mut spend_tx, _) =
-        tx::create_spend_tx(&manager.instances, &[spend_spec], &HashMap::new(), outputs)?;
-
-    spend_tx.lock_time = bitcoin::absolute::LockTime::ZERO;
-    spend_tx.input[0].sequence = sequence;
-    spend_tx.version = bitcoin::transaction::Version::TWO;
-
-    let inst = &manager.instances[instance_idx];
-    let funding_tx = inst.funding_tx.as_ref().unwrap();
-    let outpoint = inst.outpoint.unwrap();
-    let spent_utxos = vec![funding_tx.output[outpoint.vout as usize].clone()];
-
-    let leaf_script = inst
-        .contract
-        .get_clause(clause_name)
-        .unwrap()
-        .script
-        .clone();
-
-    let mut sighash_cache = SighashCache::new(spend_tx.clone());
-    let sighash = sighash_cache
-        .taproot_script_spend_signature_hash(
-            0,
-            &bitcoin::sighash::Prevouts::All(&spent_utxos),
-            TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript),
-            bitcoin::TapSighashType::Default,
-        )
-        .map(|h| h.to_byte_array())
-        .map_err(|e| format!("Sighash failed: {}", e))?;
-
-    spend_tx.input[0].witness =
-        tx::build_witness(inst, clause_name, &mut clause_args, &sighash, signers)?;
-
-    Ok(spend_tx)
 }
 
 fn run_alice(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -299,17 +244,9 @@ fn run_alice(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     clause_args.insert("m_a".to_string(), <i32 as ClauseArg>::to_bytes(&m_a));
     clause_args.insert("r_a".to_string(), r_a.to_vec());
 
-    let spend_tx = build_terminal_spend_tx(
-        &mgr,
-        s1_idx,
-        outcome,
-        clause_args,
-        &ctv_outputs,
-        None,
-        Sequence::ZERO,
-    )?;
+    mgr.spend_instance(s1_idx, outcome, clause_args, None, Some(&ctv_outputs), None)?;
 
-    mgr.spend_and_wait(&[s1_idx], &spend_tx)?;
+    let spend_tx = mgr.instances[s1_idx].spending_tx.as_ref().unwrap();
     println!("Adjudication broadcasted. txid: {}", spend_tx.compute_txid());
 
     Ok(())
@@ -388,7 +325,7 @@ fn run_bob(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut args: ClauseArgs = HashMap::new();
     args.insert("m_b".to_string(), <i32 as ClauseArg>::to_bytes(&m_b));
 
-    let s1_indices = mgr.spend_instance(s0_idx, "bob_move", args, Some(&signers))?;
+    let s1_indices = mgr.spend_instance(s0_idx, "bob_move", args, Some(&signers), None, None)?;
 
     let txid = mgr.instances[s0_idx]
         .spending_tx

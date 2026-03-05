@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::thread::sleep;
 use std::time::Duration;
 
-use bitcoin::{Amount, OutPoint, Script, Transaction, Txid};
+use bitcoin::{Amount, OutPoint, Script, Sequence, Transaction, TxOut, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
 
 use crate::{
@@ -217,14 +217,17 @@ impl<'a> ContractManager<'a> {
         clause_name: &str,
         args: ClauseArgs,
         signers: Option<&SignerMap>,
+        outputs: Option<&[TxOut]>,
+        sequence: Option<Sequence>,
     ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
         let spend_tx = tx::get_spend_tx(
             &self.instances,
             instance_idx,
             clause_name,
             args,
-            None,
+            outputs,
             signers,
+            sequence.unwrap_or(Sequence::ZERO),
         )?;
 
         self.rpc.send_raw_transaction(&spend_tx)?;
@@ -260,6 +263,28 @@ impl<'a> ContractManager<'a> {
         }
 
         self.wait_for_spend(instance_indices, cur_height)
+    }
+
+    /// Builds a fully-signed spend transaction without broadcasting.
+    /// Use for cheating-attempt tests or when you need the raw tx.
+    pub fn build_spend_tx(
+        &self,
+        instance_idx: usize,
+        clause_name: &str,
+        args: ClauseArgs,
+        outputs: Option<&[TxOut]>,
+        signers: Option<&SignerMap>,
+        sequence: Option<Sequence>,
+    ) -> Result<Transaction, Box<dyn std::error::Error>> {
+        Ok(tx::get_spend_tx(
+            &self.instances,
+            instance_idx,
+            clause_name,
+            args,
+            outputs,
+            signers,
+            sequence.unwrap_or(Sequence::ZERO),
+        )?)
     }
 
     /// Waits for one or more instances to be spent, processes the spending transaction,
