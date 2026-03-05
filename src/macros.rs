@@ -305,7 +305,53 @@ macro_rules! contract {
         );
     };
 
-    // Method muncher done: has signers
+    // Method muncher done: terminal + has signers (accepts SpendOptions)
+    (@method_munch $name:ident, $method:ident,
+        args_left: [],
+        params: [ $( $param:ident : $ptype:ty ),* ],
+        inserts: [ $( $ins:expr ),* ],
+        has_signer: true,
+        -> ()
+    ) => {
+        #[allow(clippy::too_many_arguments)]
+        pub fn $method(
+            self,
+            manager: &mut $crate::manager::ContractManager,
+            $( $param : $ptype, )*
+            signers: &$crate::signer::SignerMap,
+            opts: $crate::manager::SpendOptions<'_>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            #[allow(unused_mut)]
+            let mut args = std::collections::HashMap::new();
+            $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
+            manager.spend_instance(self.0, stringify!($method), args, Some(signers), opts.outputs, opts.sequence)?;
+            Ok(())
+        }
+    };
+
+    // Method muncher done: terminal + no signers (accepts SpendOptions)
+    (@method_munch $name:ident, $method:ident,
+        args_left: [],
+        params: [ $( $param:ident : $ptype:ty ),* ],
+        inserts: [ $( $ins:expr ),* ],
+        has_signer: false,
+        -> ()
+    ) => {
+        pub fn $method(
+            self,
+            manager: &mut $crate::manager::ContractManager,
+            $( $param : $ptype, )*
+            opts: $crate::manager::SpendOptions<'_>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            #[allow(unused_mut)]
+            let mut args = std::collections::HashMap::new();
+            $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
+            manager.spend_instance(self.0, stringify!($method), args, None, opts.outputs, opts.sequence)?;
+            Ok(())
+        }
+    };
+
+    // Method muncher done: has signers (non-terminal)
     (@method_munch $name:ident, $method:ident,
         args_left: [],
         params: [ $( $param:ident : $ptype:ty ),* ],
@@ -326,7 +372,7 @@ macro_rules! contract {
         }
     };
 
-    // Method muncher done: no signers
+    // Method muncher done: no signers (non-terminal)
     (@method_munch $name:ident, $method:ident,
         args_left: [],
         params: [ $( $param:ident : $ptype:ty ),* ],

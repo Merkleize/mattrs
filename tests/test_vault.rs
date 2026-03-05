@@ -1,6 +1,5 @@
 mod common;
 
-use std::collections::HashMap;
 use std::str::FromStr;
 
 use bitcoin::{
@@ -14,7 +13,7 @@ use mattrs::{
     contracts::ContractInstanceStatus,
     ctv::make_ctv_template_hash,
     hub::vault::*,
-    manager::ContractManager,
+    manager::{ContractManager, SpendOptions},
     report::{format_tx_markdown, Report},
 };
 
@@ -102,8 +101,6 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Step 6: Withdraw from unvaulting ---
     let unvaulting_idx = unvaulting.idx();
-    let mut clause_args = HashMap::new();
-    clause_args.insert("ctv_hash".to_string(), ctv_hash.to_vec());
 
     let ctv_outputs: Vec<TxOut> = ctv_template
         .iter()
@@ -113,17 +110,12 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let final_indices = manager.spend_instance(
-        unvaulting_idx,
-        "withdraw",
-        clause_args,
-        None,
-        Some(&ctv_outputs),
-        Some(Sequence(10)),
-    )?;
+    unvaulting.withdraw(&mut manager, ctv_hash, SpendOptions {
+        outputs: Some(&ctv_outputs),
+        sequence: Some(Sequence(10)),
+    })?;
 
     // Withdraw is terminal (no next outputs)
-    assert_eq!(final_indices.len(), 0);
     assert_eq!(manager.instances[unvaulting_idx].status, ContractInstanceStatus::Spent);
     assert_eq!(manager.instances[unvaulting_idx].spending_clause.as_deref(), Some("withdraw"));
 
@@ -219,7 +211,7 @@ fn test_vault_recover() -> Result<(), Box<dyn std::error::Error>> {
     println!("Vault funded at {:?}", manager.instances[vault_idx].outpoint.unwrap());
 
     // Spend with "recover" clause (typed API, no signers needed)
-    vault.recover(&mut manager, 0)?;
+    vault.recover(&mut manager, 0, Default::default())?;
 
     // Recover produces an opaque P2TR output
     assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);

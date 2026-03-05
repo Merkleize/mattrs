@@ -1,16 +1,15 @@
 mod common;
 
-use std::collections::HashMap;
-
-use bitcoin::{Amount, TxOut, XOnlyPublicKey};
+use bitcoin::{Amount, TxOut};
 
 use mattrs::{
-    contracts::{ClauseArg, ClauseArgs, Contract, ContractInstanceStatus},
+    contracts::{ClauseArg, Contract, ContractInstanceStatus},
     hub::fraud::{
+        Bisect1Instance, Bisect2Instance, LeafInstance,
         bisect1_state, compute_2x, leaf_state, make_leaf,
     },
     hub::game256::*,
-    manager::ContractManager,
+    manager::{ContractManager, SpendOptions},
     merkle::is_power_of_2,
     report::{format_tx_markdown, Report},
     sha256,
@@ -48,28 +47,12 @@ fn t_from_trace(trace: &[[u8; 32]], i: usize, j: usize) -> [u8; 32] {
     }
 }
 
-fn build_leaf_spend_tx(
-    manager: &ContractManager,
-    instance_idx: usize,
-    clause_name: &str,
-    clause_args: ClauseArgs,
-    winner_pk: XOnlyPublicKey,
-    signers: &mattrs::signer::SignerMap,
-) -> Result<bitcoin::Transaction, Box<dyn std::error::Error>> {
+fn winner_outputs(winner_pk: bitcoin::XOnlyPublicKey) -> Vec<TxOut> {
     let winner_addr = Contract::new_opaque_p2tr(winner_pk).get_address(&vec![]);
-    let outputs = vec![TxOut {
+    vec![TxOut {
         script_pubkey: winner_addr.script_pubkey(),
         value: Amount::from_sat(AMOUNT),
-    }];
-
-    manager.build_spend_tx(
-        instance_idx,
-        clause_name,
-        clause_args,
-        Some(&outputs),
-        Some(signers),
-        None,
-    )
+    }]
 }
 
 // ---------------------------------------------------------------------------
@@ -95,27 +78,27 @@ fn test_leaf_reveal_alice() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = leaf_state(h_start, h_end_alice, h_end_bob);
     let mut manager = ContractManager::new(&client, 0.1, true);
-    let leaf_idx = manager.fund_instance(leaf, state, AMOUNT)?;
-
-    // Build args for alice_reveal: alice_sig x h_y_b
-    let mut args: ClauseArgs = HashMap::new();
-    args.insert("x".to_string(), <i32 as ClauseArg>::to_bytes(&x_start));
-    args.insert("h_y_b".to_string(), h_end_bob.to_vec());
+    let leaf = LeafInstance::fund(&mut manager, leaf, state, AMOUNT)?;
+    let leaf_idx = leaf.idx();
 
     let signers = common::make_signers(&[(alice_pk, alice_privkey)]);
+    let outputs = winner_outputs(alice_pk);
 
-    let spend_tx =
-        build_leaf_spend_tx(&manager, leaf_idx, "alice_reveal", args, alice_pk, &signers)?;
-    let result = manager.spend_and_wait(&[leaf_idx], &spend_tx)?;
+    leaf.alice_reveal(&mut manager, x_start, h_end_bob, &signers, SpendOptions {
+        outputs: Some(&outputs),
+        ..Default::default()
+    })?;
 
-    assert_eq!(result.len(), 0); // terminal
     assert_eq!(
         manager.instances[leaf_idx].status,
         ContractInstanceStatus::Spent
     );
 
     let mut report = Report::new();
-    report.write("Leaf reveal (Alice)", format_tx_markdown(&spend_tx, "Leaf reveal (Alice wins)"));
+    report.write("Leaf reveal (Alice)", format_tx_markdown(
+        manager.instances[leaf_idx].spending_tx.as_ref().unwrap(),
+        "Leaf reveal (Alice wins)",
+    ));
     report.finalize("reports/report_fraud_leaf_alice.md");
 
     println!("test_leaf_reveal_alice passed!");
@@ -141,26 +124,27 @@ fn test_leaf_reveal_bob() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = leaf_state(h_start, h_end_alice, h_end_bob);
     let mut manager = ContractManager::new(&client, 0.1, true);
-    let leaf_idx = manager.fund_instance(leaf, state, AMOUNT)?;
-
-    let mut args: ClauseArgs = HashMap::new();
-    args.insert("x".to_string(), <i32 as ClauseArg>::to_bytes(&x_start));
-    args.insert("h_y_a".to_string(), h_end_alice.to_vec());
+    let leaf = LeafInstance::fund(&mut manager, leaf, state, AMOUNT)?;
+    let leaf_idx = leaf.idx();
 
     let signers = common::make_signers(&[(bob_pk, bob_privkey)]);
+    let outputs = winner_outputs(bob_pk);
 
-    let spend_tx =
-        build_leaf_spend_tx(&manager, leaf_idx, "bob_reveal", args, bob_pk, &signers)?;
-    let result = manager.spend_and_wait(&[leaf_idx], &spend_tx)?;
+    leaf.bob_reveal(&mut manager, x_start, h_end_alice, &signers, SpendOptions {
+        outputs: Some(&outputs),
+        ..Default::default()
+    })?;
 
-    assert_eq!(result.len(), 0); // terminal
     assert_eq!(
         manager.instances[leaf_idx].status,
         ContractInstanceStatus::Spent
     );
 
     let mut report = Report::new();
-    report.write("Leaf reveal (Bob)", format_tx_markdown(&spend_tx, "Leaf reveal (Bob wins)"));
+    report.write("Leaf reveal (Bob)", format_tx_markdown(
+        manager.instances[leaf_idx].spending_tx.as_ref().unwrap(),
+        "Leaf reveal (Bob wins)",
+    ));
     report.finalize("reports/report_fraud_leaf_bob.md");
 
     println!("test_leaf_reveal_bob passed!");
@@ -242,238 +226,186 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
     // --- Step 3: Bob starts challenge with z=512 ---
     let s2_idx = s2.idx();
     let t_b_root = t_b(0, n - 1);
+
+    let (bisect1,) = s2.start_challenge(
+        &mut manager, t_a_root.to_vec(), y, x, z, t_b_root.to_vec(), &bob_signers,
+    )?;
+
+    assert_eq!(manager.instances[bisect1.idx()].contract.name(), "Bisect_1");
+    let expected_state = bisect1_state(h_a[0], h_a[n], h_b[n], t_a(0, n - 1), t_b(0, n - 1));
+    assert_eq!(manager.instances[bisect1.idx()].data, expected_state);
+    println!("S2 → Bisect_1[0,7]");
+    report.write("Fraud proof", format_tx_markdown(
+        manager.instances[s2_idx].spending_tx.as_ref().unwrap(),
+        "S2 → Bisect_1 (Bob starts challenge)",
+    ));
+
+    // --- Bisection protocol ---
+    // Interval [0, 7], m = 4
+    let (mut cur_i, mut cur_j) = (0usize, 7usize);
+    let mut cur_idx = bisect1.idx();
+
+    // Step 4: Alice reveals → Bisect_2[0,7]
     {
-        let mut args: ClauseArgs = HashMap::new();
-        args.insert("t_a".to_string(), t_a_root.to_vec());
-        args.insert("y".to_string(), <i32 as ClauseArg>::to_bytes(&y));
-        args.insert("x".to_string(), <i32 as ClauseArg>::to_bytes(&x));
-        args.insert("z".to_string(), <i32 as ClauseArg>::to_bytes(&z));
-        args.insert("t_b".to_string(), t_b_root.to_vec());
-
-        let new_indices =
-            manager.spend_instance(s2_idx, "start_challenge", args, Some(&bob_signers), None, None)?;
-        assert_eq!(new_indices.len(), 1);
-
-        let bisect_idx = new_indices[0];
-        assert_eq!(manager.instances[bisect_idx].contract.name(), "Bisect_1");
-        let expected_state = bisect1_state(h_a[0], h_a[n], h_b[n], t_a(0, n - 1), t_b(0, n - 1));
-        assert_eq!(manager.instances[bisect_idx].data, expected_state);
-        println!("S2 → Bisect_1[0,7]");
+        let prev_idx = cur_idx;
+        let m = (cur_j - cur_i + 1) / 2;
+        let bisect1 = Bisect1Instance(cur_idx);
+        let (bisect2,) = bisect1.alice_reveal(
+            &mut manager,
+            h_a[cur_i], h_a[cur_j + 1], h_b[cur_j + 1],
+            t_a(cur_i, cur_j), t_b(cur_i, cur_j),
+            h_a[cur_i + m], t_a(cur_i, cur_i + m - 1), t_a(cur_i + m, cur_j),
+            &alice_signers,
+        )?;
+        cur_idx = bisect2.idx();
+        assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
+        println!("Bisect_1[{},{}] → Bisect_2[{},{}] (Alice reveals)", cur_i, cur_j, cur_i, cur_j);
         report.write("Fraud proof", format_tx_markdown(
-            manager.instances[s2_idx].spending_tx.as_ref().unwrap(),
-            "S2 → Bisect_1 (Bob starts challenge)",
+            manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+            &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
         ));
+    }
 
-        // --- Bisection protocol ---
-        // Interval [0, 7], m = 4
-        let (mut cur_i, mut cur_j) = (0usize, 7usize);
-        let mut cur_idx = bisect_idx;
+    // Step 5: Bob reveals right (midstates agree at index 4) → Bisect_1[4,7]
+    {
+        let prev_idx = cur_idx;
+        let m = (cur_j - cur_i + 1) / 2;
+        assert_eq!(h_a[cur_i + m], h_b[cur_i + m]); // they agree at midpoint 4
 
-        // Step 4: Alice reveals → Bisect_2[0,7]
-        {
-            let prev_idx = cur_idx;
-            let m = (cur_j - cur_i + 1) / 2;
-            let mut args: ClauseArgs = HashMap::new();
-            args.insert("h_start".to_string(), h_a[cur_i].to_vec());
-            args.insert("h_end_a".to_string(), h_a[cur_j + 1].to_vec());
-            args.insert("h_end_b".to_string(), h_b[cur_j + 1].to_vec());
-            args.insert("trace_a".to_string(), t_a(cur_i, cur_j).to_vec());
-            args.insert("trace_b".to_string(), t_b(cur_i, cur_j).to_vec());
-            args.insert("h_mid_a".to_string(), h_a[cur_i + m].to_vec());
-            args.insert("trace_left_a".to_string(), t_a(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
+        let bisect2 = Bisect2Instance(cur_idx);
+        let (child,) = bisect2.bob_reveal_right(
+            &mut manager,
+            h_a[cur_i], h_a[cur_j + 1], h_b[cur_j + 1],
+            t_a(cur_i, cur_j), t_b(cur_i, cur_j),
+            h_a[cur_i + m], t_a(cur_i, cur_i + m - 1), t_a(cur_i + m, cur_j),
+            h_b[cur_i + m], t_b(cur_i, cur_i + m - 1), t_b(cur_i + m, cur_j),
+            &bob_signers,
+        )?;
 
-            let new_indices =
-                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers), None, None)?;
-            assert_eq!(new_indices.len(), 1);
-            cur_idx = new_indices[0];
-            assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
-            println!("Bisect_1[{},{}] → Bisect_2[{},{}] (Alice reveals)", cur_i, cur_j, cur_i, cur_j);
-            report.write("Fraud proof", format_tx_markdown(
-                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
-                &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
-            ));
-        }
+        // Update interval to right child [i+m, j]
+        cur_i = cur_i + m;
+        cur_idx = child.idx();
+        let bisect1 = child.as_bisect1();
+        assert_eq!(manager.instances[bisect1.idx()].contract.name(), "Bisect_1");
+        assert_eq!((cur_i, cur_j), (4, 7));
+        println!("Bisect_2[0,7] → Bisect_1[4,7] (Bob reveals right)");
+        report.write("Fraud proof", format_tx_markdown(
+            manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+            "Bisection (Bob, right child)",
+        ));
+    }
 
-        // Step 5: Bob reveals right (midstates agree at index 4) → Bisect_1[4,7]
-        {
-            let prev_idx = cur_idx;
-            let m = (cur_j - cur_i + 1) / 2;
-            // h_a[cur_i+m] == h_b[cur_i+m] (both are h(32)), so right child
-            assert_eq!(h_a[cur_i + m], h_b[cur_i + m]); // they agree at midpoint 4
+    // Step 6: Alice reveals → Bisect_2[4,7]
+    {
+        let prev_idx = cur_idx;
+        let m = (cur_j - cur_i + 1) / 2;
+        let bisect1 = Bisect1Instance(cur_idx);
+        let (bisect2,) = bisect1.alice_reveal(
+            &mut manager,
+            h_a[cur_i], h_a[cur_j + 1], h_b[cur_j + 1],
+            t_a(cur_i, cur_j), t_b(cur_i, cur_j),
+            h_a[cur_i + m], t_a(cur_i, cur_i + m - 1), t_a(cur_i + m, cur_j),
+            &alice_signers,
+        )?;
+        cur_idx = bisect2.idx();
+        assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
+        println!("Bisect_1[4,7] → Bisect_2[4,7] (Alice reveals)");
+        report.write("Fraud proof", format_tx_markdown(
+            manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+            &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
+        ));
+    }
 
-            let mut args: ClauseArgs = HashMap::new();
-            args.insert("h_start".to_string(), h_a[cur_i].to_vec());
-            args.insert("h_end_a".to_string(), h_a[cur_j + 1].to_vec());
-            args.insert("h_end_b".to_string(), h_b[cur_j + 1].to_vec());
-            args.insert("trace_a".to_string(), t_a(cur_i, cur_j).to_vec());
-            args.insert("trace_b".to_string(), t_b(cur_i, cur_j).to_vec());
-            args.insert("h_mid_a".to_string(), h_a[cur_i + m].to_vec());
-            args.insert("trace_left_a".to_string(), t_a(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
-            args.insert("h_mid_b".to_string(), h_b[cur_i + m].to_vec());
-            args.insert("trace_left_b".to_string(), t_b(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_b".to_string(), t_b(cur_i + m, cur_j).to_vec());
+    // Step 7: Bob reveals left (midstates differ at index 6) → Bisect_1[4,5]
+    {
+        let prev_idx = cur_idx;
+        let m = (cur_j - cur_i + 1) / 2;
+        assert_ne!(h_a[cur_i + m], h_b[cur_i + m]); // they differ at midpoint 6
 
-            let new_indices =
-                manager.spend_instance(cur_idx, "bob_reveal_right", args, Some(&bob_signers), None, None)?;
-            assert_eq!(new_indices.len(), 1);
+        let bisect2 = Bisect2Instance(cur_idx);
+        let (child,) = bisect2.bob_reveal_left(
+            &mut manager,
+            h_a[cur_i], h_a[cur_j + 1], h_b[cur_j + 1],
+            t_a(cur_i, cur_j), t_b(cur_i, cur_j),
+            h_a[cur_i + m], t_a(cur_i, cur_i + m - 1), t_a(cur_i + m, cur_j),
+            h_b[cur_i + m], t_b(cur_i, cur_i + m - 1), t_b(cur_i + m, cur_j),
+            &bob_signers,
+        )?;
 
-            // Update interval to right child [i+m, j]
-            cur_i = cur_i + m;
-            cur_idx = new_indices[0];
-            assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_1");
-            assert_eq!((cur_i, cur_j), (4, 7));
-            println!("Bisect_2[0,7] → Bisect_1[4,7] (Bob reveals right)");
-            report.write("Fraud proof", format_tx_markdown(
-                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
-                "Bisection (Bob, right child)",
-            ));
-        }
+        // Update interval to left child [i, i+m-1]
+        cur_j = cur_i + m - 1;
+        cur_idx = child.idx();
+        let bisect1 = child.as_bisect1();
+        assert_eq!(manager.instances[bisect1.idx()].contract.name(), "Bisect_1");
+        assert_eq!((cur_i, cur_j), (4, 5));
+        println!("Bisect_2[4,7] → Bisect_1[4,5] (Bob reveals left)");
+        report.write("Fraud proof", format_tx_markdown(
+            manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+            "Bisection (Bob, left child)",
+        ));
+    }
 
-        // Step 6: Alice reveals → Bisect_2[4,7]
-        {
-            let prev_idx = cur_idx;
-            let m = (cur_j - cur_i + 1) / 2;
-            let mut args: ClauseArgs = HashMap::new();
-            args.insert("h_start".to_string(), h_a[cur_i].to_vec());
-            args.insert("h_end_a".to_string(), h_a[cur_j + 1].to_vec());
-            args.insert("h_end_b".to_string(), h_b[cur_j + 1].to_vec());
-            args.insert("trace_a".to_string(), t_a(cur_i, cur_j).to_vec());
-            args.insert("trace_b".to_string(), t_b(cur_i, cur_j).to_vec());
-            args.insert("h_mid_a".to_string(), h_a[cur_i + m].to_vec());
-            args.insert("trace_left_a".to_string(), t_a(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
+    // Step 8: Alice reveals → Bisect_2[4,5]
+    {
+        let prev_idx = cur_idx;
+        let m = (cur_j - cur_i + 1) / 2;
+        let bisect1 = Bisect1Instance(cur_idx);
+        let (bisect2,) = bisect1.alice_reveal(
+            &mut manager,
+            h_a[cur_i], h_a[cur_j + 1], h_b[cur_j + 1],
+            t_a(cur_i, cur_j), t_b(cur_i, cur_j),
+            h_a[cur_i + m], t_a(cur_i, cur_i + m - 1), t_a(cur_i + m, cur_j),
+            &alice_signers,
+        )?;
+        cur_idx = bisect2.idx();
+        assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
+        println!("Bisect_1[4,5] → Bisect_2[4,5] (Alice reveals)");
+        report.write("Fraud proof", format_tx_markdown(
+            manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+            &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
+        ));
+    }
 
-            let new_indices =
-                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers), None, None)?;
-            assert_eq!(new_indices.len(), 1);
-            cur_idx = new_indices[0];
-            assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
-            println!("Bisect_1[4,7] → Bisect_2[4,7] (Alice reveals)");
-            report.write("Fraud proof", format_tx_markdown(
-                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
-                &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
-            ));
-        }
+    // Step 9: Bob reveals right (midstates agree at index 5) → Leaf
+    {
+        let prev_idx = cur_idx;
+        let m = (cur_j - cur_i + 1) / 2;
+        assert_eq!(h_a[cur_i + m], h_b[cur_i + m]); // agree at 5
 
-        // Step 7: Bob reveals left (midstates differ at index 6) → Bisect_1[4,5]
-        {
-            let prev_idx = cur_idx;
-            let m = (cur_j - cur_i + 1) / 2;
-            // h_a[cur_i+m] = h_a[6] = h(127), h_b[cur_i+m] = h_b[6] = h(128)
-            assert_ne!(h_a[cur_i + m], h_b[cur_i + m]); // they differ at midpoint 6
+        let bisect2 = Bisect2Instance(cur_idx);
+        let (child,) = bisect2.bob_reveal_right(
+            &mut manager,
+            h_a[cur_i], h_a[cur_j + 1], h_b[cur_j + 1],
+            t_a(cur_i, cur_j), t_b(cur_i, cur_j),
+            h_a[cur_i + m], t_a(cur_i, cur_i + m - 1), t_a(cur_i + m, cur_j),
+            h_b[cur_i + m], t_b(cur_i, cur_i + m - 1), t_b(cur_i + m, cur_j),
+            &bob_signers,
+        )?;
+        cur_idx = child.idx();
+        assert_eq!(manager.instances[cur_idx].contract.name(), "Leaf");
+        println!("Bisect_2[4,5] → Leaf (Bob reveals right)");
+        report.write("Fraud proof", format_tx_markdown(
+            manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
+            "Bisection (Bob, right child)",
+        ));
+    }
 
-            let mut args: ClauseArgs = HashMap::new();
-            args.insert("h_start".to_string(), h_a[cur_i].to_vec());
-            args.insert("h_end_a".to_string(), h_a[cur_j + 1].to_vec());
-            args.insert("h_end_b".to_string(), h_b[cur_j + 1].to_vec());
-            args.insert("trace_a".to_string(), t_a(cur_i, cur_j).to_vec());
-            args.insert("trace_b".to_string(), t_b(cur_i, cur_j).to_vec());
-            args.insert("h_mid_a".to_string(), h_a[cur_i + m].to_vec());
-            args.insert("trace_left_a".to_string(), t_a(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
-            args.insert("h_mid_b".to_string(), h_b[cur_i + m].to_vec());
-            args.insert("trace_left_b".to_string(), t_b(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_b".to_string(), t_b(cur_i + m, cur_j).to_vec());
+    // Step 10: Bob proves correct computation on the leaf
+    assert_eq!(alice_trace[5], bob_trace[5]); // agree on x_start
+    assert_ne!(alice_trace[6], bob_trace[6]); // differ on x_end
 
-            let new_indices =
-                manager.spend_instance(cur_idx, "bob_reveal_left", args, Some(&bob_signers), None, None)?;
-            assert_eq!(new_indices.len(), 1);
-
-            // Update interval to left child [i, i+m-1]
-            cur_j = cur_i + m - 1;
-            cur_idx = new_indices[0];
-            assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_1");
-            assert_eq!((cur_i, cur_j), (4, 5));
-            println!("Bisect_2[4,7] → Bisect_1[4,5] (Bob reveals left)");
-            report.write("Fraud proof", format_tx_markdown(
-                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
-                "Bisection (Bob, left child)",
-            ));
-        }
-
-        // Step 8: Alice reveals → Bisect_2[4,5]
-        {
-            let prev_idx = cur_idx;
-            let m = (cur_j - cur_i + 1) / 2;
-            let mut args: ClauseArgs = HashMap::new();
-            args.insert("h_start".to_string(), h_a[cur_i].to_vec());
-            args.insert("h_end_a".to_string(), h_a[cur_j + 1].to_vec());
-            args.insert("h_end_b".to_string(), h_b[cur_j + 1].to_vec());
-            args.insert("trace_a".to_string(), t_a(cur_i, cur_j).to_vec());
-            args.insert("trace_b".to_string(), t_b(cur_i, cur_j).to_vec());
-            args.insert("h_mid_a".to_string(), h_a[cur_i + m].to_vec());
-            args.insert("trace_left_a".to_string(), t_a(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
-
-            let new_indices =
-                manager.spend_instance(cur_idx, "alice_reveal", args, Some(&alice_signers), None, None)?;
-            assert_eq!(new_indices.len(), 1);
-            cur_idx = new_indices[0];
-            assert_eq!(manager.instances[cur_idx].contract.name(), "Bisect_2");
-            println!("Bisect_1[4,5] → Bisect_2[4,5] (Alice reveals)");
-            report.write("Fraud proof", format_tx_markdown(
-                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
-                &format!("Bisection (Alice) [{},{}]", cur_i, cur_j),
-            ));
-        }
-
-        // Step 9: Bob reveals right (midstates agree at index 5) → Leaf
-        {
-            let prev_idx = cur_idx;
-            let m = (cur_j - cur_i + 1) / 2;
-            assert_eq!(h_a[cur_i + m], h_b[cur_i + m]); // agree at 5
-
-            let mut args: ClauseArgs = HashMap::new();
-            args.insert("h_start".to_string(), h_a[cur_i].to_vec());
-            args.insert("h_end_a".to_string(), h_a[cur_j + 1].to_vec());
-            args.insert("h_end_b".to_string(), h_b[cur_j + 1].to_vec());
-            args.insert("trace_a".to_string(), t_a(cur_i, cur_j).to_vec());
-            args.insert("trace_b".to_string(), t_b(cur_i, cur_j).to_vec());
-            args.insert("h_mid_a".to_string(), h_a[cur_i + m].to_vec());
-            args.insert("trace_left_a".to_string(), t_a(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_a".to_string(), t_a(cur_i + m, cur_j).to_vec());
-            args.insert("h_mid_b".to_string(), h_b[cur_i + m].to_vec());
-            args.insert("trace_left_b".to_string(), t_b(cur_i, cur_i + m - 1).to_vec());
-            args.insert("trace_right_b".to_string(), t_b(cur_i + m, cur_j).to_vec());
-
-            let new_indices =
-                manager.spend_instance(cur_idx, "bob_reveal_right", args, Some(&bob_signers), None, None)?;
-            assert_eq!(new_indices.len(), 1);
-            cur_idx = new_indices[0];
-            assert_eq!(manager.instances[cur_idx].contract.name(), "Leaf");
-            println!("Bisect_2[4,5] → Leaf (Bob reveals right)");
-            report.write("Fraud proof", format_tx_markdown(
-                manager.instances[prev_idx].spending_tx.as_ref().unwrap(),
-                "Bisection (Bob, right child)",
-            ));
-        }
-
-        // Step 10: Bob proves correct computation on the leaf
-        // Both agree h_start = h(bob_trace[5]) = h(64), but differ on h_end
-        // Bob computes: 2*64 = 128 = bob_trace[6], which matches h_end_bob
-        assert_eq!(alice_trace[5], bob_trace[5]); // agree on x_start
-        assert_ne!(alice_trace[6], bob_trace[6]); // differ on x_end
-
-        {
-            let mut args: ClauseArgs = HashMap::new();
-            args.insert("x".to_string(), <i32 as ClauseArg>::to_bytes(&bob_trace[5]));
-            args.insert("h_y_a".to_string(), h_a[6].to_vec());
-
-            let spend_tx = build_leaf_spend_tx(
-                &manager,
-                cur_idx,
-                "bob_reveal",
-                args,
-                bob_pk,
-                &bob_signers,
-            )?;
-            let result = manager.spend_and_wait(&[cur_idx], &spend_tx)?;
-            assert_eq!(result.len(), 0); // terminal
-            println!("Leaf → Bob wins! (proved 2*64=128)");
-            report.write("Fraud proof", format_tx_markdown(&spend_tx, "Leaf reveal"));
-        }
+    {
+        let leaf = LeafInstance(cur_idx);
+        let outputs = winner_outputs(bob_pk);
+        leaf.bob_reveal(&mut manager, bob_trace[5], h_a[6], &bob_signers, SpendOptions {
+            outputs: Some(&outputs),
+            ..Default::default()
+        })?;
+        println!("Leaf → Bob wins! (proved 2*64=128)");
+        report.write("Fraud proof", format_tx_markdown(
+            manager.instances[cur_idx].spending_tx.as_ref().unwrap(),
+            "Leaf reveal",
+        ));
     }
 
     report.finalize("reports/report_fraud.md");

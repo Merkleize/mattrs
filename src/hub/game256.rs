@@ -9,7 +9,7 @@ use crate::contracts::{
     arg_as_bytes, arg_as_int, ArgType, Bytes, CcvAmountBehaviour, ClauseArg, ClauseOutput,
     Contract, standard_clause,
 };
-use crate::hub::fraud::{bisect1_state, compute_2x, make_bisect_1, make_leaf};
+use crate::hub::fraud::{Bisect1Instance, bisect1_state, compute_2x, make_bisect_1, make_leaf};
 use crate::merkle;
 use crate::script_helpers::{
     cat_scripts, check_input_contract, check_output_contract, dup_script, encoder_script,
@@ -369,11 +369,10 @@ contract! {
     }
 }
 
-// G256_S2: start_challenge returns Bisect_1 (dynamic type), so we use manual spend in tests.
-pub struct G256S2Instance(pub usize);
-impl G256S2Instance {
-    pub fn idx(&self) -> usize {
-        self.0
+contract! {
+    G256S2Instance, G256S2Clause {
+        fn start_challenge(bob_sig: sig, t_a: Bytes, y: i32, x: i32, z: i32, t_b: Bytes) -> (Bisect1Instance);
+        fn withdraw(alice_sig: sig) -> ();
     }
 }
 

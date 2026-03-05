@@ -1,47 +1,17 @@
 mod common;
 
-use std::collections::HashMap;
-
 use bitcoin::{Amount, TxOut};
 
 use mattrs::{
-    contracts::{ClauseArgs, ContractInstanceStatus},
-    hub::ram::{make_ram, proof_to_arg},
-    manager::ContractManager,
+    contracts::ContractInstanceStatus,
+    hub::ram::{make_ram, proof_to_arg, RamInstance},
+    manager::{ContractManager, SpendOptions},
     merkle::MerkleTree,
     report::{format_tx_markdown, Report},
     sha256,
 };
 
 const AMOUNT: u64 = 20_000;
-
-fn build_withdraw_tx(
-    manager: &ContractManager,
-    instance_idx: usize,
-    args: ClauseArgs,
-) -> Result<bitcoin::Transaction, Box<dyn std::error::Error>> {
-    // Spend to a dummy P2WSH output
-    let dummy_script = bitcoin::ScriptBuf::new_witness_program(
-        &bitcoin::WitnessProgram::new(
-            bitcoin::WitnessVersion::V0,
-            &[0x42u8; 32],
-        )
-        .unwrap(),
-    );
-    let outputs = vec![TxOut {
-        script_pubkey: dummy_script,
-        value: Amount::from_sat(AMOUNT),
-    }];
-
-    manager.build_spend_tx(
-        instance_idx,
-        "withdraw",
-        args,
-        Some(&outputs),
-        None,
-        None,
-    )
-}
 
 #[test]
 fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,17 +26,29 @@ fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
             let ram = make_ram(size);
             let state = mt.root().to_vec();
             let mut manager = ContractManager::new(&client, 0.1, true);
-            let ram_idx = manager.fund_instance(ram, state, AMOUNT)?;
+            let ram = RamInstance::fund(&mut manager, ram, state, AMOUNT)?;
+            let ram_idx = ram.idx();
 
             let proof = mt.prove_leaf(leaf_index);
-            let mut args: ClauseArgs = HashMap::new();
-            args.insert("merkle_proof".to_string(), proof_to_arg(&proof));
-            args.insert("merkle_root".to_string(), mt.root().to_vec());
 
-            let spend_tx = build_withdraw_tx(&manager, ram_idx, args)?;
-            let result = manager.spend_and_wait(&[ram_idx], &spend_tx)?;
+            // Spend to a dummy P2WSH output
+            let dummy_script = bitcoin::ScriptBuf::new_witness_program(
+                &bitcoin::WitnessProgram::new(
+                    bitcoin::WitnessVersion::V0,
+                    &[0x42u8; 32],
+                )
+                .unwrap(),
+            );
+            let outputs = vec![TxOut {
+                script_pubkey: dummy_script,
+                value: Amount::from_sat(AMOUNT),
+            }];
 
-            assert_eq!(result.len(), 0, "withdraw should be terminal");
+            ram.withdraw(&mut manager, proof_to_arg(&proof), mt.root(), SpendOptions {
+                outputs: Some(&outputs),
+                ..Default::default()
+            })?;
+
             assert_eq!(
                 manager.instances[ram_idx].status,
                 ContractInstanceStatus::Spent
@@ -96,20 +78,13 @@ fn test_write() -> Result<(), Box<dyn std::error::Error>> {
     let ram = make_ram(size);
     let state = mt.root().to_vec();
     let mut manager = ContractManager::new(&client, 0.1, true);
-    let ram_idx = manager.fund_instance(ram, state, AMOUNT)?;
+    let ram = RamInstance::fund(&mut manager, ram, state, AMOUNT)?;
 
     let proof = mt.prove_leaf(leaf_index);
-    let mut args: ClauseArgs = HashMap::new();
-    args.insert("merkle_proof".to_string(), proof_to_arg(&proof));
-    args.insert("new_value".to_string(), new_value.to_vec());
-    args.insert("merkle_root".to_string(), mt.root().to_vec());
+    let (new_ram,) = ram.write(&mut manager, proof_to_arg(&proof), new_value, mt.root())?;
 
-    let new_indices = manager.spend_instance(ram_idx, "write", args, None, None, None)?;
-
-    assert_eq!(new_indices.len(), 1);
-    let new_idx = new_indices[0];
     assert_eq!(
-        manager.instances[new_idx].contract.name(),
+        manager.instances[new_ram.idx()].contract.name(),
         format!("RAM_{}", size)
     );
 
@@ -118,7 +93,7 @@ fn test_write() -> Result<(), Box<dyn std::error::Error>> {
     modified_leaves[leaf_index] = new_value;
     let expected_root = MerkleTree::new(modified_leaves).root();
     assert_eq!(
-        manager.instances[new_idx].data,
+        manager.instances[new_ram.idx()].data,
         expected_root.to_vec()
     );
 
@@ -137,7 +112,8 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
     let ram = make_ram(size);
     let state = MerkleTree::new(leaves.clone()).root().to_vec();
     let mut manager = ContractManager::new(&client, 0.1, true);
-    let mut cur_idx = manager.fund_instance(ram, state, AMOUNT)?;
+    let initial_ram = RamInstance::fund(&mut manager, ram, state, AMOUNT)?;
+    let mut cur_idx = initial_ram.idx();
 
     let mut report = Report::new();
 
@@ -148,17 +124,11 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
         let mt = MerkleTree::new(leaves.clone());
         let proof = mt.prove_leaf(leaf_index);
 
-        let mut args: ClauseArgs = HashMap::new();
-        args.insert("merkle_proof".to_string(), proof_to_arg(&proof));
-        args.insert("new_value".to_string(), new_value.to_vec());
-        args.insert("merkle_root".to_string(), mt.root().to_vec());
+        let ram = RamInstance(cur_idx);
+        let (new_ram,) = ram.write(&mut manager, proof_to_arg(&proof), new_value, mt.root())?;
 
-        let new_indices = manager.spend_instance(cur_idx, "write", args, None, None, None)?;
-
-        assert_eq!(new_indices.len(), 1);
-        let new_idx = new_indices[0];
         assert_eq!(
-            manager.instances[new_idx].contract.name(),
+            manager.instances[new_ram.idx()].contract.name(),
             format!("RAM_{}", size)
         );
 
@@ -166,7 +136,7 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
         leaves[leaf_index] = new_value;
         let expected_root = MerkleTree::new(leaves.clone()).root();
         assert_eq!(
-            manager.instances[new_idx].data,
+            manager.instances[new_ram.idx()].data,
             expected_root.to_vec(),
             "Root mismatch at iteration {}",
             i
@@ -180,7 +150,7 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
             ),
         );
 
-        cur_idx = new_idx;
+        cur_idx = new_ram.idx();
         println!("write_loop iteration {} passed (leaf {})", i, leaf_index);
     }
 

@@ -137,6 +137,13 @@ fn wait_for_spending_transaction(
     }
 }
 
+/// Options for terminal clause spends (outputs and sequence).
+#[derive(Debug, Clone, Default)]
+pub struct SpendOptions<'a> {
+    pub outputs: Option<&'a [TxOut]>,
+    pub sequence: Option<Sequence>,
+}
+
 /// Manages contract instances. Works entirely with concrete types.
 pub struct ContractManager<'a> {
     pub rpc: &'a Client,

@@ -5,10 +5,18 @@ use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 
 use crate::ccv::{CCV_FLAG_CHECK_INPUT, NUMS_KEY, OP_CHECKCONTRACTVERIFY};
-use crate::contracts::{CcvAmountBehaviour, Clause, ClauseOutput, Contract};
+use crate::contract;
+use crate::contracts::{Bytes, CcvAmountBehaviour, Clause, ClauseOutput, Contract};
 use crate::merkle::{floor_lg, is_power_of_2, MerkleProof};
 use crate::script_helpers::{check_input_contract, push_number};
 use crate::taproot::TapTree;
+
+contract! {
+    RamInstance, RamClause {
+        fn write(merkle_proof: Bytes, new_value: [u8; 32], merkle_root: [u8; 32]) -> (RamInstance);
+        fn withdraw(merkle_proof: Bytes, merkle_root: [u8; 32]) -> ();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Compact binary encoding for MerkleProof in ClauseArgs

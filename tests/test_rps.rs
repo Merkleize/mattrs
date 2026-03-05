@@ -8,7 +8,7 @@ use bitcoincore_rpc::RpcApi;
 use mattrs::{
     contracts::{ClauseArg, ClauseArgs, ContractInstanceStatus, Contract},
     hub::rps::*,
-    manager::ContractManager,
+    manager::{ContractManager, SpendOptions},
     report::{format_tx_markdown, Report},
     signer::SignerMap,
 };
@@ -144,17 +144,20 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
     // (m_b - m_a) % 3 = 1, bob_wins expects diff=1 ✓
     assert_eq!(adjudicate(m_a, m_b), "bob_wins");
     {
-        let spend_tx = build_s1_spend_tx(
-            &manager, s1_idx, "bob_wins", m_b, m_a, &r_a, &bob_wins_outputs,
-        )?;
-        let final_indices = manager.spend_and_wait(&[s1_idx], &spend_tx)?;
+        let s1 = RpsS1Instance(s1_idx);
+        s1.bob_wins(&mut manager, m_b, m_a, r_a.to_vec(), SpendOptions {
+            outputs: Some(&bob_wins_outputs),
+            ..Default::default()
+        })?;
 
         // Terminal clause: no tracked outputs
-        assert_eq!(final_indices.len(), 0);
         assert_eq!(manager.instances[s1_idx].status, ContractInstanceStatus::Spent);
         assert_eq!(manager.instances[s1_idx].spending_clause.as_deref(), Some("bob_wins"));
 
-        report.write("RPS", format_tx_markdown(&spend_tx, "Bob wins"));
+        report.write("RPS", format_tx_markdown(
+            manager.instances[s1_idx].spending_tx.as_ref().unwrap(),
+            "Bob wins",
+        ));
     }
 
     report.finalize("reports/report_rps.md");

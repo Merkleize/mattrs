@@ -5,6 +5,7 @@ use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 
 use crate::ccv::NUMS_KEY;
+use crate::contract;
 use crate::contracts::{
     ArgType, CcvAmountBehaviour, ClauseOutput, Contract, StateData, standard_clause,
 };
@@ -14,6 +15,37 @@ use crate::script_helpers::{
     encoder_script, older_script,
 };
 use crate::taproot::TapTree;
+
+contract! {
+    LeafInstance, LeafClause {
+        fn alice_reveal(alice_sig: sig, x: i32, h_y_b: [u8; 32]) -> ();
+        fn bob_reveal(bob_sig: sig, x: i32, h_y_a: [u8; 32]) -> ();
+    }
+}
+
+contract! {
+    Bisect1Instance, Bisect1Clause {
+        fn alice_reveal(alice_sig: sig, h_start: [u8; 32], h_end_a: [u8; 32], h_end_b: [u8; 32], trace_a: [u8; 32], trace_b: [u8; 32], h_mid_a: [u8; 32], trace_left_a: [u8; 32], trace_right_a: [u8; 32]) -> (Bisect2Instance);
+        fn forfait(bob_sig: sig) -> ();
+    }
+}
+
+/// Wraps either a Bisect1Instance or LeafInstance index.
+/// Use `.as_bisect1()` / `.as_leaf()` to convert based on protocol step.
+pub struct BisectChildInstance(pub usize);
+impl BisectChildInstance {
+    pub fn idx(&self) -> usize { self.0 }
+    pub fn as_bisect1(self) -> Bisect1Instance { Bisect1Instance(self.0) }
+    pub fn as_leaf(self) -> LeafInstance { LeafInstance(self.0) }
+}
+
+contract! {
+    Bisect2Instance, Bisect2Clause {
+        fn bob_reveal_left(bob_sig: sig, h_start: [u8; 32], h_end_a: [u8; 32], h_end_b: [u8; 32], trace_a: [u8; 32], trace_b: [u8; 32], h_mid_a: [u8; 32], trace_left_a: [u8; 32], trace_right_a: [u8; 32], h_mid_b: [u8; 32], trace_left_b: [u8; 32], trace_right_b: [u8; 32]) -> (BisectChildInstance);
+        fn bob_reveal_right(bob_sig: sig, h_start: [u8; 32], h_end_a: [u8; 32], h_end_b: [u8; 32], trace_a: [u8; 32], trace_b: [u8; 32], h_mid_a: [u8; 32], trace_left_a: [u8; 32], trace_right_a: [u8; 32], h_mid_b: [u8; 32], trace_left_b: [u8; 32], trace_right_b: [u8; 32]) -> (BisectChildInstance);
+        fn forfait(alice_sig: sig) -> ();
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Computer
