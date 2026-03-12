@@ -14,10 +14,10 @@ use clap::Parser;
 
 use mattrs::{
     contracts::{ClauseArg, ClauseArgs, Contract, ContractInstance, ContractInstanceStatus},
-    hub::rps::*,
     manager::{self, ContractManager},
     signer::{HotSigner, SignerMap},
 };
+use mattrs_examples::rps::*;
 
 const ALICE_TPRV: &str = "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN";
 const BOB_TPRV: &str = "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ";

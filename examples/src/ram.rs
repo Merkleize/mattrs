@@ -4,12 +4,12 @@ use bitcoin::opcodes::all::*;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 
-use crate::ccv::{CCV_FLAG_CHECK_INPUT, NUMS_KEY, OP_CHECKCONTRACTVERIFY};
-use crate::contract;
-use crate::contracts::{Bytes, CcvAmountBehaviour, Clause, ClauseOutput, Contract};
-use crate::merkle::{floor_lg, is_power_of_2, MerkleProof};
-use crate::script_helpers::{check_input_contract, push_number};
-use crate::taproot::TapTree;
+use mattrs::ccv::{CCV_FLAG_CHECK_INPUT, NUMS_KEY, OP_CHECKCONTRACTVERIFY};
+use mattrs::contract;
+use mattrs::contracts::{Bytes, CcvAmountBehaviour, Clause, ClauseOutput, Contract};
+use mattrs::merkle::{floor_lg, is_power_of_2, MerkleProof};
+use mattrs::script_helpers::{check_input_contract, push_number};
+use mattrs::taproot::TapTree;
 
 contract! {
     RamInstance, RamClause {

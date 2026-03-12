@@ -1,10 +1,10 @@
 use bitcoin::XOnlyPublicKey;
 use bitcoin_script::{define_pushable, script};
 
-use crate::ccv::{CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY};
-use crate::contracts::Contract;
-use crate::taproot::TapTree;
-use crate::{ccv_outputs, contract, define_state, optional_key};
+use mattrs::ccv::{CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, NUMS_KEY};
+use mattrs::contracts::Contract;
+use mattrs::taproot::TapTree;
+use mattrs::{ccv_outputs, contract, define_state, optional_key};
 
 define_pushable!();
 
@@ -221,7 +221,7 @@ mod tests {
 
     use bitcoin::{bip32::Xpriv, hashes::Hash, key::Secp256k1, Address, KnownHrp, TapNodeHash};
 
-    use crate::contracts::CcvAmountBehaviour;
+    use mattrs::contracts::CcvAmountBehaviour;
 
     use super::*;
 

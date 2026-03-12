@@ -4,12 +4,12 @@ use bitcoin::{Amount, TxOut};
 
 use mattrs::{
     contracts::ContractInstanceStatus,
-    hub::ram::{make_ram, proof_to_arg, RamInstance},
     manager::{ContractManager, SpendOptions},
     merkle::MerkleTree,
     report::{format_tx_markdown, Report},
     sha256,
 };
+use mattrs_examples::ram::{make_ram, proof_to_arg, RamInstance};
 
 const AMOUNT: u64 = 20_000;
 

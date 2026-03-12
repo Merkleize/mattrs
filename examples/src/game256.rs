@@ -4,19 +4,19 @@ use bitcoin::opcodes::all::*;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 
-use crate::ccv::NUMS_KEY;
-use crate::contracts::{
+use mattrs::ccv::NUMS_KEY;
+use mattrs::contracts::{
     arg_as_bytes, arg_as_int, ArgType, Bytes, CcvAmountBehaviour, ClauseArg, ClauseOutput,
     Contract, standard_clause,
 };
-use crate::hub::fraud::{Bisect1Instance, bisect1_state, compute_2x, make_bisect_1, make_leaf};
-use crate::merkle;
-use crate::script_helpers::{
+use mattrs::hub::fraud::{Bisect1Instance, bisect1_state, compute_2x, make_bisect_1, make_leaf};
+use mattrs::merkle;
+use mattrs::script_helpers::{
     cat_scripts, check_input_contract, check_output_contract, dup_script, encoder_script,
     older_script,
 };
-use crate::taproot::TapTree;
-use crate::{contract, sha256};
+use mattrs::taproot::TapTree;
+use mattrs::{contract, sha256};
 
 use bitcoin_script::{define_pushable, script};
 define_pushable!();

@@ -1,14 +1,11 @@
-[workspace]
-members = [".", "examples", "rps"]
-
 [package]
-name = "mattrs"
+name = "mattrs-examples"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+mattrs = { path = ".." }
 bitcoin = { version = "0.32", features = ["rand-std"] }
 bitcoincore-rpc = "0.19"
-bitcoin-script = { path = "mattrs_old/bitcoin-script" }
 hex = "0.4"
-thiserror = "1.0"
+bitcoin-script = { path = "../mattrs_old/bitcoin-script" }

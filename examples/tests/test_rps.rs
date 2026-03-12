@@ -7,11 +7,11 @@ use bitcoincore_rpc::RpcApi;
 
 use mattrs::{
     contracts::{ClauseArg, ClauseArgs, ContractInstanceStatus, Contract},
-    hub::rps::*,
     manager::{ContractManager, SpendOptions},
     report::{format_tx_markdown, Report},
     signer::SignerMap,
 };
+use mattrs_examples::rps::*;
 
 fn build_s1_spend_tx(
     manager: &ContractManager,

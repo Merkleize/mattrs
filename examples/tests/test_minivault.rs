@@ -7,10 +7,10 @@ use bitcoincore_rpc::RpcApi;
 
 use mattrs::{
     contracts::{ClauseArg, ContractInstanceStatus},
-    hub::minivault::*,
     manager::{ContractManager, SpendOptions},
     report::{format_tx_markdown, Report},
 };
+use mattrs_examples::minivault::*;
 
 fn withdrawal_pk() -> [u8; 32] {
     let bytes = hex::decode("0981368165440d4fe866f84d75ae53a95b192aa45155735d4cb2a8894b340b8f").unwrap();

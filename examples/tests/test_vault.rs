@@ -12,10 +12,10 @@ use bitcoin::{
 use mattrs::{
     contracts::ContractInstanceStatus,
     ctv::make_ctv_template_hash,
-    hub::vault::*,
     manager::{ContractManager, SpendOptions},
     report::{format_tx_markdown, Report},
 };
+use mattrs_examples::vault::*;
 
 #[test]
 fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {

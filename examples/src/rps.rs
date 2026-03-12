@@ -1,13 +1,13 @@
 use bitcoin::{Amount, Sequence, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 
-use crate::ccv::{CCV_FLAG_CHECK_INPUT, NUMS_KEY};
-use crate::contracts::{
+use mattrs::ccv::{CCV_FLAG_CHECK_INPUT, NUMS_KEY};
+use mattrs::contracts::{
     arg_as_int, Bytes, CcvAmountBehaviour, ClauseArg, ClauseOutput, Contract,
 };
-use crate::ctv::make_ctv_template_hash;
-use crate::taproot::TapTree;
-use crate::{ccv_outputs, contract, sha256};
+use mattrs::ctv::make_ctv_template_hash;
+use mattrs::taproot::TapTree;
+use mattrs::{ccv_outputs, contract, sha256};
 
 define_pushable!();
 

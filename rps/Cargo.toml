@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 mattrs = { path = ".." }
+mattrs-examples = { path = "../examples" }
 bitcoin = { version = "0.32", features = ["rand-std"] }
 bitcoincore-rpc = "0.19"
 clap = { version = "4", features = ["derive"] }

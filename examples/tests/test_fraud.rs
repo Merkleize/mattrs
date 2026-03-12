@@ -8,12 +8,12 @@ use mattrs::{
         Bisect1Instance, Bisect2Instance, LeafInstance,
         bisect1_state, compute_2x, leaf_state, make_leaf,
     },
-    hub::game256::*,
     manager::{ContractManager, SpendOptions},
     merkle::is_power_of_2,
     report::{format_tx_markdown, Report},
     sha256,
 };
+use mattrs_examples::game256::*;
 
 const AMOUNT: u64 = 20_000;
 
