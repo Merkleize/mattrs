@@ -140,7 +140,7 @@ pub fn create_spend_tx(
             match clause_output.amount_behaviour {
                 CcvAmountBehaviour::Preserve => {
                     if let Some(existing_out) = outputs_map.get_mut(&out_index) {
-                        existing_out.value += funding_amount;
+                        existing_out.value += ccv_amount;
                     }
                     preserve_output_used = true;
                 }

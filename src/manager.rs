@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -292,6 +292,44 @@ impl<'a> ContractManager<'a> {
             signers,
             sequence.unwrap_or(Sequence::ZERO),
         )?)
+    }
+
+    /// Builds a multi-input spend transaction, signs, broadcasts, and waits for confirmation.
+    /// Each element of `spends` is (instance_idx, clause_name, args).
+    /// Returns indices of new instances created from clause outputs.
+    pub fn spend_instances(
+        &mut self,
+        spends: Vec<(usize, &str, ClauseArgs)>,
+        signers: Option<&SignerMap>,
+        output_amounts: HashMap<usize, u64>,
+        sequence: Sequence,
+    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+        let spend_specs: Vec<tx::SpendSpec> = spends
+            .iter()
+            .map(|(idx, clause_name, args)| tx::SpendSpec {
+                instance_idx: *idx,
+                clause_name: clause_name.to_string(),
+                args: args.clone(),
+                sequence,
+            })
+            .collect();
+
+        let (mut spend_tx, sighashes) =
+            tx::create_spend_tx(&self.instances, &spend_specs, &output_amounts, &[])?;
+
+        for (i, (idx, clause_name, args)) in spends.into_iter().enumerate() {
+            let mut args = args;
+            spend_tx.input[i].witness = tx::build_witness(
+                &self.instances[idx],
+                clause_name,
+                &mut args,
+                &sighashes[i],
+                signers,
+            )?;
+        }
+
+        let instance_indices: Vec<usize> = spend_specs.iter().map(|s| s.instance_idx).collect();
+        self.spend_and_wait(&instance_indices, &spend_tx)
     }
 
     /// Waits for one or more instances to be spent, processes the spending transaction,
