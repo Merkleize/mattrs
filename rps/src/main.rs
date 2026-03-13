@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
+use std::time::Duration;
 
 use bitcoin::{
     bip32::Xpriv,
@@ -13,8 +14,8 @@ use bitcoincore_rpc::{Auth, Client, RpcApi};
 use clap::Parser;
 
 use mattrs::{
-    contracts::{ClauseArg, ClauseArgs, Contract, ContractInstance, ContractInstanceStatus},
-    manager::{self, ContractManager},
+    contracts::{ClauseArg, ClauseArgs, Contract, ContractInstance},
+    manager::{self, ContractManager, SpendOptions},
     signer::{HotSigner, SignerMap},
 };
 use mattrs_examples::rps::*;
@@ -163,45 +164,42 @@ fn run_alice(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let client = get_rpc_client("testwallet");
     ensure_funds(&client);
-    let mut mgr = ContractManager::new(&client, 0.1, cli.mine_automatically);
+    let mut mgr = ContractManager::new(&client, Duration::from_secs_f64(0.1), cli.mine_automatically);
 
     let s0_contract = make_rps_s0(&params);
 
     let s0_idx = if cli.mine_automatically {
-        mgr.fund_instance(s0_contract, vec![], 2 * stake)?
+        mgr.fund_instance(s0_contract, vec![], Amount::from_sat(2 * stake))?
     } else {
         let inst = ContractInstance::new(s0_contract, vec![]);
         let idx = mgr.add_instance(inst);
-        let address = mgr.instances[idx].get_address();
+        let address = mgr.instance(idx).get_address();
         println!("Waiting for funding to: {}", address);
         let (outpoint, height) = manager::wait_for_output(
             &client,
             address.script_pubkey().as_script(),
-            0.5,
+            Duration::from_secs_f64(0.5),
             None,
             None,
         )?;
         let funding_tx = client.get_raw_transaction(&outpoint.txid, None)?;
-        mgr.instances[idx].outpoint = Some(outpoint);
-        mgr.instances[idx].funding_tx = Some(funding_tx);
-        mgr.instances[idx].status = ContractInstanceStatus::Funded;
-        mgr.instances[idx].last_height = Some(height);
+        mgr.set_instance_funded(idx, outpoint, funding_tx, height);
         idx
     };
 
     println!(
         "Outpoint: {}",
-        mgr.instances[s0_idx].outpoint.unwrap()
+        mgr.instance(s0_idx).outpoint().unwrap()
     );
     println!("Waiting for Bob's move...");
 
     // Wait for Bob to spend S0
-    let height = mgr.instances[s0_idx].last_height.unwrap_or(0);
+    let height = mgr.instance(s0_idx).last_height().unwrap_or(0);
     let s1_indices = mgr.wait_for_spend(&[s0_idx], height)?;
 
     // Read Bob's move from spending args
     let m_b = {
-        let args = mgr.instances[s0_idx].spending_args.as_ref().unwrap();
+        let args = mgr.instance(s0_idx).spending_args().unwrap();
         let m_b_bytes = args.get("m_b").unwrap();
         bitcoin::script::read_scriptint(m_b_bytes).unwrap() as i32
     };
@@ -244,9 +242,12 @@ fn run_alice(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     clause_args.insert("m_a".to_string(), <i32 as ClauseArg>::to_bytes(&m_a));
     clause_args.insert("r_a".to_string(), r_a.to_vec());
 
-    mgr.spend_instance(s1_idx, outcome, clause_args, None, Some(&ctv_outputs), None)?;
+    mgr.spend_instance(s1_idx, outcome, clause_args, SpendOptions {
+        outputs: Some(&ctv_outputs),
+        ..Default::default()
+    })?;
 
-    let spend_tx = mgr.instances[s1_idx].spending_tx.as_ref().unwrap();
+    let spend_tx = mgr.instance(s1_idx).spending_tx().unwrap();
     println!("Adjudication broadcasted. txid: {}", spend_tx.compute_txid());
 
     Ok(())
@@ -291,28 +292,25 @@ fn run_bob(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let client = get_rpc_client("testwallet");
-    let mut mgr = ContractManager::new(&client, 0.1, cli.mine_automatically);
+    let mut mgr = ContractManager::new(&client, Duration::from_secs_f64(0.1), cli.mine_automatically);
 
     let s0_contract = make_rps_s0(&params);
     let inst = ContractInstance::new(s0_contract, vec![]);
     let s0_idx = mgr.add_instance(inst);
 
-    let address = mgr.instances[s0_idx].get_address();
+    let address = mgr.instance(s0_idx).get_address();
     println!("Bob waiting for output: {}", address);
 
     // Wait for Alice's funding tx
     let (outpoint, height) = manager::wait_for_output(
         &client,
         address.script_pubkey().as_script(),
-        0.5,
+        Duration::from_secs_f64(0.5),
         None,
         None,
     )?;
     let funding_tx = client.get_raw_transaction(&outpoint.txid, None)?;
-    mgr.instances[s0_idx].outpoint = Some(outpoint);
-    mgr.instances[s0_idx].funding_tx = Some(funding_tx);
-    mgr.instances[s0_idx].status = ContractInstanceStatus::Funded;
-    mgr.instances[s0_idx].last_height = Some(height);
+    mgr.set_instance_funded(s0_idx, outpoint, funding_tx, height);
 
     // Play Bob's move
     let m_b_hash = mattrs::sha256(&<i32 as ClauseArg>::to_bytes(&m_b));
@@ -325,11 +323,13 @@ fn run_bob(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut args: ClauseArgs = HashMap::new();
     args.insert("m_b".to_string(), <i32 as ClauseArg>::to_bytes(&m_b));
 
-    let s1_indices = mgr.spend_instance(s0_idx, "bob_move", args, Some(&signers), None, None)?;
+    let s1_indices = mgr.spend_instance(s0_idx, "bob_move", args, SpendOptions {
+        signers: Some(&signers),
+        ..Default::default()
+    })?;
 
-    let txid = mgr.instances[s0_idx]
-        .spending_tx
-        .as_ref()
+    let txid = mgr.instance(s0_idx)
+        .spending_tx()
         .unwrap()
         .compute_txid();
     println!("Bob's move broadcasted: {}. txid: {}", m_b, txid);
@@ -338,14 +338,13 @@ fn run_bob(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Wait for Alice to adjudicate S1
     let s1_idx = s1_indices[0];
-    let s1_height = mgr.instances[s1_idx].last_height.unwrap_or(0);
+    let s1_height = mgr.instance(s1_idx).last_height().unwrap_or(0);
     mgr.wait_for_spend(&[s1_idx], s1_height)?;
 
-    let outcome = mgr.instances[s1_idx]
-        .spending_clause
-        .as_ref()
+    let outcome = mgr.instance(s1_idx)
+        .spending_clause()
         .unwrap()
-        .clone();
+        .to_string();
     println!("Outcome: {}", outcome);
 
     Ok(())

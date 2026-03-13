@@ -1,6 +1,7 @@
 mod common;
 
 use std::str::FromStr;
+use std::time::Duration;
 
 use bitcoin::{
     hashes::Hash,
@@ -42,15 +43,15 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         "bcrt1plkh3clum5e2rynql75ufxxqxw898arfumqnua60hwr76q4y0jeksu88u3m"
     );
 
-    let amount = 49_999_900u64;
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let amount = Amount::from_sat(49_999_900u64);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
     let mut report = Report::new();
 
     // --- Step 1: Fund the vault (typed API) ---
     let vault = VaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
-    assert_eq!(manager.instances[vault.idx()].status, ContractInstanceStatus::Funded);
-    assert!(manager.instances[vault.idx()].outpoint.is_some());
-    println!("Vault funded at {:?}", manager.instances[vault.idx()].outpoint.unwrap());
+    assert_eq!(manager.instance(vault.idx()).status(), ContractInstanceStatus::Funded);
+    assert!(manager.instance(vault.idx()).outpoint().is_some());
+    println!("Vault funded at {:?}", manager.instance(vault.idx()).outpoint().unwrap());
 
     // --- Step 2: Set up signers ---
     let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
@@ -82,19 +83,19 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let (unvaulting,) = vault.trigger(&mut manager, ctv_hash, 0, &signers)?;
 
     // Verify the vault instance is now spent
-    assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[vault_idx].spending_clause.as_deref(), Some("trigger"));
+    assert_eq!(manager.instance(vault_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(vault_idx).spending_clause(), Some("trigger"));
     report.write("Vault", format_tx_markdown(
-        manager.instances[vault_idx].spending_tx.as_ref().unwrap(),
+        manager.instance(vault_idx).spending_tx().unwrap(),
         "Trigger",
     ));
 
     // Verify unvaulting instance
-    let unvaulting_inst = &manager.instances[unvaulting.idx()];
-    assert_eq!(unvaulting_inst.status, ContractInstanceStatus::Funded);
-    assert_eq!(unvaulting_inst.contract.name(), "Unvaulting");
-    assert_eq!(unvaulting_inst.data, ctv_hash.to_vec());
-    println!("Unvaulting funded at {:?}", unvaulting_inst.outpoint.unwrap());
+    let unvaulting_inst = manager.instance(unvaulting.idx());
+    assert_eq!(unvaulting_inst.status(), ContractInstanceStatus::Funded);
+    assert_eq!(unvaulting_inst.contract().name(), "Unvaulting");
+    assert_eq!(unvaulting_inst.data(), &ctv_hash.to_vec());
+    println!("Unvaulting funded at {:?}", unvaulting_inst.outpoint().unwrap());
 
     // --- Step 5: Mine blocks for timelock ---
     manager.mine_blocks(10)?;
@@ -113,14 +114,15 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     unvaulting.withdraw(&mut manager, ctv_hash, SpendOptions {
         outputs: Some(&ctv_outputs),
         sequence: Some(Sequence(10)),
+        ..Default::default()
     })?;
 
     // Withdraw is terminal (no next outputs)
-    assert_eq!(manager.instances[unvaulting_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[unvaulting_idx].spending_clause.as_deref(), Some("withdraw"));
+    assert_eq!(manager.instance(unvaulting_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(unvaulting_idx).spending_clause(), Some("withdraw"));
 
     report.write("Vault", format_tx_markdown(
-        manager.instances[unvaulting_idx].spending_tx.as_ref().unwrap(),
+        manager.instance(unvaulting_idx).spending_tx().unwrap(),
         "Withdraw [3 outputs]",
     ));
     report.finalize("reports/report_vault.md");
@@ -143,12 +145,12 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
     };
     let vault_contract = make_vault(&vault_params);
 
-    let amount = 49_999_900u64;
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let amount = Amount::from_sat(49_999_900u64);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
 
     // Fund the vault (typed API)
     let vault = VaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
-    println!("Vault funded at {:?}", manager.instances[vault.idx()].outpoint.unwrap());
+    println!("Vault funded at {:?}", manager.instance(vault.idx()).outpoint().unwrap());
 
     // Set up signers
     let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
@@ -174,15 +176,15 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
     let vault_idx = vault.idx();
     let (unvaulting,) = vault.trigger(&mut manager, ctv_hash, 0, &signers)?;
 
-    assert_eq!(manager.instances[unvaulting.idx()].contract.name(), "Unvaulting");
+    assert_eq!(manager.instance(unvaulting.idx()).contract().name(), "Unvaulting");
 
     // Verify the unvaulting instance has the correct CTV hash as state data
-    let decoded_state = UnvaultingState::decode(&manager.instances[unvaulting.idx()].data)
+    let decoded_state = UnvaultingState::decode(manager.instance(unvaulting.idx()).data())
         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
     assert_eq!(decoded_state.ctv_hash, ctv_hash);
 
     // Verify vault is spent
-    assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(vault_idx).status(), ContractInstanceStatus::Spent);
 
     println!("Vault trigger_and_revault test passed! (trigger step verified)");
     Ok(())
@@ -202,24 +204,24 @@ fn test_vault_recover() -> Result<(), Box<dyn std::error::Error>> {
     };
     let vault_contract = make_vault(&vault_params);
 
-    let amount = 49_999_900u64;
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let amount = Amount::from_sat(49_999_900u64);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
 
     // Fund the vault (typed API)
     let vault = VaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
     let vault_idx = vault.idx();
-    println!("Vault funded at {:?}", manager.instances[vault_idx].outpoint.unwrap());
+    println!("Vault funded at {:?}", manager.instance(vault_idx).outpoint().unwrap());
 
     // Spend with "recover" clause (typed API, no signers needed)
     vault.recover(&mut manager, 0, Default::default())?;
 
     // Recover produces an opaque P2TR output
-    assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[vault_idx].spending_clause.as_deref(), Some("recover"));
+    assert_eq!(manager.instance(vault_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(vault_idx).spending_clause(), Some("recover"));
 
     let mut report = Report::new();
     report.write("Vault", format_tx_markdown(
-        manager.instances[vault_idx].spending_tx.as_ref().unwrap(),
+        manager.instance(vault_idx).spending_tx().unwrap(),
         "Recovery from vault",
     ));
     report.finalize("reports/report_vault_recover.md");

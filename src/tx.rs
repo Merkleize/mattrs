@@ -61,7 +61,7 @@ pub struct SpendSpec {
 pub fn create_spend_tx(
     instances: &[ContractInstance],
     spends: &[SpendSpec],
-    output_amounts: &HashMap<usize, u64>,
+    output_amounts: &HashMap<usize, Amount>,
     extra_outputs: &[TxOut],
 ) -> Result<(Transaction, Vec<[u8; 32]>), SpendTxError> {
     if !output_amounts.is_empty() && !extra_outputs.is_empty() {
@@ -152,8 +152,8 @@ pub fn create_spend_tx(
                         .get(&out_index)
                         .ok_or(SpendTxError::MissingOutputAmount(out_index))?;
                     let existing_out = outputs_map.get_mut(&out_index).unwrap();
-                    existing_out.value = Amount::from_sat(*out_amount);
-                    ccv_amount -= Amount::from_sat(*out_amount);
+                    existing_out.value = *out_amount;
+                    ccv_amount -= *out_amount;
                 }
                 CcvAmountBehaviour::Ignore => {
                     return Err(SpendTxError::UnsupportedClauseOutputBehavior);
@@ -304,14 +304,14 @@ pub fn process_spending_transaction(
     spent_indices: &[usize],
     tx: &Transaction,
     last_height: u64,
-) -> Result<Vec<ContractInstance>, Box<dyn std::error::Error>> {
+) -> Result<Vec<ContractInstance>, SpendTxError> {
     let mut out_contracts: HashMap<usize, ContractInstance> = HashMap::new();
 
     for &idx in spent_indices {
         let instance = &mut instances[idx];
 
         if instance.status != ContractInstanceStatus::Funded {
-            return Err("Contract instance is not in FUNDED state".into());
+            return Err(SpendTxError::NotFunded);
         }
 
         // Find the vin that spends this instance
@@ -319,7 +319,7 @@ pub fn process_spending_transaction(
             .input
             .iter()
             .position(|vin| vin.previous_output == instance.outpoint.unwrap())
-            .ok_or("Transaction does not spend the expected outpoint")?;
+            .ok_or(SpendTxError::Other("Transaction does not spend the expected outpoint".to_string()))?;
 
         // Update instance to SPENT
         instance.spending_tx = Some(tx.clone());
@@ -330,7 +330,7 @@ pub fn process_spending_transaction(
         // Decode witness stack
         let witness_stack: Vec<Vec<u8>> = tx.input[vin_index].witness.to_vec();
         if witness_stack.len() < 2 {
-            return Err("Witness stack too short".into());
+            return Err(SpendTxError::Other("Witness stack too short".to_string()));
         }
 
         // Extract script (second-to-last) and find clause
@@ -340,20 +340,20 @@ pub fn process_spending_transaction(
             .contract
             .taptree()
             .get_clause_by_script(&script)
-            .ok_or("Clause not found for script in witness")?;
+            .ok_or_else(|| SpendTxError::Other("Clause not found for script in witness".to_string()))?;
         let clause_name = clause.name.clone();
 
         // Decode args from witness elements (everything except script + control block)
         let stack_elements = &witness_stack[..witness_stack.len() - 2];
         let decoded_args = (clause.witness_to_args)(stack_elements)
-            .map_err(|e| format!("Failed to decode witness args: {}", e))?;
+            .map_err(|e| SpendTxError::Other(format!("Failed to decode witness args: {}", e)))?;
 
         instance.spending_clause = Some(clause_name.clone());
         instance.spending_args = Some(decoded_args.clone());
 
         // Get next outputs
         let next_outputs = (clause.next_outputs)(&decoded_args, &instance.data)
-            .map_err(|e| format!("Failed to compute next outputs: {}", e))?;
+            .map_err(|e| SpendTxError::Other(format!("Failed to compute next outputs: {}", e)))?;
 
         for clause_output in next_outputs {
             let output_index = if clause_output.n == -1 {

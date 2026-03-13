@@ -1,8 +1,9 @@
 mod common;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
-use bitcoin::Sequence;
+use bitcoin::{Amount, Sequence};
 use bitcoincore_rpc::RpcApi;
 
 use mattrs::{
@@ -40,9 +41,9 @@ fn test_minivault_recover() -> Result<(), Box<dyn std::error::Error>> {
     common::ensure_funds(&client);
 
     let (_params, vault_contract) = make_test_vault(true, true);
-    let amount = 20_000u64;
+    let amount = Amount::from_sat(20_000u64);
 
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
     let mut report = Report::new();
 
     let vault = MiniVaultInstance::fund(&mut manager, vault_contract, vec![], amount)?;
@@ -50,12 +51,12 @@ fn test_minivault_recover() -> Result<(), Box<dyn std::error::Error>> {
 
     vault.recover(&mut manager, 0, Default::default())?;
 
-    assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[vault_idx].spending_clause.as_deref(), Some("recover"));
+    assert_eq!(manager.instance(vault_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(vault_idx).spending_clause(), Some("recover"));
 
-    let spending_tx = manager.instances[vault_idx].spending_tx.as_ref().unwrap();
+    let spending_tx = manager.instance(vault_idx).spending_tx().unwrap();
     assert_eq!(spending_tx.output.len(), 1);
-    assert_eq!(spending_tx.output[0].value.to_sat(), amount);
+    assert_eq!(spending_tx.output[0].value, amount);
 
     report.write("MiniVault", format_tx_markdown(spending_tx, "Recovery from vault"));
     report.finalize("reports/report_minivault_recover.md");
@@ -71,9 +72,9 @@ fn test_minivault_trigger_and_recover() -> Result<(), Box<dyn std::error::Error>
     let (unvault_privkey, unvault_pubkey, _recover_privkey, _recover_pubkey) = common::get_keys();
 
     let (_params, vault_contract) = make_test_vault(true, true);
-    let amount = 49_999_900u64;
+    let amount = Amount::from_sat(49_999_900u64);
 
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
     let mut report = Report::new();
 
     let vault = MiniVaultInstance::fund(&mut manager, vault_contract, vec![], amount)?;
@@ -84,26 +85,26 @@ fn test_minivault_trigger_and_recover() -> Result<(), Box<dyn std::error::Error>
 
     let (unvaulting,) = vault.trigger(&mut manager, wpk, 0, &signers)?;
 
-    assert_eq!(manager.instances[vault_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[vault_idx].spending_clause.as_deref(), Some("trigger"));
+    assert_eq!(manager.instance(vault_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(vault_idx).spending_clause(), Some("trigger"));
     report.write("MiniVault", format_tx_markdown(
-        manager.instances[vault_idx].spending_tx.as_ref().unwrap(),
+        manager.instance(vault_idx).spending_tx().unwrap(),
         "Trigger",
     ));
 
-    let unvaulting_inst = &manager.instances[unvaulting.idx()];
-    assert_eq!(unvaulting_inst.status, ContractInstanceStatus::Funded);
-    assert_eq!(unvaulting_inst.contract.name(), "MiniUnvaulting");
-    assert_eq!(unvaulting_inst.data, wpk.to_vec());
+    let unvaulting_inst = manager.instance(unvaulting.idx());
+    assert_eq!(unvaulting_inst.status(), ContractInstanceStatus::Funded);
+    assert_eq!(unvaulting_inst.contract().name(), "MiniUnvaulting");
+    assert_eq!(unvaulting_inst.data(), &wpk.to_vec());
 
     let unvaulting_idx = unvaulting.idx();
     unvaulting.recover(&mut manager, 0, Default::default())?;
 
-    assert_eq!(manager.instances[unvaulting_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[unvaulting_idx].spending_clause.as_deref(), Some("recover"));
+    assert_eq!(manager.instance(unvaulting_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(unvaulting_idx).spending_clause(), Some("recover"));
 
     report.write("MiniVault", format_tx_markdown(
-        manager.instances[unvaulting_idx].spending_tx.as_ref().unwrap(),
+        manager.instance(unvaulting_idx).spending_tx().unwrap(),
         "Recovery from trigger",
     ));
     report.finalize("reports/report_minivault_trigger_recover.md");
@@ -120,9 +121,9 @@ fn test_minivault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error
 
     let (_params, vault_contract) = make_test_vault(true, true);
     let spend_delay = 10u32;
-    let amount = 49_999_900u64;
+    let amount = Amount::from_sat(49_999_900u64);
 
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
     let mut report = Report::new();
 
     let vault = MiniVaultInstance::fund(&mut manager, vault_contract, vec![], amount)?;
@@ -140,9 +141,10 @@ fn test_minivault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error
             args.insert("withdrawal_pk".to_string(), wpk.to_vec());
             args
         },
-        None,
-        None,
-        Some(Sequence(spend_delay)),
+        SpendOptions {
+            sequence: Some(Sequence(spend_delay)),
+            ..Default::default()
+        },
     )?;
     let send_result = client.send_raw_transaction(&early_tx);
     assert!(send_result.is_err(), "Expected early withdraw to fail due to timelock");
@@ -157,11 +159,11 @@ fn test_minivault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error
         ..Default::default()
     })?;
 
-    assert_eq!(manager.instances[unvaulting_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[unvaulting_idx].spending_clause.as_deref(), Some("withdraw"));
+    assert_eq!(manager.instance(unvaulting_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(unvaulting_idx).spending_clause(), Some("withdraw"));
 
     report.write("MiniVault", format_tx_markdown(
-        manager.instances[unvaulting_idx].spending_tx.as_ref().unwrap(),
+        manager.instance(unvaulting_idx).spending_tx().unwrap(),
         "Withdraw",
     ));
     report.finalize("reports/report_minivault_trigger_withdraw.md");
@@ -178,9 +180,9 @@ fn test_minivault_trigger_with_revault_and_withdraw() -> Result<(), Box<dyn std:
 
     let (_params, vault_contract) = make_test_vault(true, true);
     let spend_delay = 10u32;
-    let amount = 49_999_900u64;
+    let amount = Amount::from_sat(49_999_900u64);
 
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
     let mut report = Report::new();
 
     // Fund 3 vault instances
@@ -190,40 +192,57 @@ fn test_minivault_trigger_with_revault_and_withdraw() -> Result<(), Box<dyn std:
 
     let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
     let wpk = withdrawal_pk();
-    let revault_amount = 20_000_000u64;
+    let revault_amount = Amount::from_sat(20_000_000u64);
 
     let mut output_amounts = HashMap::new();
     output_amounts.insert(1, revault_amount);
 
     let wpk_vec = wpk.to_vec();
 
-    let spends: Vec<(usize, &str, mattrs::contracts::ClauseArgs)> = vec![
-        (v1.idx(), "trigger_and_revault", {
-            let mut args = HashMap::new();
-            args.insert("out_i".to_string(), <i32 as ClauseArg>::to_bytes(&0));
-            args.insert("revault_out_i".to_string(), <i32 as ClauseArg>::to_bytes(&1));
-            args.insert("withdrawal_pk".to_string(), wpk_vec.clone());
-            args
-        }),
-        (v2.idx(), "trigger", {
-            let mut args = HashMap::new();
-            args.insert("out_i".to_string(), <i32 as ClauseArg>::to_bytes(&0));
-            args.insert("withdrawal_pk".to_string(), wpk_vec.clone());
-            args
-        }),
-        (v3.idx(), "trigger", {
-            let mut args = HashMap::new();
-            args.insert("out_i".to_string(), <i32 as ClauseArg>::to_bytes(&0));
-            args.insert("withdrawal_pk".to_string(), wpk_vec.clone());
-            args
-        }),
+    let spends: Vec<mattrs::manager::SpendSpec> = vec![
+        mattrs::manager::SpendSpec {
+            instance_idx: v1.idx(),
+            clause_name: "trigger_and_revault".to_string(),
+            args: {
+                let mut args = HashMap::new();
+                args.insert("out_i".to_string(), <i32 as ClauseArg>::to_bytes(&0));
+                args.insert("revault_out_i".to_string(), <i32 as ClauseArg>::to_bytes(&1));
+                args.insert("withdrawal_pk".to_string(), wpk_vec.clone());
+                args
+            },
+            sequence: Sequence::ZERO,
+        },
+        mattrs::manager::SpendSpec {
+            instance_idx: v2.idx(),
+            clause_name: "trigger".to_string(),
+            args: {
+                let mut args = HashMap::new();
+                args.insert("out_i".to_string(), <i32 as ClauseArg>::to_bytes(&0));
+                args.insert("withdrawal_pk".to_string(), wpk_vec.clone());
+                args
+            },
+            sequence: Sequence::ZERO,
+        },
+        mattrs::manager::SpendSpec {
+            instance_idx: v3.idx(),
+            clause_name: "trigger".to_string(),
+            args: {
+                let mut args = HashMap::new();
+                args.insert("out_i".to_string(), <i32 as ClauseArg>::to_bytes(&0));
+                args.insert("withdrawal_pk".to_string(), wpk_vec.clone());
+                args
+            },
+            sequence: Sequence::ZERO,
+        },
     ];
 
     let new_indices = manager.spend_instances(
-        spends,
-        Some(&signers),
+        &spends,
+        SpendOptions {
+            signers: Some(&signers),
+            ..Default::default()
+        },
         output_amounts,
-        Sequence::ZERO,
     )?;
 
     assert_eq!(new_indices.len(), 2);
@@ -231,13 +250,13 @@ fn test_minivault_trigger_with_revault_and_withdraw() -> Result<(), Box<dyn std:
     let unvaulting_idx = new_indices[0];
     let revault_idx = new_indices[1];
 
-    assert_eq!(manager.instances[unvaulting_idx].contract.name(), "MiniUnvaulting");
-    assert_eq!(manager.instances[unvaulting_idx].status, ContractInstanceStatus::Funded);
-    assert_eq!(manager.instances[revault_idx].contract.name(), "MiniVault");
-    assert_eq!(manager.instances[revault_idx].status, ContractInstanceStatus::Funded);
+    assert_eq!(manager.instance(unvaulting_idx).contract().name(), "MiniUnvaulting");
+    assert_eq!(manager.instance(unvaulting_idx).status(), ContractInstanceStatus::Funded);
+    assert_eq!(manager.instance(revault_idx).contract().name(), "MiniVault");
+    assert_eq!(manager.instance(revault_idx).status(), ContractInstanceStatus::Funded);
 
     report.write("MiniVault", format_tx_markdown(
-        manager.instances[v1.idx()].spending_tx.as_ref().unwrap(),
+        manager.instance(v1.idx()).spending_tx().unwrap(),
         "Trigger (with revault) [3 vault inputs]",
     ));
 
@@ -250,11 +269,11 @@ fn test_minivault_trigger_with_revault_and_withdraw() -> Result<(), Box<dyn std:
         ..Default::default()
     })?;
 
-    assert_eq!(manager.instances[unvaulting_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[unvaulting_idx].spending_clause.as_deref(), Some("withdraw"));
+    assert_eq!(manager.instance(unvaulting_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(unvaulting_idx).spending_clause(), Some("withdraw"));
 
     report.write("MiniVault", format_tx_markdown(
-        manager.instances[unvaulting_idx].spending_tx.as_ref().unwrap(),
+        manager.instance(unvaulting_idx).spending_tx().unwrap(),
         "Withdraw after revault trigger",
     ));
     report.finalize("reports/report_minivault_revault.md");

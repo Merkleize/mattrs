@@ -219,8 +219,8 @@ macro_rules! contract {
                 manager: &mut $crate::manager::ContractManager,
                 contract: $crate::contracts::Contract,
                 data: $crate::contracts::StateData,
-                amount: u64,
-            ) -> Result<Self, Box<dyn std::error::Error>> {
+                amount: bitcoin::Amount,
+            ) -> Result<Self, $crate::manager::ManagerError> {
                 Ok(Self(manager.fund_instance(contract, data, amount)?))
             }
 
@@ -315,16 +315,20 @@ macro_rules! contract {
     ) => {
         #[allow(clippy::too_many_arguments)]
         pub fn $method(
-            self,
+            &self,
             manager: &mut $crate::manager::ContractManager,
             $( $param : $ptype, )*
             signers: &$crate::signer::SignerMap,
             opts: $crate::manager::SpendOptions<'_>,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> Result<(), $crate::manager::ManagerError> {
             #[allow(unused_mut)]
             let mut args = std::collections::HashMap::new();
             $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
-            manager.spend_instance(self.0, stringify!($method), args, Some(signers), opts.outputs, opts.sequence)?;
+            manager.spend_instance(self.0, stringify!($method), args, $crate::manager::SpendOptions {
+                signers: Some(signers),
+                outputs: opts.outputs,
+                sequence: opts.sequence,
+            })?;
             Ok(())
         }
     };
@@ -338,15 +342,19 @@ macro_rules! contract {
         -> ()
     ) => {
         pub fn $method(
-            self,
+            &self,
             manager: &mut $crate::manager::ContractManager,
             $( $param : $ptype, )*
             opts: $crate::manager::SpendOptions<'_>,
-        ) -> Result<(), Box<dyn std::error::Error>> {
+        ) -> Result<(), $crate::manager::ManagerError> {
             #[allow(unused_mut)]
             let mut args = std::collections::HashMap::new();
             $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
-            manager.spend_instance(self.0, stringify!($method), args, None, opts.outputs, opts.sequence)?;
+            manager.spend_instance(self.0, stringify!($method), args, $crate::manager::SpendOptions {
+                outputs: opts.outputs,
+                sequence: opts.sequence,
+                ..Default::default()
+            })?;
             Ok(())
         }
     };
@@ -360,14 +368,17 @@ macro_rules! contract {
         -> ( $( $ret:ident ),* )
     ) => {
         pub fn $method(
-            self,
+            &self,
             manager: &mut $crate::manager::ContractManager,
             $( $param : $ptype, )*
             signers: &$crate::signer::SignerMap,
-        ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
+        ) -> Result<( $( $ret, )* ), $crate::manager::ManagerError> {
             let mut args = std::collections::HashMap::new();
             $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
-            let _indices = manager.spend_instance(self.0, stringify!($method), args, Some(signers), None, None)?;
+            let _indices = manager.spend_instance(self.0, stringify!($method), args, $crate::manager::SpendOptions {
+                signers: Some(signers),
+                ..Default::default()
+            })?;
             contract!(@return _indices, 0usize, $( $ret ),* )
         }
     };
@@ -381,13 +392,13 @@ macro_rules! contract {
         -> ( $( $ret:ident ),* )
     ) => {
         pub fn $method(
-            self,
+            &self,
             manager: &mut $crate::manager::ContractManager,
             $( $param : $ptype, )*
-        ) -> Result<( $( $ret, )* ), Box<dyn std::error::Error>> {
+        ) -> Result<( $( $ret, )* ), $crate::manager::ManagerError> {
             let mut args = std::collections::HashMap::new();
             $( { let (k, v) = $ins; args.insert(k.to_string(), v); } )*
-            let _indices = manager.spend_instance(self.0, stringify!($method), args, None, None, None)?;
+            let _indices = manager.spend_instance(self.0, stringify!($method), args, Default::default())?;
             contract!(@return _indices, 0usize, $( $ret ),* )
         }
     };

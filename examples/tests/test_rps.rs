@@ -1,6 +1,7 @@
 mod common;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use bitcoin::{Amount, TxOut};
 use bitcoincore_rpc::RpcApi;
@@ -27,14 +28,15 @@ fn build_s1_spend_tx(
     clause_args.insert("m_a".to_string(), <i32 as ClauseArg>::to_bytes(&m_a));
     clause_args.insert("r_a".to_string(), r_a.to_vec());
 
-    manager.build_spend_tx(
+    Ok(manager.build_spend_tx(
         s1_idx,
         clause_name,
         clause_args,
-        Some(ctv_outputs),
-        None,
-        None,
-    )
+        SpendOptions {
+            outputs: Some(ctv_outputs),
+            ..Default::default()
+        },
+    )?)
 }
 
 #[test]
@@ -62,13 +64,13 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let s0_contract = make_rps_s0(&params);
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
     let mut report = Report::new();
 
     // --- Step 1: Fund S0 ---
-    let s0 = RpsS0Instance::fund(&mut manager, s0_contract, vec![], 2 * stake)?;
-    assert_eq!(manager.instances[s0.idx()].status, ContractInstanceStatus::Funded);
-    println!("S0 funded at {:?}", manager.instances[s0.idx()].outpoint.unwrap());
+    let s0 = RpsS0Instance::fund(&mut manager, s0_contract, vec![], Amount::from_sat(2 * stake))?;
+    assert_eq!(manager.instance(s0.idx()).status(), ContractInstanceStatus::Funded);
+    println!("S0 funded at {:?}", manager.instance(s0.idx()).outpoint().unwrap());
 
     // --- Step 2: Bob plays paper (m_b=1) ---
     let signers: SignerMap = common::make_signers(&[(bob_pk, bob_privkey)]);
@@ -78,20 +80,20 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
     let (s1,) = s0.bob_move(&mut manager, m_b, &signers)?;
 
     // Verify S0 is spent
-    assert_eq!(manager.instances[s0_idx].status, ContractInstanceStatus::Spent);
-    assert_eq!(manager.instances[s0_idx].spending_clause.as_deref(), Some("bob_move"));
+    assert_eq!(manager.instance(s0_idx).status(), ContractInstanceStatus::Spent);
+    assert_eq!(manager.instance(s0_idx).spending_clause(), Some("bob_move"));
     report.write("RPS", format_tx_markdown(
-        manager.instances[s0_idx].spending_tx.as_ref().unwrap(),
+        manager.instance(s0_idx).spending_tx().unwrap(),
         "Bob move",
     ));
 
     // Verify S1 instance is funded with correct state: SHA256(scriptint(m_b))
-    let s1_inst = &manager.instances[s1.idx()];
-    assert_eq!(s1_inst.status, ContractInstanceStatus::Funded);
-    assert_eq!(s1_inst.contract.name(), "RpsS1");
+    let s1_inst = manager.instance(s1.idx());
+    assert_eq!(s1_inst.status(), ContractInstanceStatus::Funded);
+    assert_eq!(s1_inst.contract().name(), "RpsS1");
     let expected_state = mattrs::sha256(&<i32 as ClauseArg>::to_bytes(&m_b));
-    assert_eq!(s1_inst.data, expected_state.to_vec());
-    println!("S1 funded at {:?}", s1_inst.outpoint.unwrap());
+    assert_eq!(s1_inst.data(), &expected_state.to_vec());
+    println!("S1 funded at {:?}", s1_inst.outpoint().unwrap());
 
     // --- Step 3: Precompute CTV outputs for each outcome ---
     let alice_addr = Contract::new_opaque_p2tr(alice_pk).get_address(&vec![]);
@@ -151,11 +153,11 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
         // Terminal clause: no tracked outputs
-        assert_eq!(manager.instances[s1_idx].status, ContractInstanceStatus::Spent);
-        assert_eq!(manager.instances[s1_idx].spending_clause.as_deref(), Some("bob_wins"));
+        assert_eq!(manager.instance(s1_idx).status(), ContractInstanceStatus::Spent);
+        assert_eq!(manager.instance(s1_idx).spending_clause(), Some("bob_wins"));
 
         report.write("RPS", format_tx_markdown(
-            manager.instances[s1_idx].spending_tx.as_ref().unwrap(),
+            manager.instance(s1_idx).spending_tx().unwrap(),
             "Bob wins",
         ));
     }

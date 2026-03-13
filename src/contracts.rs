@@ -330,19 +330,18 @@ pub enum ContractInstanceStatus {
 /// A live instance of a contract, tracking its lifecycle.
 #[derive(Debug)]
 pub struct ContractInstance {
-    pub contract: Contract,
-    pub status: ContractInstanceStatus,
-    pub data: StateData,
+    pub(crate) contract: Contract,
+    pub(crate) status: ContractInstanceStatus,
+    pub(crate) data: StateData,
 
-    pub outpoint: Option<OutPoint>,
-    pub funding_tx: Option<Transaction>,
+    pub(crate) outpoint: Option<OutPoint>,
+    pub(crate) funding_tx: Option<Transaction>,
 
-    pub spending_tx: Option<Transaction>,
-    pub spending_vin: Option<usize>,
-    pub spending_clause: Option<String>,
-    pub spending_args: Option<ClauseArgs>,
-    pub next: Option<Vec<ContractInstance>>,
-    pub last_height: Option<u64>,
+    pub(crate) spending_tx: Option<Transaction>,
+    pub(crate) spending_vin: Option<usize>,
+    pub(crate) spending_clause: Option<String>,
+    pub(crate) spending_args: Option<ClauseArgs>,
+    pub(crate) last_height: Option<u64>,
 }
 
 impl ContractInstance {
@@ -357,7 +356,6 @@ impl ContractInstance {
             spending_vin: None,
             spending_clause: None,
             spending_args: None,
-            next: None,
             last_height: None,
         }
     }
@@ -368,5 +366,45 @@ impl ContractInstance {
 
     pub fn get_internal_pubkey(&self) -> XOnlyPublicKey {
         self.contract.get_internal_pubkey(&self.data)
+    }
+
+    pub fn contract(&self) -> &Contract {
+        &self.contract
+    }
+
+    pub fn status(&self) -> ContractInstanceStatus {
+        self.status
+    }
+
+    pub fn data(&self) -> &StateData {
+        &self.data
+    }
+
+    pub fn outpoint(&self) -> Option<OutPoint> {
+        self.outpoint
+    }
+
+    pub fn funding_tx(&self) -> Option<&Transaction> {
+        self.funding_tx.as_ref()
+    }
+
+    pub fn spending_tx(&self) -> Option<&Transaction> {
+        self.spending_tx.as_ref()
+    }
+
+    pub fn spending_vin(&self) -> Option<usize> {
+        self.spending_vin
+    }
+
+    pub fn spending_clause(&self) -> Option<&str> {
+        self.spending_clause.as_deref()
+    }
+
+    pub fn spending_args(&self) -> Option<&ClauseArgs> {
+        self.spending_args.as_ref()
+    }
+
+    pub fn last_height(&self) -> Option<u64> {
+        self.last_height
     }
 }

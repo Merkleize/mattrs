@@ -4,21 +4,36 @@ use std::time::Duration;
 
 use bitcoin::{Amount, OutPoint, Script, Sequence, Transaction, TxOut, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
+use thiserror::Error;
 
 use crate::{
     contracts::{ClauseArgs, Contract, ContractInstance, ContractInstanceStatus, StateData},
     signer::SignerMap,
-    tx,
+    tx::{self, SpendTxError},
 };
+
+#[derive(Error, Debug)]
+pub enum ManagerError {
+    #[error(transparent)]
+    Rpc(#[from] bitcoincore_rpc::Error),
+    #[error(transparent)]
+    SpendTx(#[from] SpendTxError),
+    #[error("Instance {0} is not in FUNDED state")]
+    NotFunded(usize),
+    #[error("Instance {0} has no outpoint")]
+    NoOutpoint(usize),
+    #[error("{0}")]
+    Other(String),
+}
 
 /// Polls the blockchain for an output matching the given scriptPubKey.
 pub fn wait_for_output(
     rpc: &Client,
     script_pub_key: &Script,
-    poll_interval: f64,
+    poll_interval: Duration,
     starting_height: Option<u64>,
     txid: Option<Txid>,
-) -> Result<(OutPoint, u64), Box<dyn std::error::Error>> {
+) -> Result<(OutPoint, u64), ManagerError> {
     let mut last_block_height = match starting_height {
         Some(h) => h.saturating_sub(1),
         None => rpc.get_block_count()?,
@@ -27,7 +42,7 @@ pub fn wait_for_output(
     loop {
         let current_block_height = rpc.get_block_count()?;
         if last_block_height > current_block_height {
-            sleep(Duration::from_secs_f64(poll_interval));
+            sleep(poll_interval);
             continue;
         }
 
@@ -52,7 +67,7 @@ pub fn wait_for_output(
         }
 
         last_block_height += 1;
-        sleep(Duration::from_secs_f64(poll_interval));
+        sleep(poll_interval);
     }
 }
 
@@ -61,14 +76,14 @@ pub fn wait_for_spending_tx(
     rpc: &Client,
     outpoint: OutPoint,
     starting_height: u64,
-    poll_interval: f64,
-) -> Result<(Transaction, usize, u64), Box<dyn std::error::Error>> {
+    poll_interval: Duration,
+) -> Result<(Transaction, usize, u64), ManagerError> {
     let mut last_block_height = starting_height;
 
     loop {
         let current_block_height = rpc.get_block_count()?;
         if last_block_height > current_block_height {
-            sleep(Duration::from_secs_f64(poll_interval));
+            sleep(poll_interval);
             continue;
         }
 
@@ -86,7 +101,7 @@ pub fn wait_for_spending_tx(
         }
 
         last_block_height = current_block_height + 1;
-        sleep(Duration::from_secs_f64(poll_interval));
+        sleep(poll_interval);
     }
 }
 
@@ -95,14 +110,14 @@ fn wait_for_spending_transaction(
     rpc: &Client,
     outpoints: &HashSet<OutPoint>,
     starting_height: u64,
-    poll_interval: f64,
-) -> Result<(Transaction, u64), Box<dyn std::error::Error>> {
+    poll_interval: Duration,
+) -> Result<(Transaction, u64), ManagerError> {
     let mut last_block_height = starting_height;
 
     loop {
         let current_block_height = rpc.get_block_count()?;
         if last_block_height > current_block_height {
-            sleep(Duration::from_secs_f64(poll_interval));
+            sleep(poll_interval);
             continue;
         }
 
@@ -122,44 +137,70 @@ fn wait_for_spending_transaction(
                     if &tx_spends == outpoints {
                         return Ok((tx, height));
                     } else {
-                        return Err(format!(
+                        return Err(ManagerError::Other(format!(
                             "Transaction {} spends some but not all outpoints",
                             tx.compute_txid()
-                        )
-                        .into());
+                        )));
                     }
                 }
             }
         }
 
         last_block_height = current_block_height + 1;
-        sleep(Duration::from_secs_f64(poll_interval));
+        sleep(poll_interval);
     }
 }
 
-/// Options for terminal clause spends (outputs and sequence).
+/// Options for spending: signers, explicit outputs, and sequence.
 #[derive(Debug, Clone, Default)]
 pub struct SpendOptions<'a> {
+    pub signers: Option<&'a SignerMap>,
     pub outputs: Option<&'a [TxOut]>,
     pub sequence: Option<Sequence>,
 }
 
+/// Re-export SpendSpec from tx module.
+pub use tx::SpendSpec;
+
 /// Manages contract instances. Works entirely with concrete types.
 pub struct ContractManager<'a> {
     pub rpc: &'a Client,
-    pub instances: Vec<ContractInstance>,
-    pub poll_interval: f64,
+    pub(crate) instances: Vec<ContractInstance>,
+    pub poll_interval: Duration,
     pub automine: bool,
 }
 
 impl<'a> ContractManager<'a> {
-    pub fn new(rpc: &'a Client, poll_interval: f64, automine: bool) -> Self {
+    pub fn new(rpc: &'a Client, poll_interval: Duration, automine: bool) -> Self {
         Self {
             rpc,
             instances: vec![],
             poll_interval,
             automine,
         }
+    }
+
+    pub fn instance(&self, idx: usize) -> &ContractInstance {
+        &self.instances[idx]
+    }
+
+    pub fn instance_count(&self) -> usize {
+        self.instances.len()
+    }
+
+    /// Marks an instance as funded with the given outpoint, funding transaction, and block height.
+    /// Use this when funding is handled externally (e.g., waiting for a remote party's tx).
+    pub fn set_instance_funded(
+        &mut self,
+        idx: usize,
+        outpoint: OutPoint,
+        funding_tx: Transaction,
+        height: u64,
+    ) {
+        self.instances[idx].outpoint = Some(outpoint);
+        self.instances[idx].funding_tx = Some(funding_tx);
+        self.instances[idx].status = ContractInstanceStatus::Funded;
+        self.instances[idx].last_height = Some(height);
     }
 
     pub fn mine_blocks(&self, count: u64) -> Result<(), bitcoincore_rpc::Error> {
@@ -181,17 +222,16 @@ impl<'a> ContractManager<'a> {
         &mut self,
         contract: Contract,
         data: StateData,
-        amount: u64,
-    ) -> Result<usize, Box<dyn std::error::Error>> {
+        amount: Amount,
+    ) -> Result<usize, ManagerError> {
         let mut inst = ContractInstance::new(contract, data);
         let address = inst.get_address();
 
         let starting_height = self.rpc.get_block_count()?;
 
-        let amount_btc = Amount::from_sat(amount);
         let txid = self
             .rpc
-            .send_to_address(&address, amount_btc, None, None, None, None, None, None)?;
+            .send_to_address(&address, amount, None, None, None, None, None, None)?;
 
         if self.automine {
             self.mine_blocks(1)?;
@@ -223,18 +263,16 @@ impl<'a> ContractManager<'a> {
         instance_idx: usize,
         clause_name: &str,
         args: ClauseArgs,
-        signers: Option<&SignerMap>,
-        outputs: Option<&[TxOut]>,
-        sequence: Option<Sequence>,
-    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+        opts: SpendOptions<'_>,
+    ) -> Result<Vec<usize>, ManagerError> {
         let spend_tx = tx::get_spend_tx(
             &self.instances,
             instance_idx,
             clause_name,
             args,
-            outputs,
-            signers,
-            sequence.unwrap_or(Sequence::ZERO),
+            opts.outputs,
+            opts.signers,
+            opts.sequence.unwrap_or(Sequence::ZERO),
         )?;
 
         self.rpc.send_raw_transaction(&spend_tx)?;
@@ -253,12 +291,12 @@ impl<'a> ContractManager<'a> {
         &mut self,
         instance_indices: &[usize],
         tx: &Transaction,
-    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<usize>, ManagerError> {
         let cur_height = self.rpc.get_block_count()?;
 
         for &idx in instance_indices {
             if self.instances[idx].status != ContractInstanceStatus::Funded {
-                return Err("All instances should be FUNDED".into());
+                return Err(ManagerError::NotFunded(idx));
             }
             self.instances[idx].last_height = Some(cur_height);
         }
@@ -279,56 +317,42 @@ impl<'a> ContractManager<'a> {
         instance_idx: usize,
         clause_name: &str,
         args: ClauseArgs,
-        outputs: Option<&[TxOut]>,
-        signers: Option<&SignerMap>,
-        sequence: Option<Sequence>,
-    ) -> Result<Transaction, Box<dyn std::error::Error>> {
+        opts: SpendOptions<'_>,
+    ) -> Result<Transaction, ManagerError> {
         Ok(tx::get_spend_tx(
             &self.instances,
             instance_idx,
             clause_name,
             args,
-            outputs,
-            signers,
-            sequence.unwrap_or(Sequence::ZERO),
+            opts.outputs,
+            opts.signers,
+            opts.sequence.unwrap_or(Sequence::ZERO),
         )?)
     }
 
     /// Builds a multi-input spend transaction, signs, broadcasts, and waits for confirmation.
-    /// Each element of `spends` is (instance_idx, clause_name, args).
     /// Returns indices of new instances created from clause outputs.
     pub fn spend_instances(
         &mut self,
-        spends: Vec<(usize, &str, ClauseArgs)>,
-        signers: Option<&SignerMap>,
-        output_amounts: HashMap<usize, u64>,
-        sequence: Sequence,
-    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
-        let spend_specs: Vec<tx::SpendSpec> = spends
-            .iter()
-            .map(|(idx, clause_name, args)| tx::SpendSpec {
-                instance_idx: *idx,
-                clause_name: clause_name.to_string(),
-                args: args.clone(),
-                sequence,
-            })
-            .collect();
-
+        spends: &[SpendSpec],
+        opts: SpendOptions<'_>,
+        output_amounts: HashMap<usize, Amount>,
+    ) -> Result<Vec<usize>, ManagerError> {
         let (mut spend_tx, sighashes) =
-            tx::create_spend_tx(&self.instances, &spend_specs, &output_amounts, &[])?;
+            tx::create_spend_tx(&self.instances, spends, &output_amounts, &[])?;
 
-        for (i, (idx, clause_name, args)) in spends.into_iter().enumerate() {
-            let mut args = args;
+        for (i, spend) in spends.iter().enumerate() {
+            let mut args = spend.args.clone();
             spend_tx.input[i].witness = tx::build_witness(
-                &self.instances[idx],
-                clause_name,
+                &self.instances[spend.instance_idx],
+                &spend.clause_name,
                 &mut args,
                 &sighashes[i],
-                signers,
+                opts.signers,
             )?;
         }
 
-        let instance_indices: Vec<usize> = spend_specs.iter().map(|s| s.instance_idx).collect();
+        let instance_indices: Vec<usize> = spends.iter().map(|s| s.instance_idx).collect();
         self.spend_and_wait(&instance_indices, &spend_tx)
     }
 
@@ -338,14 +362,14 @@ impl<'a> ContractManager<'a> {
         &mut self,
         instance_indices: &[usize],
         starting_height: u64,
-    ) -> Result<Vec<usize>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<usize>, ManagerError> {
         // Collect outpoints
         let outpoints_set: HashSet<OutPoint> = instance_indices
             .iter()
             .map(|&idx| {
                 self.instances[idx]
                     .outpoint
-                    .ok_or("Instance has no outpoint")
+                    .ok_or(ManagerError::NoOutpoint(idx))
             })
             .collect::<Result<HashSet<_>, _>>()?;
 

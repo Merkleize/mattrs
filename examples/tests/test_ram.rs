@@ -1,5 +1,7 @@
 mod common;
 
+use std::time::Duration;
+
 use bitcoin::{Amount, TxOut};
 
 use mattrs::{
@@ -11,7 +13,7 @@ use mattrs::{
 };
 use mattrs_examples::ram::{make_ram, proof_to_arg, RamInstance};
 
-const AMOUNT: u64 = 20_000;
+const AMOUNT: Amount = Amount::from_sat(20_000);
 
 #[test]
 fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,7 +27,7 @@ fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
             let ram = make_ram(size);
             let state = mt.root().to_vec();
-            let mut manager = ContractManager::new(&client, 0.1, true);
+            let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
             let ram = RamInstance::fund(&mut manager, ram, state, AMOUNT)?;
             let ram_idx = ram.idx();
 
@@ -41,7 +43,7 @@ fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
             );
             let outputs = vec![TxOut {
                 script_pubkey: dummy_script,
-                value: Amount::from_sat(AMOUNT),
+                value: AMOUNT,
             }];
 
             ram.withdraw(&mut manager, proof_to_arg(&proof), mt.root(), SpendOptions {
@@ -50,7 +52,7 @@ fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
             })?;
 
             assert_eq!(
-                manager.instances[ram_idx].status,
+                manager.instance(ram_idx).status(),
                 ContractInstanceStatus::Spent
             );
             println!(
@@ -77,14 +79,14 @@ fn test_write() -> Result<(), Box<dyn std::error::Error>> {
 
     let ram = make_ram(size);
     let state = mt.root().to_vec();
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
     let ram = RamInstance::fund(&mut manager, ram, state, AMOUNT)?;
 
     let proof = mt.prove_leaf(leaf_index);
     let (new_ram,) = ram.write(&mut manager, proof_to_arg(&proof), new_value, mt.root())?;
 
     assert_eq!(
-        manager.instances[new_ram.idx()].contract.name(),
+        manager.instance(new_ram.idx()).contract().name(),
         format!("RAM_{}", size)
     );
 
@@ -93,8 +95,8 @@ fn test_write() -> Result<(), Box<dyn std::error::Error>> {
     modified_leaves[leaf_index] = new_value;
     let expected_root = MerkleTree::new(modified_leaves).root();
     assert_eq!(
-        manager.instances[new_ram.idx()].data,
-        expected_root.to_vec()
+        manager.instance(new_ram.idx()).data(),
+        &expected_root.to_vec()
     );
 
     println!("test_write passed!");
@@ -111,7 +113,7 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
 
     let ram = make_ram(size);
     let state = MerkleTree::new(leaves.clone()).root().to_vec();
-    let mut manager = ContractManager::new(&client, 0.1, true);
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);
     let initial_ram = RamInstance::fund(&mut manager, ram, state, AMOUNT)?;
     let mut cur_idx = initial_ram.idx();
 
@@ -128,7 +130,7 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
         let (new_ram,) = ram.write(&mut manager, proof_to_arg(&proof), new_value, mt.root())?;
 
         assert_eq!(
-            manager.instances[new_ram.idx()].contract.name(),
+            manager.instance(new_ram.idx()).contract().name(),
             format!("RAM_{}", size)
         );
 
@@ -136,8 +138,8 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
         leaves[leaf_index] = new_value;
         let expected_root = MerkleTree::new(leaves.clone()).root();
         assert_eq!(
-            manager.instances[new_ram.idx()].data,
-            expected_root.to_vec(),
+            manager.instance(new_ram.idx()).data(),
+            &expected_root.to_vec(),
             "Root mismatch at iteration {}",
             i
         );
@@ -145,7 +147,7 @@ fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
         report.write(
             "RAM write loop",
             format_tx_markdown(
-                manager.instances[cur_idx].spending_tx.as_ref().unwrap(),
+                manager.instance(cur_idx).spending_tx().unwrap(),
                 &format!("Write iteration {} (leaf {})", i, leaf_index),
             ),
         );
