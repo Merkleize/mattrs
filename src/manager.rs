@@ -27,7 +27,7 @@ pub enum ManagerError {
 }
 
 /// Polls the blockchain for an output matching the given scriptPubKey.
-pub fn wait_for_output(
+fn poll_for_output(
     rpc: &Client,
     script_pub_key: &Script,
     poll_interval: Duration,
@@ -188,21 +188,6 @@ impl<'a> ContractManager<'a> {
         self.instances.len()
     }
 
-    /// Marks an instance as funded with the given outpoint, funding transaction, and block height.
-    /// Use this when funding is handled externally (e.g., waiting for a remote party's tx).
-    pub fn set_instance_funded(
-        &mut self,
-        idx: usize,
-        outpoint: OutPoint,
-        funding_tx: Transaction,
-        height: u64,
-    ) {
-        self.instances[idx].outpoint = Some(outpoint);
-        self.instances[idx].funding_tx = Some(funding_tx);
-        self.instances[idx].status = ContractInstanceStatus::Funded;
-        self.instances[idx].last_height = Some(height);
-    }
-
     pub fn mine_blocks(&self, count: u64) -> Result<(), bitcoincore_rpc::Error> {
         let addr = self.rpc.get_new_address(None, None)?.assume_checked();
         self.rpc.generate_to_address(count, &addr)?;
@@ -216,6 +201,36 @@ impl<'a> ContractManager<'a> {
         idx
     }
 
+    /// Polls for a funding output for the given instance, fetches the funding tx,
+    /// and updates the instance status to Funded. Returns the instance index.
+    pub fn wait_for_output(
+        &mut self,
+        instance_idx: usize,
+        starting_height: Option<u64>,
+        txid: Option<Txid>,
+    ) -> Result<usize, ManagerError> {
+        let spk = self.instances[instance_idx]
+            .get_address()
+            .script_pubkey();
+
+        let (outpoint, last_height) = poll_for_output(
+            self.rpc,
+            spk.as_script(),
+            self.poll_interval,
+            starting_height,
+            txid,
+        )?;
+
+        let funding_tx = self.rpc.get_raw_transaction(&outpoint.txid, None)?;
+
+        self.instances[instance_idx].outpoint = Some(outpoint);
+        self.instances[instance_idx].funding_tx = Some(funding_tx);
+        self.instances[instance_idx].status = ContractInstanceStatus::Funded;
+        self.instances[instance_idx].last_height = Some(last_height);
+
+        Ok(instance_idx)
+    }
+
     /// Creates a new contract instance, funds it on-chain, and adds it to the manager.
     /// Returns the index of the new instance.
     pub fn fund_instance(
@@ -224,11 +239,12 @@ impl<'a> ContractManager<'a> {
         data: StateData,
         amount: Amount,
     ) -> Result<usize, ManagerError> {
-        let mut inst = ContractInstance::new(contract, data);
-        let address = inst.get_address();
+        let inst = ContractInstance::new(contract, data);
+        let idx = self.add_instance(inst);
 
         let starting_height = self.rpc.get_block_count()?;
 
+        let address = self.instances[idx].get_address();
         let txid = self
             .rpc
             .send_to_address(&address, amount, None, None, None, None, None, None)?;
@@ -237,22 +253,9 @@ impl<'a> ContractManager<'a> {
             self.mine_blocks(1)?;
         }
 
-        let (outpoint, last_height) = wait_for_output(
-            self.rpc,
-            address.script_pubkey().as_script(),
-            self.poll_interval,
-            Some(starting_height),
-            Some(txid),
-        )?;
+        self.wait_for_output(idx, Some(starting_height), Some(txid))?;
 
-        let funding_tx = self.rpc.get_raw_transaction(&txid, None)?;
-
-        inst.outpoint = Some(outpoint);
-        inst.status = ContractInstanceStatus::Funded;
-        inst.funding_tx = Some(funding_tx);
-        inst.last_height = Some(last_height);
-
-        Ok(self.add_instance(inst))
+        Ok(idx)
     }
 
     /// Spends a single instance using the given clause and args.

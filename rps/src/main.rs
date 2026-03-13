@@ -15,7 +15,7 @@ use clap::Parser;
 
 use mattrs::{
     contracts::{ClauseArg, ClauseArgs, Contract, ContractInstance},
-    manager::{self, ContractManager, SpendOptions},
+    manager::{ContractManager, SpendOptions},
     signer::{HotSigner, SignerMap},
 };
 use mattrs_examples::rps::*;
@@ -173,18 +173,8 @@ fn run_alice(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         let inst = ContractInstance::new(s0_contract, vec![]);
         let idx = mgr.add_instance(inst);
-        let address = mgr.instance(idx).get_address();
-        println!("Waiting for funding to: {}", address);
-        let (outpoint, height) = manager::wait_for_output(
-            &client,
-            address.script_pubkey().as_script(),
-            Duration::from_secs_f64(0.5),
-            None,
-            None,
-        )?;
-        let funding_tx = client.get_raw_transaction(&outpoint.txid, None)?;
-        mgr.set_instance_funded(idx, outpoint, funding_tx, height);
-        idx
+        println!("Waiting for funding to: {}", mgr.instance(idx).get_address());
+        mgr.wait_for_output(idx, None, None)?
     };
 
     println!(
@@ -302,15 +292,7 @@ fn run_bob(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     println!("Bob waiting for output: {}", address);
 
     // Wait for Alice's funding tx
-    let (outpoint, height) = manager::wait_for_output(
-        &client,
-        address.script_pubkey().as_script(),
-        Duration::from_secs_f64(0.5),
-        None,
-        None,
-    )?;
-    let funding_tx = client.get_raw_transaction(&outpoint.txid, None)?;
-    mgr.set_instance_funded(s0_idx, outpoint, funding_tx, height);
+    mgr.wait_for_output(s0_idx, None, None)?;
 
     // Play Bob's move
     let m_b_hash = mattrs::sha256(&<i32 as ClauseArg>::to_bytes(&m_b));
