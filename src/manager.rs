@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "inspector")]
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -168,6 +170,10 @@ pub struct ContractManager<'a> {
     pub(crate) instances: Vec<ContractInstance>,
     pub poll_interval: Duration,
     pub automine: bool,
+    #[cfg(feature = "inspector")]
+    inspector_state: Option<Arc<Mutex<crate::inspector::ManagerSnapshot>>>,
+    #[cfg(feature = "inspector")]
+    inspector_notify: Option<Arc<Condvar>>,
 }
 
 impl<'a> ContractManager<'a> {
@@ -177,6 +183,10 @@ impl<'a> ContractManager<'a> {
             instances: vec![],
             poll_interval,
             automine,
+            #[cfg(feature = "inspector")]
+            inspector_state: None,
+            #[cfg(feature = "inspector")]
+            inspector_notify: None,
         }
     }
 
@@ -194,10 +204,55 @@ impl<'a> ContractManager<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "inspector")]
+    fn build_snapshot(&self) -> crate::inspector::ManagerSnapshot {
+        crate::inspector::ManagerSnapshot {
+            timestamp_ms: crate::inspector::now_ms(),
+            instances: self
+                .instances
+                .iter()
+                .enumerate()
+                .map(|(i, inst)| crate::inspector::snapshot_instance(i, inst))
+                .collect(),
+        }
+    }
+
+    #[cfg(feature = "inspector")]
+    fn notify_inspector(&self) {
+        if let (Some(state), Some(notify)) = (&self.inspector_state, &self.inspector_notify) {
+            let snap = self.build_snapshot();
+            *state.lock().unwrap() = snap;
+            notify.notify_all();
+        }
+    }
+
+    /// Enable the inspector server on the given port.
+    #[cfg(feature = "inspector")]
+    pub fn enable_inspector(&mut self, port: u16) {
+        let snap = self.build_snapshot();
+        let state = Arc::new(Mutex::new(snap));
+        let notify = Arc::new(Condvar::new());
+        crate::inspector::start_inspector_server(
+            Arc::clone(&state),
+            Arc::clone(&notify),
+            port,
+        );
+        self.inspector_state = Some(state);
+        self.inspector_notify = Some(notify);
+    }
+
+    /// Enable the inspector server on the default port (34443).
+    #[cfg(feature = "inspector")]
+    pub fn enable_inspector_default(&mut self) {
+        self.enable_inspector(34443);
+    }
+
     /// Adds a pre-built ContractInstance to the manager. Returns its index.
     pub fn add_instance(&mut self, instance: ContractInstance) -> usize {
         let idx = self.instances.len();
         self.instances.push(instance);
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
         idx
     }
 
@@ -227,6 +282,9 @@ impl<'a> ContractManager<'a> {
         self.instances[instance_idx].funding_tx = Some(funding_tx);
         self.instances[instance_idx].status = ContractInstanceStatus::Funded;
         self.instances[instance_idx].last_height = Some(last_height);
+
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
 
         Ok(instance_idx)
     }
@@ -392,8 +450,13 @@ impl<'a> ContractManager<'a> {
 
         let mut new_indices = Vec::new();
         for inst in new_instances {
-            new_indices.push(self.add_instance(inst));
+            let idx = self.instances.len();
+            self.instances.push(inst);
+            new_indices.push(idx);
         }
+
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
 
         Ok(new_indices)
     }

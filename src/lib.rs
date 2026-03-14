@@ -1,5 +1,8 @@
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
+#[cfg(feature = "inspector")]
+pub mod inspector;
+
 pub mod ccv;
 pub mod report;
 pub mod contracts;

@@ -76,9 +76,28 @@ struct Cli {
     /// Port number
     #[arg(long, default_value_t = 12345)]
     port: u16,
+
+    /// Enable inspector server (default port 34443)
+    #[arg(long)]
+    inspector: bool,
+
+    /// Inspector server port (implies --inspector)
+    #[arg(long)]
+    inspector_port: Option<u16>,
 }
 
 impl Cli {
+    #[cfg(feature = "inspector")]
+    fn inspector_port(&self) -> Option<u16> {
+        if let Some(port) = self.inspector_port {
+            Some(port)
+        } else if self.inspector {
+            Some(34443)
+        } else {
+            None
+        }
+    }
+
     fn chosen_move(&self) -> i32 {
         if self.rock {
             0
@@ -174,6 +193,12 @@ fn run_alice(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let client = get_rpc_client("testwallet");
     ensure_funds(&client);
     let mut mgr = ContractManager::new(&client, Duration::from_secs_f64(0.1), cli.mine_automatically);
+
+    #[cfg(feature = "inspector")]
+    if let Some(port) = cli.inspector_port() {
+        mgr.enable_inspector(port);
+        println!("Inspector server listening on 127.0.0.1:{}", port);
+    }
 
     let s0_contract = make_rps_s0(&params);
 
@@ -292,6 +317,12 @@ fn run_bob(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     let client = get_rpc_client("testwallet");
     let mut mgr = ContractManager::new(&client, Duration::from_secs_f64(0.1), cli.mine_automatically);
+
+    #[cfg(feature = "inspector")]
+    if let Some(port) = cli.inspector_port() {
+        mgr.enable_inspector(port);
+        println!("Inspector server listening on 127.0.0.1:{}", port);
+    }
 
     let s0_contract = make_rps_s0(&params);
     let inst = ContractInstance::new(s0_contract, vec![]);

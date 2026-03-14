@@ -187,9 +187,11 @@ fn parse_outputs(output_strings: &[String]) -> Result<Vec<(Address, Amount)>, St
 }
 
 /// Parse a JSON array string like `["foo", "bar"]` or `[1, 2]` into a Vec of strings.
+/// Also accepts single quotes for convenience (e.g. `['foo', 'bar']`).
 fn parse_json_array(s: &str) -> Result<Vec<String>, String> {
+    let normalized = s.replace('\'', "\"");
     let val: serde_json::Value =
-        serde_json::from_str(s).map_err(|e| format!("Invalid JSON: {}", e))?;
+        serde_json::from_str(&normalized).map_err(|e| format!("Invalid JSON: {}", e))?;
     match val {
         serde_json::Value::Array(arr) => arr
             .into_iter()
@@ -547,6 +549,7 @@ fn encode_scriptint(val: i32) -> Vec<u8> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut mine_automatically = false;
     let mut script_file: Option<String> = None;
+    let mut inspector_port: Option<u16> = None;
 
     // Simple arg parsing (no heavy deps)
     let args: Vec<String> = std::env::args().collect();
@@ -562,13 +565,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .clone(),
                 );
             }
+            "--inspector" => inspector_port = Some(34443),
+            "--inspector-port" => {
+                i += 1;
+                inspector_port = Some(
+                    args.get(i)
+                        .ok_or("--inspector-port requires a port number")?
+                        .parse()?,
+                );
+            }
             "-h" | "--help" => {
                 println!("Usage: vault-cli [OPTIONS]");
                 println!();
                 println!("Options:");
-                println!("  -m, --mine-automatically  Mine a block after each operation");
-                println!("  -s, --script <FILE>       Execute commands from a script file");
-                println!("  -h, --help                Show this help");
+                println!("  -m, --mine-automatically    Mine a block after each operation");
+                println!("  -s, --script <FILE>         Execute commands from a script file");
+                println!("  --inspector                 Enable inspector server (port 34443)");
+                println!("  --inspector-port <PORT>     Enable inspector server on custom port");
+                println!("  -h, --help                  Show this help");
                 println!();
                 println!("Commands:");
                 println!("  fund amount=<sats>                          Fund a new vault");
@@ -622,7 +636,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = format!("{}/wallet/{}", rpc_url, wallet_name);
     let client = Client::new(&url, Auth::UserPass(rpc_user, rpc_pass))?;
 
-    let manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), mine_automatically);
+    #[allow(unused_mut)]
+    let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), mine_automatically);
+
+    #[cfg(feature = "inspector")]
+    if let Some(port) = inspector_port {
+        manager.enable_inspector(port);
+        println!("Inspector server listening on 127.0.0.1:{}", port);
+    }
+
+    #[cfg(not(feature = "inspector"))]
+    if inspector_port.is_some() {
+        eprintln!("Warning: --inspector requires the 'inspector' feature. Ignoring.");
+    }
 
     let mut signers: SignerMap = HashMap::new();
     signers.insert(

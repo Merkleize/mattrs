@@ -3,6 +3,10 @@ name = "mattrs-vault"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["inspector"]
+inspector = ["mattrs/inspector"]
+
 [dependencies]
 mattrs = { path = "../.." }
 bitcoin = { version = "0.32", features = ["rand-std"] }
