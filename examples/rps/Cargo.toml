@@ -1,0 +1,20 @@
+[package]
+name = "mattrs-rps"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mattrs = { path = "../.." }
+bitcoin = { version = "0.32", features = ["rand-std"] }
+bitcoincore-rpc = "0.19"
+bitcoin-script = { path = "../../mattrs_old/bitcoin-script" }
+hex = "0.4"
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+mattrs-test-utils = { path = "../test-utils" }
+
+[[bin]]
+name = "rps-cli"
+path = "src/bin/rps_cli.rs"

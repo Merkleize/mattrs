@@ -26,7 +26,7 @@ use mattrs::{
     report::format_tx_markdown,
     signer::{HotSigner, SignerMap},
 };
-use mattrs_examples::vault::*;
+use mattrs_vault::*;
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;

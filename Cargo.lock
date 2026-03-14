@@ -441,7 +441,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mattrs-examples"
+name = "mattrs-game256"
 version = "0.1.0"
 dependencies = [
  "bitcoin 0.32.8",
@@ -449,6 +449,65 @@ dependencies = [
  "bitcoincore-rpc",
  "hex",
  "mattrs",
+ "mattrs-test-utils",
+]
+
+[[package]]
+name = "mattrs-minivault"
+version = "0.1.0"
+dependencies = [
+ "bitcoin 0.32.8",
+ "bitcoin-script",
+ "bitcoincore-rpc",
+ "hex",
+ "mattrs",
+ "mattrs-test-utils",
+]
+
+[[package]]
+name = "mattrs-ram"
+version = "0.1.0"
+dependencies = [
+ "bitcoin 0.32.8",
+ "bitcoincore-rpc",
+ "hex",
+ "mattrs",
+ "mattrs-test-utils",
+]
+
+[[package]]
+name = "mattrs-rps"
+version = "0.1.0"
+dependencies = [
+ "bitcoin 0.32.8",
+ "bitcoin-script",
+ "bitcoincore-rpc",
+ "clap",
+ "hex",
+ "mattrs",
+ "mattrs-test-utils",
+ "serde_json",
+]
+
+[[package]]
+name = "mattrs-test-utils"
+version = "0.1.0"
+dependencies = [
+ "bitcoin 0.32.8",
+ "bitcoincore-rpc",
+ "mattrs",
+]
+
+[[package]]
+name = "mattrs-vault"
+version = "0.1.0"
+dependencies = [
+ "bitcoin 0.32.8",
+ "bitcoin-script",
+ "bitcoincore-rpc",
+ "hex",
+ "mattrs",
+ "mattrs-test-utils",
  "rustyline",
  "serde_json",
 ]
@@ -585,19 +644,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
-]
-
-[[package]]
-name = "rps"
-version = "0.1.0"
-dependencies = [
- "bitcoin 0.32.8",
- "bitcoincore-rpc",
- "clap",
- "hex",
- "mattrs",
- "mattrs-examples",
- "serde_json",
 ]
 
 [[package]]

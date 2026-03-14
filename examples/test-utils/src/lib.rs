@@ -30,21 +30,16 @@ pub fn ensure_funds(client: &Client) {
     }
 }
 
-pub fn get_keys() -> (Xpriv, XOnlyPublicKey, Xpriv, XOnlyPublicKey) {
+/// Standard test keys matching pymatt.
+pub const ALICE_TPRV: &str = "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN";
+pub const BOB_TPRV: &str = "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ";
+
+/// Derive an `(Xpriv, XOnlyPublicKey)` pair from a tprv string.
+pub fn make_keypair(tprv: &str) -> (Xpriv, XOnlyPublicKey) {
     let secp = Secp256k1::new();
-    let alice_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )
-    .unwrap();
-    let alice_pk: XOnlyPublicKey = alice_privkey.to_priv().public_key(&secp).into();
-
-    let bob_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )
-    .unwrap();
-    let bob_pk: XOnlyPublicKey = bob_privkey.to_priv().public_key(&secp).into();
-
-    (alice_privkey, alice_pk, bob_privkey, bob_pk)
+    let privkey = Xpriv::from_str(tprv).unwrap();
+    let pubkey: XOnlyPublicKey = privkey.to_priv().public_key(&secp).into();
+    (privkey, pubkey)
 }
 
 pub fn make_signers(entries: &[(XOnlyPublicKey, Xpriv)]) -> SignerMap {

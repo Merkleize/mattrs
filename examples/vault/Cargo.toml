@@ -1,16 +1,19 @@
 [package]
-name = "mattrs-examples"
+name = "mattrs-vault"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-mattrs = { path = ".." }
+mattrs = { path = "../.." }
 bitcoin = { version = "0.32", features = ["rand-std"] }
 bitcoincore-rpc = "0.19"
+bitcoin-script = { path = "../../mattrs_old/bitcoin-script" }
 hex = "0.4"
-bitcoin-script = { path = "../mattrs_old/bitcoin-script" }
 rustyline = "15"
 serde_json = "1"
+
+[dev-dependencies]
+mattrs-test-utils = { path = "../test-utils" }
 
 [[bin]]
 name = "vault-cli"

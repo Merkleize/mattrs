@@ -1,4 +1,4 @@
-mod common;
+use mattrs_test_utils::{get_rpc_client, ensure_funds, make_keypair, make_signers, ALICE_TPRV, BOB_TPRV};
 
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use mattrs::{
     report::{format_tx_markdown, Report},
     sha256,
 };
-use mattrs_examples::game256::*;
+use mattrs_game256::*;
 
 const AMOUNT: Amount = Amount::from_sat(20_000);
 
@@ -63,9 +63,10 @@ fn winner_outputs(winner_pk: bitcoin::XOnlyPublicKey) -> Vec<TxOut> {
 
 #[test]
 fn test_leaf_reveal_alice() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (alice_privkey, alice_pk, _bob_privkey, bob_pk) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (alice_privkey, alice_pk) = make_keypair(ALICE_TPRV);
+    let (_bob_privkey, bob_pk) = make_keypair(BOB_TPRV);
 
     let computer = compute_2x();
     let leaf = make_leaf(alice_pk, bob_pk, &computer);
@@ -83,7 +84,7 @@ fn test_leaf_reveal_alice() -> Result<(), Box<dyn std::error::Error>> {
     let leaf = LeafInstance::fund(&mut manager, leaf, state, AMOUNT)?;
     let leaf_idx = leaf.idx();
 
-    let signers = common::make_signers(&[(alice_pk, alice_privkey)]);
+    let signers = make_signers(&[(alice_pk, alice_privkey)]);
     let outputs = winner_outputs(alice_pk);
 
     leaf.alice_reveal(&mut manager, x_start, h_end_bob, &signers, SpendOptions {
@@ -109,9 +110,10 @@ fn test_leaf_reveal_alice() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_leaf_reveal_bob() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (_alice_privkey, alice_pk, bob_privkey, bob_pk) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (_alice_privkey, alice_pk) = make_keypair(ALICE_TPRV);
+    let (bob_privkey, bob_pk) = make_keypair(BOB_TPRV);
 
     let computer = compute_2x();
     let leaf = make_leaf(alice_pk, bob_pk, &computer);
@@ -129,7 +131,7 @@ fn test_leaf_reveal_bob() -> Result<(), Box<dyn std::error::Error>> {
     let leaf = LeafInstance::fund(&mut manager, leaf, state, AMOUNT)?;
     let leaf_idx = leaf.idx();
 
-    let signers = common::make_signers(&[(bob_pk, bob_privkey)]);
+    let signers = make_signers(&[(bob_pk, bob_privkey)]);
     let outputs = winner_outputs(bob_pk);
 
     leaf.bob_reveal(&mut manager, x_start, h_end_alice, &signers, SpendOptions {
@@ -155,9 +157,10 @@ fn test_leaf_reveal_bob() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (alice_privkey, alice_pk, bob_privkey, bob_pk) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (alice_privkey, alice_pk) = make_keypair(ALICE_TPRV);
+    let (bob_privkey, bob_pk) = make_keypair(BOB_TPRV);
 
     let alice_trace: Vec<i32> = vec![2, 4, 8, 16, 32, 64, 127, 254, 508]; // diverges at step 6
     let bob_trace: Vec<i32> = vec![2, 4, 8, 16, 32, 64, 128, 256, 512]; // correct
@@ -184,8 +187,8 @@ fn test_fraud_proof_full() -> Result<(), Box<dyn std::error::Error>> {
         forfait_timeout: 10,
     };
 
-    let alice_signers = common::make_signers(&[(alice_pk, alice_privkey)]);
-    let bob_signers = common::make_signers(&[(bob_pk, bob_privkey)]);
+    let alice_signers = make_signers(&[(alice_pk, alice_privkey)]);
+    let bob_signers = make_signers(&[(bob_pk, bob_privkey)]);
 
     let s0_contract = make_g256_s0(&params);
     let mut manager = ContractManager::new(&client, Duration::from_secs_f64(0.1), true);

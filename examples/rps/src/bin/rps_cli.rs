@@ -1,3 +1,12 @@
+//! Interactive CLI for Rock-Paper-Scissors over Bitcoin.
+//!
+//! Two-player game using MATT smart contracts. Alice commits to a move,
+//! Bob plays, then Alice reveals. The outcome is adjudicated on-chain.
+//!
+//! Usage:
+//!   rps-cli --alice [--rock|--paper|--scissors] [-m]
+//!   rps-cli --bob   [--rock|--paper|--scissors] [-m]
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -18,7 +27,7 @@ use mattrs::{
     manager::{ContractManager, SpendOptions},
     signer::{HotSigner, SignerMap},
 };
-use mattrs_examples::rps::*;
+use mattrs_rps::*;
 
 const ALICE_TPRV: &str = "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN";
 const BOB_TPRV: &str = "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ";
@@ -34,7 +43,7 @@ fn move_str(m: i32) -> &'static str {
 }
 
 #[derive(Parser)]
-#[command(name = "rps", about = "Rock-Paper-Scissors over Bitcoin")]
+#[command(name = "rps-cli", about = "Rock-Paper-Scissors over Bitcoin")]
 struct Cli {
     /// Play as Alice
     #[arg(long, group = "player")]

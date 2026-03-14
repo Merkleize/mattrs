@@ -1,4 +1,4 @@
-mod common;
+use mattrs_test_utils::{get_rpc_client, ensure_funds};
 
 use std::time::Duration;
 
@@ -11,14 +11,14 @@ use mattrs::{
     report::{format_tx_markdown, Report},
     sha256,
 };
-use mattrs_examples::ram::{make_ram, proof_to_arg, RamInstance};
+use mattrs_ram::{make_ram, proof_to_arg, RamInstance};
 
 const AMOUNT: Amount = Amount::from_sat(20_000);
 
 #[test]
 fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
 
     for size in [8, 16] {
         for &leaf_index in &[0usize, 1, 4, size - 2, size - 1] {
@@ -67,8 +67,8 @@ fn test_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_write() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
 
     let size = 8;
     let leaf_index = 5;
@@ -105,8 +105,8 @@ fn test_write() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_write_loop() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
 
     let size = 8usize;
     let mut leaves: Vec<[u8; 32]> = (0..size).map(|i| sha256(&[i as u8])).collect();

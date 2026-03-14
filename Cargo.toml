@@ -1,5 +1,13 @@
 [workspace]
-members = [".", "examples", "rps"]
+members = [
+    ".",
+    "examples/test-utils",
+    "examples/vault",
+    "examples/minivault",
+    "examples/rps",
+    "examples/ram",
+    "examples/game256",
+]
 
 [package]
 name = "mattrs"

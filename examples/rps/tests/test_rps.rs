@@ -1,4 +1,4 @@
-mod common;
+use mattrs_test_utils::{get_rpc_client, ensure_funds, make_keypair, make_signers, ALICE_TPRV, BOB_TPRV};
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -12,7 +12,7 @@ use mattrs::{
     report::{format_tx_markdown, Report},
     signer::SignerMap,
 };
-use mattrs_examples::rps::*;
+use mattrs_rps::*;
 
 fn build_s1_spend_tx(
     manager: &ContractManager,
@@ -41,9 +41,10 @@ fn build_s1_spend_tx(
 
 #[test]
 fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (_alice_privkey, alice_pk, bob_privkey, bob_pk) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (_alice_privkey, alice_pk) = make_keypair(ALICE_TPRV);
+    let (bob_privkey, bob_pk) = make_keypair(BOB_TPRV);
 
     // Alice picks rock (m_a=0), generates random r_a, computes commitment
     let m_a: i32 = 0; // rock
@@ -73,7 +74,7 @@ fn test_rps() -> Result<(), Box<dyn std::error::Error>> {
     println!("S0 funded at {:?}", manager.instance(s0.idx()).outpoint().unwrap());
 
     // --- Step 2: Bob plays paper (m_b=1) ---
-    let signers: SignerMap = common::make_signers(&[(bob_pk, bob_privkey)]);
+    let signers: SignerMap = make_signers(&[(bob_pk, bob_privkey)]);
 
     let m_b: i32 = 1; // paper
     let s0_idx = s0.idx();

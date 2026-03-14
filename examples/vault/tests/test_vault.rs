@@ -1,4 +1,4 @@
-mod common;
+use mattrs_test_utils::{get_rpc_client, ensure_funds, make_keypair, make_signers, ALICE_TPRV, BOB_TPRV};
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -16,15 +16,15 @@ use mattrs::{
     manager::{ContractManager, SpendOptions},
     report::{format_tx_markdown, Report},
 };
-use mattrs_examples::vault::*;
+use mattrs_vault::*;
 
 #[test]
 fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let secp = Secp256k1::new();
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (unvault_privkey, unvault_pubkey, recover_privkey, recover_pubkey) = common::get_keys();
-    let _ = recover_privkey; // unused in this test
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (unvault_privkey, unvault_pubkey) = make_keypair(ALICE_TPRV);
+    let (_recover_privkey, recover_pubkey) = make_keypair(BOB_TPRV);
 
     let vault_params = VaultParams {
         alternate_pk: None,
@@ -54,7 +54,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     println!("Vault funded at {:?}", manager.instance(vault.idx()).outpoint().unwrap());
 
     // --- Step 2: Set up signers ---
-    let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
+    let signers = make_signers(&[(unvault_pubkey, unvault_privkey)]);
 
     // --- Step 3: Compute CTV hash ---
     let ctv_template = vec![
@@ -133,9 +133,10 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (unvault_privkey, unvault_pubkey, _recover_privkey, recover_pubkey) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (unvault_privkey, unvault_pubkey) = make_keypair(ALICE_TPRV);
+    let (_recover_privkey, recover_pubkey) = make_keypair(BOB_TPRV);
 
     let vault_params = VaultParams {
         alternate_pk: None,
@@ -153,7 +154,7 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
     println!("Vault funded at {:?}", manager.instance(vault.idx()).outpoint().unwrap());
 
     // Set up signers
-    let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
+    let signers = make_signers(&[(unvault_pubkey, unvault_privkey)]);
 
     // Compute CTV hash
     let ctv_template = vec![
@@ -192,9 +193,10 @@ fn test_vault_trigger_and_revault() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_vault_recover() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (_unvault_privkey, unvault_pubkey, _recover_privkey, recover_pubkey) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (_unvault_privkey, unvault_pubkey) = make_keypair(ALICE_TPRV);
+    let (_recover_privkey, recover_pubkey) = make_keypair(BOB_TPRV);
 
     let vault_params = VaultParams {
         alternate_pk: None,

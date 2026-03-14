@@ -1,13 +1,13 @@
 [package]
-name = "rps"
+name = "mattrs-ram"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-mattrs = { path = ".." }
-mattrs-examples = { path = "../examples" }
+mattrs = { path = "../.." }
 bitcoin = { version = "0.32", features = ["rand-std"] }
+
+[dev-dependencies]
+mattrs-test-utils = { path = "../test-utils" }
 bitcoincore-rpc = "0.19"
-clap = { version = "4", features = ["derive"] }
 hex = "0.4"
-serde_json = "1"

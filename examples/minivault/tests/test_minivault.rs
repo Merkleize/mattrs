@@ -1,4 +1,4 @@
-mod common;
+use mattrs_test_utils::{get_rpc_client, ensure_funds, make_keypair, make_signers, ALICE_TPRV, BOB_TPRV};
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use mattrs::{
     manager::{ContractManager, SpendOptions},
     report::{format_tx_markdown, Report},
 };
-use mattrs_examples::minivault::*;
+use mattrs_minivault::*;
 
 fn withdrawal_pk() -> [u8; 32] {
     let bytes = hex::decode("0981368165440d4fe866f84d75ae53a95b192aa45155735d4cb2a8894b340b8f").unwrap();
@@ -21,7 +21,8 @@ fn withdrawal_pk() -> [u8; 32] {
 }
 
 fn make_test_vault(has_partial_revault: bool, has_early_recover: bool) -> (MiniVaultParams, mattrs::contracts::Contract) {
-    let (_unvault_privkey, unvault_pubkey, _recover_privkey, recover_pubkey) = common::get_keys();
+    let (_unvault_privkey, unvault_pubkey) = make_keypair(ALICE_TPRV);
+    let (_recover_privkey, recover_pubkey) = make_keypair(BOB_TPRV);
 
     let params = MiniVaultParams {
         alternate_pk: None,
@@ -37,8 +38,8 @@ fn make_test_vault(has_partial_revault: bool, has_early_recover: bool) -> (MiniV
 
 #[test]
 fn test_minivault_recover() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
 
     let (_params, vault_contract) = make_test_vault(true, true);
     let amount = Amount::from_sat(20_000u64);
@@ -67,9 +68,9 @@ fn test_minivault_recover() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn test_minivault_trigger_and_recover() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (unvault_privkey, unvault_pubkey, _recover_privkey, _recover_pubkey) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (unvault_privkey, unvault_pubkey) = make_keypair(ALICE_TPRV);
 
     let (_params, vault_contract) = make_test_vault(true, true);
     let amount = Amount::from_sat(49_999_900u64);
@@ -80,7 +81,7 @@ fn test_minivault_trigger_and_recover() -> Result<(), Box<dyn std::error::Error>
     let vault = MiniVaultInstance::fund(&mut manager, vault_contract, vec![], amount)?;
     let vault_idx = vault.idx();
 
-    let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
+    let signers = make_signers(&[(unvault_pubkey, unvault_privkey)]);
     let wpk = withdrawal_pk();
 
     let (unvaulting,) = vault.trigger(&mut manager, wpk, 0, &signers)?;
@@ -115,9 +116,9 @@ fn test_minivault_trigger_and_recover() -> Result<(), Box<dyn std::error::Error>
 
 #[test]
 fn test_minivault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (unvault_privkey, unvault_pubkey, _recover_privkey, _recover_pubkey) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (unvault_privkey, unvault_pubkey) = make_keypair(ALICE_TPRV);
 
     let (_params, vault_contract) = make_test_vault(true, true);
     let spend_delay = 10u32;
@@ -127,7 +128,7 @@ fn test_minivault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error
     let mut report = Report::new();
 
     let vault = MiniVaultInstance::fund(&mut manager, vault_contract, vec![], amount)?;
-    let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
+    let signers = make_signers(&[(unvault_pubkey, unvault_privkey)]);
     let wpk = withdrawal_pk();
 
     let (unvaulting,) = vault.trigger(&mut manager, wpk, 0, &signers)?;
@@ -174,9 +175,9 @@ fn test_minivault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error
 
 #[test]
 fn test_minivault_trigger_with_revault_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
-    let client = common::get_rpc_client("testwallet");
-    common::ensure_funds(&client);
-    let (unvault_privkey, unvault_pubkey, _recover_privkey, _recover_pubkey) = common::get_keys();
+    let client = get_rpc_client("testwallet");
+    ensure_funds(&client);
+    let (unvault_privkey, unvault_pubkey) = make_keypair(ALICE_TPRV);
 
     let (_params, vault_contract) = make_test_vault(true, true);
     let spend_delay = 10u32;
@@ -190,7 +191,7 @@ fn test_minivault_trigger_with_revault_and_withdraw() -> Result<(), Box<dyn std:
     let v2 = MiniVaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
     let v3 = MiniVaultInstance::fund(&mut manager, vault_contract.clone(), vec![], amount)?;
 
-    let signers = common::make_signers(&[(unvault_pubkey, unvault_privkey)]);
+    let signers = make_signers(&[(unvault_pubkey, unvault_privkey)]);
     let wpk = withdrawal_pk();
     let revault_amount = Amount::from_sat(20_000_000u64);
 
