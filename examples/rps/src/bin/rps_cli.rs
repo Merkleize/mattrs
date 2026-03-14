@@ -8,7 +8,7 @@
 //!   rps-cli --bob   [--rock|--paper|--scissors] [-m]
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::time::Duration;
@@ -106,10 +106,33 @@ impl Cli {
         } else if self.scissors {
             2
         } else {
-            let mut rng = thread_rng();
-            (rng.next_u32() % 3) as i32
+            prompt_move()
         }
     }
+}
+
+fn prompt_move() -> i32 {
+    let stdin = io::stdin();
+    loop {
+        print!("Choose your move [r]ock, [p]aper, [s]cissors: ");
+        io::stdout().flush().unwrap();
+
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line).unwrap();
+        match line.trim().to_lowercase().as_str() {
+            "r" | "rock" => return 0,
+            "p" | "paper" => return 1,
+            "s" | "scissors" => return 2,
+            _ => println!("Invalid choice. Please enter r, p, or s."),
+        }
+    }
+}
+
+fn wait_for_enter(msg: &str) {
+    print!("{}", msg);
+    io::stdout().flush().unwrap();
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line).unwrap();
 }
 
 fn get_rpc_client(wallet_name: &str) -> Client {
@@ -228,10 +251,12 @@ fn run_alice(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         bitcoin::script::read_scriptint(m_b_bytes).unwrap() as i32
     };
 
-    println!("Bob's move: {} ({})", m_b, move_str(m_b));
+    println!("Bob played: {}", move_str(m_b));
 
     let outcome = adjudicate(m_a, m_b);
     println!("Game result: {}", outcome);
+
+    wait_for_enter("Press ENTER to broadcast the adjudication transaction...");
 
     // Build CTV outputs for outcome
     let alice_addr = Contract::new_opaque_p2tr(alice_pk).get_address(&vec![]);
