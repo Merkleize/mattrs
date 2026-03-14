@@ -2,4 +2,10 @@
 
 Simplified vault contracts with configurable partial revault and early recovery features.
 
-See [examples/README.md](../README.md) for setup and usage instructions.
+A lighter alternative to the full vault example, useful for testing specific vault behaviors in isolation.
+
+## Tests
+
+```bash
+cargo test -p mattrs-minivault
+```
