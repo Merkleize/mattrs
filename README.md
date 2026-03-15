@@ -1,6 +1,6 @@
 # mattrs
 
-A Rust framework for building and testing smart contracts using the [MATT](https://merkle.fun) (_Merkleize All The Things_) approach on Bitcoin, powered by the `OP_CHECKCONTRACTVERIFY` (CCV) opcode.
+A Rust framework for building and testing smart contracts using the [MATT](docs/matt.md) (_Merkleize All The Things_) approach on Bitcoin, powered by the `OP_CHECKCONTRACTVERIFY` (CCV) opcode.
 
 mattrs is the Rust port of [pymatt](https://github.com/Merkleize/pymatt). It provides the building blocks to define contract state machines, construct taproot spend transactions with CCV validation, and manage contract instance lifecycles against a regtest node.
 
@@ -12,7 +12,7 @@ MATT enables general-purpose smart contracts on Bitcoin through three simple ide
 2. **Merkleize the scripts** -- Represent all possible state transitions as leaves of a taproot tree (already possible since the Taproot soft fork).
 3. **Merkleize the execution** -- For computations too complex for Bitcoin Script, use fraud proofs: let parties assert results off-chain, then resolve disputes on-chain via interactive bisection.
 
-These three ingredients, combined with the `OP_CHECKCONTRACTVERIFY` opcode, are enough to express a surprisingly wide range of protocols.
+These three ingredients, combined with the [`OP_CHECKCONTRACTVERIFY`](docs/checkcontractverify.md) opcode, are enough to express a surprisingly wide range of protocols. See the [docs/](docs/) folder for details.
 
 ## Core library
 
@@ -34,6 +34,7 @@ The `mattrs` crate provides:
 ```
 mattrs/
   src/               Core library
+  docs/              Conceptual documentation on MATT and OP_CCV
   inspector/         TUI binary for real-time contract instance visualization
   examples/
     vault/           BIP-345 vault contracts with interactive CLI
@@ -132,8 +133,12 @@ cargo run -p mattrs-vault --bin vault-cli -- -m --inspector
 cargo run -p mattrs-inspector --bin inspector
 ```
 
+## Documentation
+
+The [docs/](docs/) folder contains conceptual documentation on MATT and the framework of stateful contracts.
+
 ## Related
 
 - [pymatt](https://github.com/Merkleize/pymatt) -- The original Python framework
 - [bitcoin-inquisition (inq-ccv)](https://github.com/Merkleize/bitcoin/tree/inq-ccv) -- Bitcoin Core fork with CCV support
-- [OP_CHECKCONTRACTVERIFY](https://github.com/bitcoin/bips/pull/1793) -- BIP draft
+- [OP_CHECKCONTRACTVERIFY](https://github.com/bitcoin/bips/blob/master/bip-0443.mediawiki) -- BIP proposal for the `OP_CHECKCONTRACTVERIFY` opcode.
