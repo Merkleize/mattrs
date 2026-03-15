@@ -7,7 +7,9 @@ use mattrs::contracts::{
     arg_as_bytes, arg_as_int, ArgType, Bytes, CcvAmountBehaviour, ClauseArg, ClauseOutput,
     Contract, standard_clause,
 };
-use mattrs::hub::fraud::{Bisect1Instance, bisect1_state, compute_2x, make_bisect_1, make_leaf};
+use bitcoin::opcodes::all::*;
+use bitcoin::ScriptBuf;
+use mattrs::hub::fraud::{Bisect1Instance, Computer, bisect1_state, make_fraud_proof};
 use mattrs::merkle;
 use mattrs::script_helpers::{
     check_input_contract, check_output_contract, dup, merkle_root_script, older_script,
@@ -17,6 +19,19 @@ use mattrs::{contract, sha256};
 
 use bitcoin_script::{define_pushable, script};
 define_pushable!();
+
+// ---------------------------------------------------------------------------
+// Computer
+// ---------------------------------------------------------------------------
+
+/// The `2x` computer: f(x) = 2*x, encoder = SHA256.
+pub fn compute_2x() -> Computer {
+    Computer {
+        encoder: ScriptBuf::from(vec![OP_SHA256.to_u8()]),
+        func: ScriptBuf::from(vec![OP_DUP.to_u8(), OP_ADD.to_u8()]),
+        specs: vec![("x", ArgType::Int)],
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Params
@@ -193,8 +208,7 @@ pub fn make_g256_s2(params: &G256Params) -> Contract {
     );
 
     // Build the initial bisect contract
-    let leaf_factory = move |_i: usize| make_leaf(alice_pk, bob_pk, &compute_2x());
-    let bisect_0 = make_bisect_1(alice_pk, bob_pk, 0, 7, &leaf_factory, forfait_timeout);
+    let bisect_0 = make_fraud_proof(alice_pk, bob_pk, 0, 7, &compute_2x(), forfait_timeout);
 
     // start_challenge: <bob_sig> <t_a> <y> <x> <z> <t_b>
     //

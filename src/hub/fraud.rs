@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use bitcoin::opcodes::all::*;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 
@@ -56,6 +55,7 @@ contract! {
 // ---------------------------------------------------------------------------
 
 /// Describes how to compute and encode a single step: y = func(x), h = encoder(x).
+#[derive(Clone)]
 pub struct Computer {
     /// Script to hash the top-of-stack value (e.g. SHA256).
     pub encoder: ScriptBuf,
@@ -65,13 +65,22 @@ pub struct Computer {
     pub specs: Vec<(&'static str, ArgType)>,
 }
 
-/// The `2x` computer: f(x) = 2*x, encoder = SHA256.
-pub fn compute_2x() -> Computer {
-    Computer {
-        encoder: ScriptBuf::from(vec![OP_SHA256.to_u8()]),
-        func: ScriptBuf::from(vec![OP_DUP.to_u8(), OP_ADD.to_u8()]),
-        specs: vec![("x", ArgType::Int)],
-    }
+/// Build a complete fraud-proof contract for a uniform computation.
+///
+/// This is the high-level entry point: callers only provide the `Computer`
+/// describing a single step; the framework wires up the full bisection tree
+/// and leaf contracts.
+pub fn make_fraud_proof(
+    alice_pk: XOnlyPublicKey,
+    bob_pk: XOnlyPublicKey,
+    i: usize,
+    j: usize,
+    computer: &Computer,
+    forfait_timeout: u32,
+) -> Contract {
+    let computer = computer.clone();
+    let leaf_factory = move |_step: usize| make_leaf(alice_pk, bob_pk, &computer);
+    make_bisect_1(alice_pk, bob_pk, i, j, &leaf_factory, forfait_timeout)
 }
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,7 @@ use mattrs::{
     contracts::{ClauseArg, Contract, ContractInstanceStatus},
     hub::fraud::{
         Bisect1Instance, Bisect2Instance, LeafInstance,
-        bisect1_state, compute_2x, leaf_state, make_leaf,
+        bisect1_state, leaf_state, make_leaf,
     },
     manager::{ContractManager, SpendOptions},
     merkle::is_power_of_2,
