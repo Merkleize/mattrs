@@ -4,17 +4,21 @@ use bitcoin::opcodes::all::*;
 use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 
+use bitcoin_script::{define_pushable, script};
+
 use crate::ccv::NUMS_KEY;
 use crate::contract;
 use crate::contracts::{
     ArgType, CcvAmountBehaviour, ClauseOutput, Contract, StateData, standard_clause,
 };
+use crate::merkle::merkle_root_script;
 use crate::merkle::{self, is_power_of_2};
 use crate::script_helpers::{
-    cat_scripts, check_input_contract, check_output_contract, drop_script, dup_script,
-    encoder_script, older_script,
+    check_input_contract, check_output_contract, drop_script, dup, older_script,
 };
 use crate::taproot::TapTree;
+
+define_pushable!();
 
 contract! {
     LeafInstance, LeafClause {
@@ -135,25 +139,29 @@ pub fn make_leaf(
     // Script: TOALTSTACK, dup(specs), encoder, TOALTSTACK, func, encoder,
     //         FROMALTSTACK SWAP FROMALTSTACK, merkle_root(3), check_input, alice_pk CHECKSIG
     let alice_reveal = {
-        let script = cat_scripts(&[
-            op(OP_TOALTSTACK),
-            dup_script(n_specs),
-            computer.encoder.clone(),
-            op(OP_TOALTSTACK),
-            computer.func.clone(),
-            computer.encoder.clone(),
+        let dup_n = dup(n_specs);
+        let encoder = computer.encoder.clone();
+        let func = computer.func.clone();
+        let encoder2 = computer.encoder.clone();
+        let mr3 = merkle_root_script(3);
+        let chk_in = check_input_contract();
+        let script = script! {
+            TOALTSTACK
+            <dup_n>
+            <encoder>
+            TOALTSTACK
+            <func>
+            <encoder2>
             // stack: <alice_sig> <h_y>  altstack: [h_y_b, h_x]
             // → <alice_sig> <h_x> <h_y> <h_y_b>
-            ScriptBuf::from(vec![
-                OP_FROMALTSTACK.to_u8(),
-                OP_SWAP.to_u8(),
-                OP_FROMALTSTACK.to_u8(),
-            ]),
-            encoder_script(3),
-            check_input_contract(),
-            push_pk(alice_pk),
-            op(OP_CHECKSIG),
-        ]);
+            FROMALTSTACK
+            SWAP
+            FROMALTSTACK
+            <mr3>
+            <chk_in>
+            <alice_pk>
+            CHECKSIG
+        };
 
         let mut arg_specs: Vec<(&'static str, ArgType)> =
             vec![("alice_sig", signer_type(alice_pk))];
@@ -167,26 +175,30 @@ pub fn make_leaf(
     // Script: TOALTSTACK, dup(specs), encoder, TOALTSTACK, func, encoder,
     //         FROMALTSTACK SWAP FROMALTSTACK SWAP, merkle_root(3), check_input, bob_pk CHECKSIG
     let bob_reveal = {
-        let script = cat_scripts(&[
-            op(OP_TOALTSTACK),
-            dup_script(n_specs),
-            computer.encoder.clone(),
-            op(OP_TOALTSTACK),
-            computer.func.clone(),
-            computer.encoder.clone(),
+        let dup_n = dup(n_specs);
+        let encoder = computer.encoder.clone();
+        let func = computer.func.clone();
+        let encoder2 = computer.encoder.clone();
+        let mr3 = merkle_root_script(3);
+        let chk_in = check_input_contract();
+        let script = script! {
+            TOALTSTACK
+            <dup_n>
+            <encoder>
+            TOALTSTACK
+            <func>
+            <encoder2>
             // stack: <bob_sig> <h_y>  altstack: [h_y_a, h_start]
             // → <bob_sig> <h_start> <h_y_a> <h_y>
-            ScriptBuf::from(vec![
-                OP_FROMALTSTACK.to_u8(),
-                OP_SWAP.to_u8(),
-                OP_FROMALTSTACK.to_u8(),
-                OP_SWAP.to_u8(),
-            ]),
-            encoder_script(3),
-            check_input_contract(),
-            push_pk(bob_pk),
-            op(OP_CHECKSIG),
-        ]);
+            FROMALTSTACK
+            SWAP
+            FROMALTSTACK
+            SWAP
+            <mr3>
+            <chk_in>
+            <bob_pk>
+            CHECKSIG
+        };
 
         let mut arg_specs: Vec<(&'static str, ArgType)> =
             vec![("bob_sig", signer_type(bob_pk))];
@@ -234,7 +246,7 @@ pub fn make_bisect_1(
 
     // alice_reveal: <alice_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b> <h_mid_a> <trace_left_a> <trace_right_a>
     //
-    // After TOALTSTACK*3 + dup(5) + encoder_script(5) + check_input + FROMALTSTACK*3:
+    // After TOALTSTACK*3 + dup(5) + merkle_root_script(5) + check_input + FROMALTSTACK*3:
     // Stack positions (0=top):
     //   0=trace_right_a, 1=trace_left_a, 2=h_mid_a,
     //   3=trace_b, 4=trace_a, 5=h_end_b, 6=h_end_a, 7=h_start, 8=alice_sig
@@ -244,32 +256,35 @@ pub fn make_bisect_1(
     //   2 PICK (trace_left_a), CAT, 1 PICK (trace_right_a), CAT, SHA256,
     //   5 PICK (trace_a), EQUALVERIFY
     let alice_reveal = {
-        let b2_encoder = encoder_script(8);
+        let b2_encoder = merkle_root_script(8);
         let b2_ccv = check_output_contract(&bisect_2);
+        let dup5 = dup(5);
+        let mr5 = merkle_root_script(5);
+        let chk_in = check_input_contract();
 
-        let script = cat_scripts(&[
-            ops(&[OP_TOALTSTACK, OP_TOALTSTACK, OP_TOALTSTACK]),
-            dup_script(5),
-            encoder_script(5),
-            check_input_contract(),
-            ops(&[OP_FROMALTSTACK, OP_FROMALTSTACK, OP_FROMALTSTACK]),
+        let script = script! {
+            TOALTSTACK TOALTSTACK TOALTSTACK
+            <dup5>
+            <mr5>
+            <chk_in>
+            FROMALTSTACK FROMALTSTACK FROMALTSTACK
             // trace equation
-            pick(7),
-            pick(7),
-            op(OP_CAT),
-            pick(2),
-            op(OP_CAT),
-            pick(1),
-            op(OP_CAT),
-            op(OP_SHA256),
-            pick(5),
-            op(OP_EQUALVERIFY),
+            7 PICK
+            7 PICK
+            CAT
+            2 PICK
+            CAT
+            1 PICK
+            CAT
+            SHA256
+            5 PICK
+            EQUALVERIFY
             // check output
-            b2_encoder,
-            b2_ccv,
-            push_pk(alice_pk),
-            op(OP_CHECKSIG),
-        ]);
+            <b2_encoder>
+            <b2_ccv>
+            <alice_pk>
+            CHECKSIG
+        };
 
         let bisect_2_for_next = bisect_2.clone();
         standard_clause(
@@ -307,9 +322,10 @@ pub fn make_bisect_1(
     };
 
     // forfait: Bob wins after timeout
+    let older = older_script(forfait_timeout);
     let forfait = standard_clause(
         "forfait",
-        cat_scripts(&[older_script(forfait_timeout), push_pk(bob_pk), op(OP_CHECKSIG)]),
+        script! { <older> <bob_pk> CHECKSIG },
         vec![("bob_sig", signer_type(bob_pk))],
         |_, _| Ok(vec![]),
     );
@@ -378,7 +394,7 @@ pub fn make_bisect_2(
     };
 
     // Common preamble for bob_reveal_left and bob_reveal_right:
-    // After TOALTSTACK*3 + dup(8) + encoder_script(8) + check_input + FROMALTSTACK*3:
+    // After TOALTSTACK*3 + dup(8) + merkle_root_script(8) + check_input + FROMALTSTACK*3:
     //
     // Stack positions (0=top):
     //   0=trace_right_b, 1=trace_left_b, 2=h_mid_b,
@@ -390,61 +406,67 @@ pub fn make_bisect_2(
     //   2 PICK (trace_left_b), CAT, 1 PICK (trace_right_b), CAT, SHA256,
     //   7 PICK (trace_b), EQUALVERIFY
 
-    let trace_check = cat_scripts(&[
-        ops(&[OP_TOALTSTACK, OP_TOALTSTACK, OP_TOALTSTACK]),
-        dup_script(8),
-        encoder_script(8),
-        check_input_contract(),
-        ops(&[OP_FROMALTSTACK, OP_FROMALTSTACK, OP_FROMALTSTACK]),
-        pick(10),
-        pick(9),
-        op(OP_CAT),
-        pick(2),
-        op(OP_CAT),
-        pick(1),
-        op(OP_CAT),
-        op(OP_SHA256),
-        pick(7),
-        op(OP_EQUALVERIFY),
-    ]);
+    let trace_check = {
+        let dup8 = dup(8);
+        let mr8 = merkle_root_script(8);
+        let chk_in = check_input_contract();
+        script! {
+            TOALTSTACK TOALTSTACK TOALTSTACK
+            <dup8>
+            <mr8>
+            <chk_in>
+            FROMALTSTACK FROMALTSTACK FROMALTSTACK
+            10 PICK
+            9 PICK
+            CAT
+            2 PICK
+            CAT
+            1 PICK
+            CAT
+            SHA256
+            7 PICK
+            EQUALVERIFY
+        }
+    };
 
     // bob_reveal_left: h_mid_a != h_mid_b → iterate on left child
     let bob_reveal_left = {
         let child_ccv = check_output_contract(&child_left);
         let output_check = if are_children_leaves {
-            // Leaf state: [h_start, h_mid_a, h_mid_b]
-            // After h_mid check, stack is back to 12 original items
-            cat_scripts(&[
-                pick(10),        // h_start
-                pick(1 + 5),     // h_mid_a
-                pick(2 + 2),     // h_mid_b
-                encoder_script(3),
-                child_ccv,
-            ])
+            let mr3 = merkle_root_script(3);
+            script! {
+                10 PICK        // h_start
+                6 PICK         // h_mid_a (1+5)
+                4 PICK         // h_mid_b (2+2)
+                <mr3>
+                <child_ccv>
+            }
         } else {
-            // Bisect_1 state: [h_start, h_mid_a, h_mid_b, trace_left_a, trace_left_b]
-            cat_scripts(&[
-                pick(10),        // h_start
-                pick(1 + 5),     // h_mid_a
-                pick(2 + 2),     // h_mid_b
-                pick(3 + 4),     // trace_left_a
-                pick(4 + 1),     // trace_left_b
-                encoder_script(5),
-                child_ccv,
-            ])
+            let mr5 = merkle_root_script(5);
+            script! {
+                10 PICK        // h_start
+                6 PICK         // h_mid_a (1+5)
+                4 PICK         // h_mid_b (2+2)
+                7 PICK         // trace_left_a (3+4)
+                5 PICK         // trace_left_b (4+1)
+                <mr5>
+                <child_ccv>
+            }
         };
 
-        let script = cat_scripts(&[
-            trace_check.clone(),
+        let tc = trace_check.clone();
+        let drop11 = drop_script(11);
+        let script = script! {
+            <tc>
             // check h_mid_a != h_mid_b
-            pick(5),
-            pick(3),
-            ops(&[OP_EQUAL, OP_NOT, OP_VERIFY]),
-            output_check,
-            drop_script(11),
-            push_pk(bob_pk),
-            op(OP_CHECKSIG),
-        ]);
+            5 PICK
+            3 PICK
+            EQUAL NOT VERIFY
+            <output_check>
+            <drop11>
+            <bob_pk>
+            CHECKSIG
+        };
 
         let child = child_left.clone();
         standard_clause(
@@ -477,38 +499,39 @@ pub fn make_bisect_2(
     let bob_reveal_right = {
         let child_ccv = check_output_contract(&child_right);
         let output_check = if are_children_leaves {
-            // Leaf state: [h_mid_a, h_end_a, h_end_b]
-            cat_scripts(&[
-                pick(5),         // h_mid_a
-                pick(1 + 9),     // h_end_a
-                pick(2 + 8),     // h_end_b
-                encoder_script(3),
-                child_ccv,
-            ])
+            let mr3 = merkle_root_script(3);
+            script! {
+                5 PICK          // h_mid_a
+                10 PICK         // h_end_a (1+9)
+                10 PICK         // h_end_b (2+8)
+                <mr3>
+                <child_ccv>
+            }
         } else {
-            // Bisect_1 state: [h_mid_a, h_end_a, h_end_b, trace_right_a, trace_right_b]
-            cat_scripts(&[
-                pick(5),         // h_mid_a
-                pick(1 + 9),     // h_end_a
-                pick(2 + 8),     // h_end_b
-                pick(3 + 3),     // trace_right_a
-                pick(4 + 0),     // trace_right_b
-                encoder_script(5),
-                child_ccv,
-            ])
+            let mr5 = merkle_root_script(5);
+            script! {
+                5 PICK          // h_mid_a
+                10 PICK         // h_end_a (1+9)
+                10 PICK         // h_end_b (2+8)
+                6 PICK          // trace_right_a (3+3)
+                4 PICK          // trace_right_b (4+0)
+                <mr5>
+                <child_ccv>
+            }
         };
 
-        let script = cat_scripts(&[
-            trace_check,
+        let drop11 = drop_script(11);
+        let script = script! {
+            <trace_check>
             // check h_mid_a == h_mid_b
-            pick(5),
-            pick(3),
-            op(OP_EQUALVERIFY),
-            output_check,
-            drop_script(11),
-            push_pk(bob_pk),
-            op(OP_CHECKSIG),
-        ]);
+            5 PICK
+            3 PICK
+            EQUALVERIFY
+            <output_check>
+            <drop11>
+            <bob_pk>
+            CHECKSIG
+        };
 
         let child = child_right.clone();
         standard_clause(
@@ -542,9 +565,10 @@ pub fn make_bisect_2(
     };
 
     // forfait: Alice wins after timeout
+    let older = older_script(forfait_timeout);
     let forfait = standard_clause(
         "forfait",
-        cat_scripts(&[older_script(forfait_timeout), push_pk(alice_pk), op(OP_CHECKSIG)]),
+        script! { <older> <alice_pk> CHECKSIG },
         vec![("alice_sig", signer_type(alice_pk))],
         |_, _| Ok(vec![]),
     );
@@ -564,49 +588,8 @@ pub fn make_bisect_2(
 }
 
 // ---------------------------------------------------------------------------
-// Script building helpers
+// Helpers
 // ---------------------------------------------------------------------------
-
-/// Single opcode as ScriptBuf.
-fn op(opcode: bitcoin::opcodes::Opcode) -> ScriptBuf {
-    ScriptBuf::from(vec![opcode.to_u8()])
-}
-
-/// Multiple opcodes as ScriptBuf.
-fn ops(opcodes: &[bitcoin::opcodes::Opcode]) -> ScriptBuf {
-    ScriptBuf::from(opcodes.iter().map(|o| o.to_u8()).collect::<Vec<_>>())
-}
-
-/// N PICK instruction.
-fn pick(n: usize) -> ScriptBuf {
-    let mut bytes = Vec::new();
-    push_number_to(&mut bytes, n as i64);
-    bytes.push(OP_PICK.to_u8());
-    ScriptBuf::from(bytes)
-}
-
-/// Push an x-only pubkey (32 bytes) onto the script.
-fn push_pk(pk: XOnlyPublicKey) -> ScriptBuf {
-    let mut bytes = Vec::with_capacity(33);
-    bytes.push(OP_PUSHBYTES_32.to_u8());
-    bytes.extend_from_slice(&pk.serialize());
-    ScriptBuf::from(bytes)
-}
-
-/// Push a script number.
-fn push_number_to(bytes: &mut Vec<u8>, n: i64) {
-    match n {
-        -1 => bytes.push(OP_PUSHNUM_NEG1.to_u8()),
-        0 => bytes.push(OP_PUSHBYTES_0.to_u8()),
-        1..=16 => bytes.push((OP_PUSHNUM_1.to_u8() as i64 + n - 1) as u8),
-        _ => {
-            let mut buf = [0u8; 8];
-            let len = bitcoin::script::write_scriptint(&mut buf, n);
-            bytes.push(len as u8);
-            bytes.extend_from_slice(&buf[..len]);
-        }
-    }
-}
 
 /// Create a Signer ArgType for the given pubkey.
 fn signer_type(pk: XOnlyPublicKey) -> ArgType {

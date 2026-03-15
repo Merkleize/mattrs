@@ -1,27 +1,40 @@
 # mattrs-rps
 
-Rock-Paper-Scissors over Bitcoin using MATT smart contracts.
+Rock-Paper-Scissors over Bitcoin, settled entirely on-chain using MATT smart contracts.
 
-## Overview
+## How it works
 
-Two-player game where Alice commits to a move, Bob plays, then Alice reveals. The outcome is adjudicated on-chain using `OP_CHECKCONTRACTVERIFY`. Players coordinate over TCP: Alice listens for a connection, Bob connects.
+Two players wager bitcoin on a game of Rock-Paper-Scissors. The protocol uses a **commit-reveal** scheme to prevent cheating:
+
+1. **Alice commits** -- Alice picks a move, hashes it with a random nonce, and funds the contract with the hash as embedded state.
+2. **Bob plays** -- Bob sees Alice's commitment (but not her move) and plays his own move openly.
+3. **Alice reveals** -- Alice reveals her move and nonce. The contract verifies they match her original commitment.
+4. **Settlement** -- The contract adjudicates the outcome on-chain:
+   - Winner takes both stakes.
+   - On a tie, each player reclaims their own stake.
+
+If Alice never reveals (trying to dodge a loss), Bob can claim victory after a timeout.
+
+Players coordinate off-chain over **TCP**: Alice starts a listener, Bob connects. The connection is used to exchange commitments and public keys before any on-chain transactions.
 
 ## CLI
 
+Run each player in a separate terminal:
+
 ```bash
-# Terminal 1 (Alice)
+# Terminal 1 -- Alice
 cargo run -p mattrs-rps --bin rps-cli -- --alice -m
 
-# Terminal 2 (Bob)
+# Terminal 2 -- Bob
 cargo run -p mattrs-rps --bin rps-cli -- --bob -m
 ```
 
 Options:
 - `--alice` / `--bob` -- Choose player role (required)
-- `--rock` / `--paper` / `--scissors` -- Choose move (prompted interactively if omitted)
-- `-m`, `--mine-automatically` -- Mine blocks automatically
-- `--host <HOST>` -- TCP host (default: `localhost`)
-- `--port <PORT>` -- TCP port (default: `12345`)
+- `--rock` / `--paper` / `--scissors` -- Pre-select a move (prompted interactively if omitted)
+- `-m`, `--mine-automatically` -- Mine blocks automatically after each operation
+- `--host <HOST>` -- TCP host for coordination (default: `localhost`)
+- `--port <PORT>` -- TCP port for coordination (default: `12345`)
 - `--inspector` -- Enable inspector server (port 34443)
 - `--inspector-port <PORT>` -- Enable inspector server on a custom port
 

@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use bitcoin::opcodes::all::*;
-use bitcoin::ScriptBuf;
 use bitcoin::XOnlyPublicKey;
 
 use mattrs::ccv::NUMS_KEY;
@@ -12,8 +10,7 @@ use mattrs::contracts::{
 use mattrs::hub::fraud::{Bisect1Instance, bisect1_state, compute_2x, make_bisect_1, make_leaf};
 use mattrs::merkle;
 use mattrs::script_helpers::{
-    cat_scripts, check_input_contract, check_output_contract, dup_script, encoder_script,
-    older_script,
+    check_input_contract, check_output_contract, dup, merkle_root_script, older_script,
 };
 use mattrs::taproot::TapTree;
 use mattrs::{contract, sha256};
@@ -127,28 +124,18 @@ pub fn make_g256_s1(params: &G256Params) -> Contract {
     //   Which matches: combine(combine(t_a, sha256(y)), sha256(x))
     //   = merkle_root([t_a, sha256(y), sha256(x)]) ✓
 
-    let s2_encoder = cat_scripts(&[
-        ScriptBuf::from(vec![
-            OP_TOALTSTACK.to_u8(),
-            OP_SHA256.to_u8(),
-            OP_FROMALTSTACK.to_u8(),
-            OP_SHA256.to_u8(),
-        ]),
-        encoder_script(3),
-    ]);
-
-    let reveal_script = cat_scripts(&[
-        // DUP SHA256 check_input_contract
-        ScriptBuf::from(vec![OP_DUP.to_u8()]),
-        // S1 encoder is just SHA256
-        ScriptBuf::from(vec![OP_SHA256.to_u8()]),
-        check_input_contract(),
-        // S2 encoder + check_output
-        s2_encoder,
-        check_output_contract(&s2),
-        push_pk(params.alice_pk),
-        ScriptBuf::from(vec![OP_CHECKSIG.to_u8()]),
-    ]);
+    let reveal_script = script! {
+        // DUP SHA256 check_input_contract (S1 encoder is just SHA256)
+        DUP SHA256
+        <check_input_contract()>
+        // S2 encoder: TOALTSTACK SHA256 FROMALTSTACK SHA256 merkle_root(3)
+        TOALTSTACK SHA256 FROMALTSTACK SHA256
+        <merkle_root_script(3)>
+        // check_output
+        <check_output_contract(&s2)>
+        <params.alice_pk>
+        CHECKSIG
+    };
 
     let s2_for_next = s2.clone();
     let alice_pk = params.alice_pk;
@@ -197,13 +184,10 @@ pub fn make_g256_s2(params: &G256Params) -> Contract {
     let forfait_timeout = params.forfait_timeout;
 
     // withdraw: <alice_sig> + older
+    let older = older_script(forfait_timeout);
     let withdraw = standard_clause(
         "withdraw",
-        cat_scripts(&[
-            older_script(forfait_timeout),
-            push_pk(alice_pk),
-            ScriptBuf::from(vec![OP_CHECKSIG.to_u8()]),
-        ]),
+        script! { <older> <alice_pk> CHECKSIG },
         vec![("alice_sig", ArgType::Signer(Arc::new(move |_, _| alice_pk)))],
         |_, _| Ok(vec![]),
     );
@@ -212,103 +196,49 @@ pub fn make_g256_s2(params: &G256Params) -> Contract {
     let leaf_factory = move |_i: usize| make_leaf(alice_pk, bob_pk, &compute_2x());
     let bisect_0 = make_bisect_1(alice_pk, bob_pk, 0, 7, &leaf_factory, forfait_timeout);
 
-    // S2 state encoder: TOALTSTACK SHA256 FROMALTSTACK SHA256 merkle_root(3)
-    let s2_encoder = cat_scripts(&[
-        ScriptBuf::from(vec![
-            OP_TOALTSTACK.to_u8(),
-            OP_SHA256.to_u8(),
-            OP_FROMALTSTACK.to_u8(),
-            OP_SHA256.to_u8(),
-        ]),
-        encoder_script(3),
-    ]);
-
     // start_challenge: <bob_sig> <t_a> <y> <x> <z> <t_b>
     //
     // After witness decoding, stack (bottom to top): bob_sig t_a y x z t_b
     //
-    // Matching pymatt:
-    //   TOALTSTACK → save t_b
-    //   DUP 3 PICK EQUAL NOT VERIFY → check y != z (z is now at top, y at position 3)
-    //   Wait: after TOALTSTACK of t_b, stack is: bob_sig t_a y x z
-    //   Positions: 0=z, 1=x, 2=y, 3=t_a, 4=bob_sig
-    //   DUP → bob_sig t_a y x z z
-    //   3 PICK → copies position 3 = y
-    //   stack: bob_sig t_a y x z z y
-    //   EQUAL NOT VERIFY → z != y
-    //   stack: bob_sig t_a y x z
-    //   TOALTSTACK → save z
-    //   stack: bob_sig t_a y x  altstack: [t_b, z]
-    //
+    // Trace through the script:
+    //   TOALTSTACK → save t_b;  stack: bob_sig t_a y x z
+    //   DUP 3 PICK EQUAL NOT VERIFY → check y != z
+    //   TOALTSTACK → save z;  stack: bob_sig t_a y x  altstack: [t_b, z]
     //   dup(3) → bob_sig t_a y x t_a y x
-    //   S2 encoder on top 3 → merkle_root([t_a, sha256(y), sha256(x)])
-    //   check_input → consumes hash
+    //   S2 encoder (TOALTSTACK SHA256 FROMALTSTACK SHA256 merkle_root(3)) + check_input
+    //     → verifies merkle_root([t_a, sha256(y), sha256(x)]) matches input state
     //   stack: bob_sig t_a y x
-    //
-    //   SHA256 → bob_sig t_a y sha256(x)
-    //   SWAP → bob_sig t_a sha256(x) y
-    //   SHA256 → bob_sig t_a sha256(x) sha256(y)
-    //   ROT → bob_sig sha256(x) sha256(y) t_a
-    //
-    //   FROMALTSTACK SHA256 → bob_sig sha256(x) sha256(y) t_a sha256(z)  altstack: [t_b]
-    //   SWAP → bob_sig sha256(x) sha256(y) sha256(z) t_a
-    //
+    //   SHA256 SWAP SHA256 ROT → bob_sig sha256(x) sha256(y) t_a
+    //   FROMALTSTACK SHA256 SWAP → bob_sig sha256(x) sha256(y) sha256(z) t_a
     //   FROMALTSTACK → bob_sig sha256(x) sha256(y) sha256(z) t_a t_b
-    //
-    //   Bisect_1 encoder: merkle_root(5) on [sha256(x), sha256(y), sha256(z), t_a, t_b]
-    //   Wait, the stack order matters. From bottom to top:
-    //   sha256(x) sha256(y) sha256(z) t_a t_b
-    //   That becomes: h_start=sha256(x), h_end_a=sha256(y), h_end_b=sha256(z), trace_a=t_a, trace_b=t_b
-    //   encoder_script(5) reduces these 5 to merkle_root
-    //   check_output_contract verifies
+    //   Bisect_1 encoder: merkle_root(5) + check_output_contract
 
-    let bisect_0_encoder = encoder_script(5);
-    let bisect_0_ccv = check_output_contract(&bisect_0);
-
-    let start_challenge_script = cat_scripts(&[
+    let start_challenge_script = script! {
         // save t_b to altstack
-        ScriptBuf::from(vec![OP_TOALTSTACK.to_u8()]),
+        TOALTSTACK
         // check y != z
-        ScriptBuf::from(vec![
-            OP_DUP.to_u8(),
-        ]),
-        push_number(3),
-        ScriptBuf::from(vec![
-            OP_PICK.to_u8(),
-            OP_EQUAL.to_u8(),
-            OP_NOT.to_u8(),
-            OP_VERIFY.to_u8(),
-        ]),
+        DUP 3 PICK EQUAL NOT VERIFY
         // save z to altstack
-        ScriptBuf::from(vec![OP_TOALTSTACK.to_u8()]),
+        TOALTSTACK
         // dup top 3 for state verification
-        dup_script(3),
+        <dup(3)>
         // S2 encoder + check_input
-        s2_encoder,
-        check_input_contract(),
+        TOALTSTACK SHA256 FROMALTSTACK SHA256
+        <merkle_root_script(3)>
+        <check_input_contract()>
         // stack: bob_sig t_a y x
-        // SHA256 SWAP SHA256 ROT
-        ScriptBuf::from(vec![
-            OP_SHA256.to_u8(),
-            OP_SWAP.to_u8(),
-            OP_SHA256.to_u8(),
-            OP_ROT.to_u8(),
-        ]),
+        SHA256 SWAP SHA256 ROT
         // FROMALTSTACK SHA256 → sha256(z)
-        ScriptBuf::from(vec![
-            OP_FROMALTSTACK.to_u8(),
-            OP_SHA256.to_u8(),
-        ]),
-        // SWAP
-        ScriptBuf::from(vec![OP_SWAP.to_u8()]),
+        FROMALTSTACK SHA256
+        SWAP
         // FROMALTSTACK → t_b
-        ScriptBuf::from(vec![OP_FROMALTSTACK.to_u8()]),
+        FROMALTSTACK
         // stack: bob_sig sha256(x) sha256(y) sha256(z) t_a t_b
-        bisect_0_encoder,
-        bisect_0_ccv,
-        push_pk(bob_pk),
-        ScriptBuf::from(vec![OP_CHECKSIG.to_u8()]),
-    ]);
+        <merkle_root_script(5)> // bisect_0_encoder
+        <check_output_contract(&bisect_0)>
+        <bob_pk>
+        CHECKSIG
+    };
 
     let bisect_0_for_next = bisect_0.clone();
     let start_challenge = standard_clause(
@@ -379,29 +309,6 @@ contract! {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn push_pk(pk: XOnlyPublicKey) -> ScriptBuf {
-    let mut bytes = Vec::with_capacity(33);
-    bytes.push(OP_PUSHBYTES_32.to_u8());
-    bytes.extend_from_slice(&pk.serialize());
-    ScriptBuf::from(bytes)
-}
-
-fn push_number(n: i64) -> ScriptBuf {
-    let mut bytes = Vec::new();
-    match n {
-        -1 => bytes.push(OP_PUSHNUM_NEG1.to_u8()),
-        0 => bytes.push(OP_PUSHBYTES_0.to_u8()),
-        1..=16 => bytes.push((OP_PUSHNUM_1.to_u8() as i64 + n - 1) as u8),
-        _ => {
-            let mut buf = [0u8; 8];
-            let len = bitcoin::script::write_scriptint(&mut buf, n);
-            bytes.push(len as u8);
-            bytes.extend_from_slice(&buf[..len]);
-        }
-    }
-    ScriptBuf::from(bytes)
-}
 
 fn to32(data: &[u8]) -> [u8; 32] {
     data.try_into().expect("expected 32 bytes")

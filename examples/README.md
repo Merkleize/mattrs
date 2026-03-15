@@ -1,16 +1,18 @@
 # mattrs examples
 
-Example smart contracts and interactive CLIs built with the mattrs framework.
-Each example lives in its own sub-crate with its contract code, tests, and CLI (if any).
+Smart contracts and interactive CLIs built with the mattrs framework. Each example is a standalone crate with its own contract definitions, tests, and (where applicable) a CLI.
 
-| Crate | Description |
+| Crate | What it demonstrates |
 |---|---|
-| [vault/](vault/) | BIP-345-style vaults with `OP_CCV` + `OP_CTV` - with interactive CLI |
-| [minivault/](minivault/) | Simplified vaults using only OP_CCV |
-| [rps/](rps/) | Rock-Paper-Scissors - with interactive CLI |
-| [ram/](ram/) | Merkle proof-based RAM contract |
-| [game256/](game256/) | Demo of fraud proof via bisection protocol |
-| [test-utils/](test-utils/) | Shared test utilities (RPC client, key helpers) |
+| [vault/](vault/) | BIP-345-style vaults using `OP_CCV` + `OP_CTV` -- trigger, recover, and time-locked withdrawal flows. Interactive CLI. |
+| [minivault/](minivault/) | Stripped-down vault using only `OP_CCV`. |
+| [rps/](rps/) | Two-player Rock-Paper-Scissors - with interactive CLI. |
+| [ram/](ram/) | On-chain key-value store backed by Merkle proofs -- read, write, and withdraw operations on a vector of arbitrary length. |
+| [game256/](game256/) | End-to-end fraud proof via interactive bisection -- resolves a computation dispute down to a single step. |
+| [test-utils/](test-utils/) | Shared test utilities: RPC client setup, key generation, wallet helpers. |
 
-See the [root README](../README.md) for prerequisites and node setup.
-See each example's own README for usage details.
+## Getting started
+
+All examples require a running CCV-enabled regtest node. See the [root README](../README.md) for prerequisites and node setup instructions.
+
+Each example's own README covers its specific usage, CLI commands, and contract design.
