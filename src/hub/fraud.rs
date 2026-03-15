@@ -145,8 +145,6 @@ pub fn make_leaf(
     let n_specs = computer.specs.len();
 
     // alice_reveal: <alice_sig> <x...> <h_y_b>
-    // Script: TOALTSTACK, dup(specs), encoder, TOALTSTACK, func, encoder,
-    //         FROMALTSTACK SWAP FROMALTSTACK, merkle_root(3), check_input, alice_pk CHECKSIG
     let alice_reveal = {
         let dup_n = dup(n_specs);
         let encoder = computer.encoder.clone();
@@ -161,8 +159,7 @@ pub fn make_leaf(
             TOALTSTACK
             <func>
             <encoder2>
-            // stack: <alice_sig> <h_y>  altstack: [h_y_b, h_x]
-            // → <alice_sig> <h_x> <h_y> <h_y_b>
+            // <alice_sig> <h_y>  --  <h_y_b> <h_x>
             FROMALTSTACK
             SWAP
             FROMALTSTACK
@@ -181,8 +178,6 @@ pub fn make_leaf(
     };
 
     // bob_reveal: <bob_sig> <x...> <h_y_a>
-    // Script: TOALTSTACK, dup(specs), encoder, TOALTSTACK, func, encoder,
-    //         FROMALTSTACK SWAP FROMALTSTACK SWAP, merkle_root(3), check_input, bob_pk CHECKSIG
     let bob_reveal = {
         let dup_n = dup(n_specs);
         let encoder = computer.encoder.clone();
@@ -197,8 +192,7 @@ pub fn make_leaf(
             TOALTSTACK
             <func>
             <encoder2>
-            // stack: <bob_sig> <h_y>  altstack: [h_y_a, h_start]
-            // → <bob_sig> <h_start> <h_y_a> <h_y>
+            // <bob_sig> <h_y>  --  <h_y_a> <h_start>
             FROMALTSTACK
             SWAP
             FROMALTSTACK
@@ -253,17 +247,7 @@ pub fn make_bisect_1(
 
     let bisect_2 = make_bisect_2(alice_pk, bob_pk, i, j, leaf_factory, forfait_timeout);
 
-    // alice_reveal: <alice_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b> <h_mid_a> <trace_left_a> <trace_right_a>
-    //
-    // After TOALTSTACK*3 + dup(5) + merkle_root_script(5) + check_input + FROMALTSTACK*3:
-    // Stack positions (0=top):
-    //   0=trace_right_a, 1=trace_left_a, 2=h_mid_a,
-    //   3=trace_b, 4=trace_a, 5=h_end_b, 6=h_end_a, 7=h_start, 8=alice_sig
-    //
-    // Trace equation check (matching pymatt exactly):
-    //   7 PICK (h_start), 7 PICK (h_end_a), CAT,
-    //   2 PICK (trace_left_a), CAT, 1 PICK (trace_right_a), CAT, SHA256,
-    //   5 PICK (trace_a), EQUALVERIFY
+    // alice_reveal: <alice_sig> <h_i> <h_{j+1;a}> <h_{j+1;b}> <t_{i,j;a}> <t_{i,j;b}> <h_{i+m;a}> <t_{i,i+m-1;a}> <t_{i+m,j;a}>
     let alice_reveal = {
         let b2_encoder = merkle_root_script(8);
         let b2_ccv = check_output_contract(&bisect_2);
@@ -277,16 +261,17 @@ pub fn make_bisect_1(
             <mr5>
             <chk_in>
             FROMALTSTACK FROMALTSTACK FROMALTSTACK
-            // trace equation
-            7 PICK
-            7 PICK
+            // check equation for t_{i,j;a}:
+            //   t_{i,j;a} = H(h_i || h_{j+1;a} || t_{i,i+m-1;a} || t_{i+m,j;a})
+            7 PICK  // h_i
+            7 PICK  // h_{j+1;a}
             CAT
-            2 PICK
+            2 PICK  // t_{i,i+m-1;a}
             CAT
-            1 PICK
+            1 PICK  // t_{i+m,j;a}
             CAT
             SHA256
-            5 PICK
+            5 PICK  // t_{i,j;a}
             EQUALVERIFY
             // check output
             <b2_encoder>
@@ -403,18 +388,7 @@ pub fn make_bisect_2(
     };
 
     // Common preamble for bob_reveal_left and bob_reveal_right:
-    // After TOALTSTACK*3 + dup(8) + merkle_root_script(8) + check_input + FROMALTSTACK*3:
-    //
-    // Stack positions (0=top):
-    //   0=trace_right_b, 1=trace_left_b, 2=h_mid_b,
-    //   3=trace_right_a, 4=trace_left_a, 5=h_mid_a,
-    //   6=trace_b, 7=trace_a, 8=h_end_b, 9=h_end_a, 10=h_start, 11=bob_sig
-    //
-    // Trace equation (Bob's trace, matching pymatt exactly):
-    //   10 PICK (h_start), 9 PICK (h_end_b), CAT,
-    //   2 PICK (trace_left_b), CAT, 1 PICK (trace_right_b), CAT, SHA256,
-    //   7 PICK (trace_b), EQUALVERIFY
-
+    // verify embedded data, then check equation for t_{i,j;b}
     let trace_check = {
         let dup8 = dup(8);
         let mr8 = merkle_root_script(8);
@@ -425,39 +399,43 @@ pub fn make_bisect_2(
             <mr8>
             <chk_in>
             FROMALTSTACK FROMALTSTACK FROMALTSTACK
-            10 PICK
-            9 PICK
+            // check equation for t_{i,j;b}:
+            //   t_{i,j;b} = H(h_i || h_{j+1;b} || t_{i,i+m-1;b} || t_{i+m,j;b})
+            10 PICK  // h_i
+            9 PICK   // h_{j+1;b}
             CAT
-            2 PICK
+            2 PICK   // t_{i,i+m-1;b}
             CAT
-            1 PICK
+            1 PICK   // t_{i+m,j;b}
             CAT
             SHA256
-            7 PICK
+            7 PICK   // t_{i,j;b}
             EQUALVERIFY
         }
     };
 
-    // bob_reveal_left: h_mid_a != h_mid_b → iterate on left child
+    // bob_reveal_left: h_{i+m;a} != h_{i+m;b} → iterate on left child
     let bob_reveal_left = {
         let child_ccv = check_output_contract(&child_left);
         let output_check = if are_children_leaves {
+            // [h_i, h_{i+m;a}, h_{i+m;b}]
             let mr3 = merkle_root_script(3);
             script! {
-                10 PICK        // h_start
-                6 PICK         // h_mid_a (1+5)
-                4 PICK         // h_mid_b (2+2)
+                10 PICK        // h_i
+                6 PICK         // h_{i+m;a}
+                4 PICK         // h_{i+m;b}
                 <mr3>
                 <child_ccv>
             }
         } else {
+            // [h_i, h_{i+m;a}, h_{i+m;b}, t_{i,i+m-1;a}, t_{i,i+m-1;b}]
             let mr5 = merkle_root_script(5);
             script! {
-                10 PICK        // h_start
-                6 PICK         // h_mid_a (1+5)
-                4 PICK         // h_mid_b (2+2)
-                7 PICK         // trace_left_a (3+4)
-                5 PICK         // trace_left_b (4+1)
+                10 PICK        // h_i
+                6 PICK         // h_{i+m;a}
+                4 PICK         // h_{i+m;b}
+                7 PICK         // t_{i,i+m-1;a}
+                5 PICK         // t_{i,i+m-1;b}
                 <mr5>
                 <child_ccv>
             }
@@ -467,7 +445,7 @@ pub fn make_bisect_2(
         let drop11 = drop_script(11);
         let script = script! {
             <tc>
-            // check h_mid_a != h_mid_b
+            // check h_{i+m;a} != h_{i+m;b}
             5 PICK
             3 PICK
             EQUAL NOT VERIFY
@@ -504,26 +482,28 @@ pub fn make_bisect_2(
         )
     };
 
-    // bob_reveal_right: h_mid_a == h_mid_b → iterate on right child
+    // bob_reveal_right: h_{i+m;a} == h_{i+m;b} → iterate on right child
     let bob_reveal_right = {
         let child_ccv = check_output_contract(&child_right);
         let output_check = if are_children_leaves {
+            // [h_{i+m}, h_{j+1;a}, h_{j+1;b}]
             let mr3 = merkle_root_script(3);
             script! {
-                5 PICK          // h_mid_a
-                10 PICK         // h_end_a (1+9)
-                10 PICK         // h_end_b (2+8)
+                5 PICK          // h_{i+m}
+                10 PICK         // h_{j+1;a}
+                10 PICK         // h_{j+1;b}
                 <mr3>
                 <child_ccv>
             }
         } else {
+            // [h_{i+m}, h_{j+1;a}, h_{j+1;b}, t_{i+m,j;a}, t_{i+m,j;b}]
             let mr5 = merkle_root_script(5);
             script! {
-                5 PICK          // h_mid_a
-                10 PICK         // h_end_a (1+9)
-                10 PICK         // h_end_b (2+8)
-                6 PICK          // trace_right_a (3+3)
-                4 PICK          // trace_right_b (4+0)
+                5 PICK          // h_{i+m}
+                10 PICK         // h_{j+1;a}
+                10 PICK         // h_{j+1;b}
+                6 PICK          // t_{i+m,j;a}
+                4 PICK          // t_{i+m,j;b}
                 <mr5>
                 <child_ccv>
             }
@@ -532,7 +512,7 @@ pub fn make_bisect_2(
         let drop11 = drop_script(11);
         let script = script! {
             <trace_check>
-            // check h_mid_a == h_mid_b
+            // check h_{i+m;a} == h_{i+m;b}
             5 PICK
             3 PICK
             EQUALVERIFY
