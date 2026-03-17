@@ -238,7 +238,7 @@ fn format_detail(inst: &InstanceSnapshot) -> String {
         format!("  Address: {}", inst.address),
         format!(
             "  State data: {} ({} bytes)",
-            truncate(&inst.data_hex, 32),
+            truncate(&inst.data_hex, 96),
             inst.data_hex.len() / 2
         ),
     ];
