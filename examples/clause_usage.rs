@@ -183,16 +183,20 @@ fn main() {
     // 3. Create a Contract with Type-Erased Clauses
     // ============================================================================
 
-    // Create a simple taptree
-    let taptree = Arc::new(TapTree::branch(
-        TapTree::leaf("trigger", ScriptBuf::new()),
-        TapTree::leaf("withdraw", ScriptBuf::new()),
-    ));
+    let params = VaultParams {
+        owner_pubkey: owner_pubkey_bytes,
+        recovery_pubkey: recovery_pubkey_bytes,
+    };
 
+    // Build the contract from a clause tree (the script taptree and clause lookup
+    // are derived from it).
     let contract = StandardAugmentedP2TR::<VaultParams, VaultState>::new(
         owner_key,
-        taptree.clone(),
-        vec![trigger_erased.clone(), withdraw_erased.clone()],
+        &params,
+        ClauseTree::branch(
+            ClauseTree::leaf(trigger_erased.clone()),
+            ClauseTree::leaf(withdraw_erased.clone()),
+        ),
     );
 
     println!(
@@ -211,11 +215,7 @@ fn main() {
     // Simulate a manager working with type-erased clauses
     println!("=== Simulating Manager Operations ===\n");
 
-    // Create test state
-    let params = VaultParams {
-        owner_pubkey: owner_pubkey_bytes,
-        recovery_pubkey: recovery_pubkey_bytes,
-    };
+    // Encode params for the type-erased clause API below.
     let params_bytes = params.encode();
 
     let state = VaultState {
@@ -281,8 +281,8 @@ fn main() {
         Arc::new(contract.clone()),
         Arc::new(StandardP2TR::<VaultParams>::new(
             owner_key,
-            taptree.clone(),
-            vec![trigger_erased.clone()],
+            &params,
+            ClauseTree::leaf(trigger_erased.clone()),
         )),
     ];
 

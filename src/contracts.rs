@@ -78,6 +78,35 @@ impl From<WitnessError> for ClauseError {
     }
 }
 
+/// Errors from contract address / key-derivation operations.
+#[derive(Debug)]
+pub enum ContractError {
+    /// An augmented-contract operation needs state but none was provided.
+    MissingState,
+    /// Failed to decode the contract state.
+    StateDecoding(WitnessError),
+    /// A taproot / secp256k1 key operation failed (tweak, parse, ...).
+    Key(String),
+}
+
+impl fmt::Display for ContractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ContractError::MissingState => write!(f, "state required for augmented contract"),
+            ContractError::StateDecoding(e) => write!(f, "failed to decode state: {}", e),
+            ContractError::Key(msg) => write!(f, "key operation failed: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for ContractError {}
+
+impl From<WitnessError> for ContractError {
+    fn from(e: WitnessError) -> Self {
+        ContractError::StateDecoding(e)
+    }
+}
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -360,6 +389,14 @@ impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
 // ============================================================================
 // Marker Trait Implementations
 // ============================================================================
+/// Contract parameters.
+///
+/// `encode`/`decode` are an internal, round-trippable serialization used to carry
+/// params alongside a contract instance (it is *not* a consensus format). The
+/// `#[derive(ContractParams)]` implementation frames each field so it can be
+/// decoded back: for every field it writes the field's witness elements as
+/// `u32-LE element_count`, then for each element `u32-LE length` followed by the
+/// element bytes. Decoding reverses this, field by field.
 pub trait ContractParams: Debug + Clone + Send + Sync {
     /// Encode parameters to bytes.
     fn encode(&self) -> Vec<u8>;
@@ -397,7 +434,18 @@ pub trait ClauseArgs: Debug + Clone + Send + Sync {
         Self: Sized;
 }
 
-// Implement ContractState for () to support stateless contracts
+// Implement ContractParams/ContractState for () to support stateless, paramless
+// contracts (e.g. terminal clauses that never compute next outputs).
+impl ContractParams for () {
+    fn encode(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
+        Ok(())
+    }
+}
+
 impl ContractState for () {
     fn encode(&self) -> Vec<u8> {
         Vec::new()
@@ -433,15 +481,26 @@ pub enum ClauseOutputAmountBehaviour {
     DeductOutput,
 }
 
+/// Which transaction output a clause output refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputIndex {
+    /// The output index equals the spending input's index.
+    Same,
+    /// An explicit output index.
+    Explicit(u32),
+}
+
 /// Represents a specific output defined by a contract clause.
+///
+/// The next contract carries its own params (see [`ErasedContract::params_bytes`]),
+/// so a clause output only needs to name the output, its (optional) state, and how
+/// its amount relates to the input.
 #[derive(Debug, Clone)]
 pub struct ClauseOutput {
-    /// The index of the output. A value of -1 implies the output's index equals the current input's index.
-    pub n: i32,
+    /// Which transaction output this refers to.
+    pub index: OutputIndex,
     /// The contract of this output.
     pub next_contract: Arc<dyn ErasedContract>,
-    /// The params data for the next contract instance (encoded bytes).
-    pub next_params: Option<Vec<u8>>,
     /// The state data for the next contract instance (encoded bytes).
     pub next_state: Option<Vec<u8>>,
     /// Determines the semantic of the output amount.
@@ -449,58 +508,53 @@ pub struct ClauseOutput {
 }
 
 impl ClauseOutput {
-    /// Create a new ClauseOutput builder at the specified output index.
-    /// 
+    /// Start building a clause output at an explicit output index.
+    ///
     /// # Example
     /// ```ignore
     /// let output = ClauseOutput::at(0)
     ///     .to(contract)
-    ///     .with_state(state)
-    ///     .preserve_amount();
+    ///     .with_state(&state)
+    ///     .preserve_amount()
+    ///     .build();
     /// ```
-    pub fn at(n: i32) -> ClauseOutputBuilder {
-        ClauseOutputBuilder {
-            n,
-            next_contract: None,
-            next_params: None,
-            next_state: None,
-            next_amount: ClauseOutputAmountBehaviour::PreserveOutput,
-        }
+    pub fn at(index: u32) -> ClauseOutputBuilder {
+        ClauseOutputBuilder::new(OutputIndex::Explicit(index))
     }
 
-    /// Create a terminal output (no next contract).
+    /// Start building a clause output whose index matches the spending input.
+    pub fn at_same_index() -> ClauseOutputBuilder {
+        ClauseOutputBuilder::new(OutputIndex::Same)
+    }
+
+    /// Create a terminal output set (no next contract).
     /// Useful for recovery or withdrawal clauses that don't constrain the output.
     pub fn terminal() -> Vec<ClauseOutput> {
         Vec::new()
     }
 }
 
-/// Builder for ClauseOutput with fluent API.
+/// Builder for [`ClauseOutput`] with a fluent API.
 pub struct ClauseOutputBuilder {
-    n: i32,
+    index: OutputIndex,
     next_contract: Option<Arc<dyn ErasedContract>>,
-    next_params: Option<Vec<u8>>,
     next_state: Option<Vec<u8>>,
     next_amount: ClauseOutputAmountBehaviour,
 }
 
 impl ClauseOutputBuilder {
+    fn new(index: OutputIndex) -> Self {
+        Self {
+            index,
+            next_contract: None,
+            next_state: None,
+            next_amount: ClauseOutputAmountBehaviour::PreserveOutput,
+        }
+    }
+
     /// Set the next contract for this output.
     pub fn to(mut self, contract: Arc<dyn ErasedContract>) -> Self {
         self.next_contract = Some(contract);
-        self
-    }
-
-    /// Set the next contract with params.
-    pub fn to_with_params<P: ContractParams>(mut self, contract: Arc<dyn ErasedContract>, params: &P) -> Self {
-        self.next_contract = Some(contract);
-        self.next_params = Some(params.encode());
-        self
-    }
-
-    /// Set the encoded params for the next contract.
-    pub fn with_params(mut self, params: Vec<u8>) -> Self {
-        self.next_params = Some(params);
         self
     }
 
@@ -534,15 +588,13 @@ impl ClauseOutputBuilder {
         self
     }
 
-    /// Build the ClauseOutput.
-    /// Panics if no next contract was set via `to`/`to_with_params`.
+    /// Build the [`ClauseOutput`]. Panics if no next contract was set via `to`.
     pub fn build(self) -> ClauseOutput {
         ClauseOutput {
-            n: self.n,
+            index: self.index,
             next_contract: self
                 .next_contract
-                .expect("ClauseOutput requires a next_contract; set one with .to() or .to_with_params()"),
-            next_params: self.next_params,
+                .expect("ClauseOutput requires a next_contract; set one with .to()"),
             next_state: self.next_state,
             next_amount: self.next_amount,
         }
@@ -706,6 +758,90 @@ impl TapTree {
 }
 
 // ============================================================================
+// Clause Tree
+// ============================================================================
+
+/// A taproot tree whose leaves are clauses.
+///
+/// This is the single source of truth for a contract's tapscript layout: both
+/// the script [`TapTree`] (and therefore the address) and the `name -> clause`
+/// lookup used when spending are *derived* from the same `ClauseTree`, so they
+/// can never drift apart. Build one with the `clause_tree!` macro and hand it to
+/// `StandardP2TR::new` / `StandardAugmentedP2TR::new`.
+pub enum ClauseTree {
+    Leaf(Arc<dyn ErasedClause>),
+    Branch(Arc<ClauseTree>, Arc<ClauseTree>),
+}
+
+impl ClauseTree {
+    /// Create a leaf from a clause.
+    pub fn leaf(clause: Arc<dyn ErasedClause>) -> Self {
+        ClauseTree::Leaf(clause)
+    }
+
+    /// Create a branch from two subtrees.
+    pub fn branch(left: ClauseTree, right: ClauseTree) -> Self {
+        ClauseTree::Branch(Arc::new(left), Arc::new(right))
+    }
+
+    /// Derive the script taptree (each leaf carries the clause name + script).
+    pub fn to_script_tree(&self) -> TapTree {
+        match self {
+            ClauseTree::Leaf(clause) => TapTree::Leaf(TapLeaf {
+                name: clause.name().to_string(),
+                script: clause.script().clone(),
+            }),
+            ClauseTree::Branch(left, right) => {
+                TapTree::branch(left.to_script_tree(), right.to_script_tree())
+            }
+        }
+    }
+
+    /// Collect all clauses, left-to-right (witness/spec order).
+    pub fn clauses(&self) -> Vec<Arc<dyn ErasedClause>> {
+        let mut out = Vec::new();
+        self.collect(&mut out);
+        out
+    }
+
+    fn collect(&self, out: &mut Vec<Arc<dyn ErasedClause>>) {
+        match self {
+            ClauseTree::Leaf(clause) => out.push(clause.clone()),
+            ClauseTree::Branch(left, right) => {
+                left.collect(out);
+                right.collect(out);
+            }
+        }
+    }
+}
+
+impl Debug for ClauseTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClauseTree::Leaf(clause) => f.debug_tuple("Leaf").field(&clause.name()).finish(),
+            ClauseTree::Branch(left, right) => {
+                f.debug_tuple("Branch").field(left).field(right).finish()
+            }
+        }
+    }
+}
+
+/// Debug-only check that clause names within a contract are unique. Duplicate
+/// names would make `get_clause` ambiguous and almost certainly indicate a bug.
+fn debug_assert_no_duplicate_clauses(clauses: &[Arc<dyn ErasedClause>]) {
+    if cfg!(debug_assertions) {
+        let mut seen = std::collections::HashSet::new();
+        for clause in clauses {
+            debug_assert!(
+                seen.insert(clause.name()),
+                "duplicate clause name in contract: {}",
+                clause.name()
+            );
+        }
+    }
+}
+
+// ============================================================================
 // Key Tweaking Utilities
 // ============================================================================
 
@@ -723,17 +859,17 @@ pub fn compute_state_tweak(naked_key: &[u8; 32], state_hash: &[u8; 32]) -> [u8; 
 pub fn apply_state_tweak(
     naked_key: &XOnlyPublicKey,
     state_hash: &[u8; 32],
-) -> Result<XOnlyPublicKey, String> {
+) -> Result<XOnlyPublicKey, ContractError> {
     let tweak_bytes = compute_state_tweak(&naked_key.serialize(), state_hash);
 
     let secp = Secp256k1::new();
     let scalar = bitcoin::secp256k1::Scalar::from_be_bytes(tweak_bytes)
-        .map_err(|e| format!("Invalid scalar: {}", e))?;
+        .map_err(|e| ContractError::Key(format!("invalid scalar: {}", e)))?;
 
     naked_key
         .add_tweak(&secp, &scalar)
         .map(|(tweaked, _parity)| tweaked)
-        .map_err(|e| format!("Failed to apply tweak: {}", e))
+        .map_err(|e| ContractError::Key(format!("failed to apply tweak: {}", e)))
 }
 
 /// Compute the final taproot output key from internal key and taptree.
@@ -790,6 +926,9 @@ pub trait ErasedClause: Debug + Send + Sync {
     /// Get the clause script.
     fn script(&self) -> &ScriptBuf;
 
+    /// Get the argument specifications, in witness order.
+    fn arg_specs(&self) -> &[ArgSpec];
+
     /// Encode arguments from a generic argument map to witness stack.
     fn encode_args_to_witness(
         &self,
@@ -832,6 +971,15 @@ pub trait ArgType: Debug + Send + Sync {
     /// Decode witness stack elements to an ArgValue.
     /// Returns (ArgValue, number of elements consumed).
     fn decode_from_witness(&self, witness: &[Vec<u8>]) -> Result<(ArgValue, usize), WitnessError>;
+
+    /// If this argument is a signature, the x-only pubkey expected to sign it.
+    ///
+    /// Returns `Some(pubkey)` for signature arguments (so the manager knows which
+    /// key must sign this witness element) and `None` for all other types. The
+    /// element is assumed to be a single witness item.
+    fn signer_pubkey(&self) -> Option<[u8; 32]> {
+        None
+    }
 
     /// Clone into a Box.
     fn clone_boxed(&self) -> Box<dyn ArgType>;
@@ -987,6 +1135,10 @@ where
         &self.script
     }
 
+    fn arg_specs(&self) -> &[ArgSpec] {
+        &self.arg_specs
+    }
+
     fn encode_args_to_witness(
         &self,
         args: &HashMap<String, ArgValue>,
@@ -1068,34 +1220,14 @@ where
 // Contract Traits
 // ============================================================================
 
-/// High-level trait for contracts with typed parameters and state.
-///
-/// This trait provides a clean interface for working with contracts and their clauses.
-/// It's designed to be auto-implemented by the #[derive(Contract)] macro.
-pub trait Contract {
-    type Params: ContractParams;
-    type State: ContractState;
-
-    /// Get the contract parameters.
-    fn params(&self) -> &Self::Params;
-
-    /// Get the contract state (if any).
-    fn state(&self) -> Option<&Self::State>;
-
-    /// Get a clause by name.
-    fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
-
-    /// Get the taptree for this contract.
-    fn taptree(&self) -> &Arc<TapTree>;
-
-    /// Get the StandardP2TR instance for this contract.
-    fn instance(&self) -> &StandardP2TR<Self::Params>;
-}
-
 /// Type-erased contract for runtime polymorphism.
 pub trait ErasedContract: Debug + Send + Sync {
     /// Get all clauses (type-erased).
     fn clauses(&self) -> &[Arc<dyn ErasedClause>];
+
+    /// The contract's encoded params. A contract is self-describing, so child
+    /// instances created by a clause can recover their params from here.
+    fn params_bytes(&self) -> &[u8];
 
     /// Get a clause by name.
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
@@ -1119,7 +1251,7 @@ pub trait ErasedContract: Debug + Send + Sync {
     ) -> Result<Vec<Vec<u8>>, ClauseError>;
 
     /// Get the script pubkey for this contract (with optional state).
-    fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String>;
+    fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError>;
 
     /// Get the internal pubkey for this contract.
     fn internal_pubkey(&self) -> XOnlyPublicKey;
@@ -1129,7 +1261,7 @@ pub trait ErasedContract: Debug + Send + Sync {
     fn control_block_internal_key(
         &self,
         state_bytes: Option<&[u8]>,
-    ) -> Result<XOnlyPublicKey, String>;
+    ) -> Result<XOnlyPublicKey, ContractError>;
 
     /// Get the taptree for this contract.
     fn taptree(&self) -> &Arc<TapTree>;
@@ -1153,19 +1285,25 @@ pub struct StandardP2TR<P: ContractParams> {
     pub internal_pubkey: XOnlyPublicKey,
     pub taptree: Arc<TapTree>,
     pub clauses: Vec<Arc<dyn ErasedClause>>,
+    /// Encoded params, so the contract is self-describing and child instances can
+    /// recover their params without a separate `next_params` carrier.
+    pub params_bytes: Vec<u8>,
     _phantom: PhantomData<P>,
 }
 
 impl<P: ContractParams> StandardP2TR<P> {
-    pub fn new(
-        internal_pubkey: XOnlyPublicKey,
-        taptree: Arc<TapTree>,
-        clauses: Vec<Arc<dyn ErasedClause>>,
-    ) -> Self {
+    /// Build a contract from its params and a clause tree. The script taptree and
+    /// the clause list are both derived from `clause_tree`, so they cannot drift
+    /// apart; the encoded params are stored so the contract is self-describing.
+    pub fn new(internal_pubkey: XOnlyPublicKey, params: &P, clause_tree: ClauseTree) -> Self {
+        let taptree = Arc::new(clause_tree.to_script_tree());
+        let clauses = clause_tree.clauses();
+        debug_assert_no_duplicate_clauses(&clauses);
         Self {
             internal_pubkey,
             taptree,
             clauses,
+            params_bytes: params.encode(),
             _phantom: PhantomData,
         }
     }
@@ -1199,6 +1337,7 @@ impl<P: ContractParams> Clone for StandardP2TR<P> {
             internal_pubkey: self.internal_pubkey,
             taptree: self.taptree.clone(),
             clauses: self.clauses.clone(),
+            params_bytes: self.params_bytes.clone(),
             _phantom: PhantomData,
         }
     }
@@ -1207,6 +1346,10 @@ impl<P: ContractParams> Clone for StandardP2TR<P> {
 impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     fn clauses(&self) -> &[Arc<dyn ErasedClause>] {
         &self.clauses
+    }
+
+    fn params_bytes(&self) -> &[u8] {
+        &self.params_bytes
     }
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
@@ -1244,7 +1387,7 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         Ok(witness_elements)
     }
 
-    fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String> {
+    fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
         Ok(ScriptBuf::new_p2tr_tweaked(
             TweakedPublicKey::dangerous_assume_tweaked(self.output_key()),
         ))
@@ -1257,7 +1400,7 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     fn control_block_internal_key(
         &self,
         _state_bytes: Option<&[u8]>,
-    ) -> Result<XOnlyPublicKey, String> {
+    ) -> Result<XOnlyPublicKey, ContractError> {
         Ok(self.internal_pubkey)
     }
 
@@ -1279,25 +1422,30 @@ pub struct StandardAugmentedP2TR<P: ContractParams, S: ContractState> {
     pub naked_internal_pubkey: XOnlyPublicKey,
     pub taptree: Arc<TapTree>,
     pub clauses: Vec<Arc<dyn ErasedClause>>,
+    /// Encoded params, so the contract is self-describing (see [`StandardP2TR`]).
+    pub params_bytes: Vec<u8>,
     _phantom: PhantomData<(P, S)>,
 }
 
 impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
-    pub fn new(
-        naked_internal_pubkey: XOnlyPublicKey,
-        taptree: Arc<TapTree>,
-        clauses: Vec<Arc<dyn ErasedClause>>,
-    ) -> Self {
+    /// Build an augmented contract from its params and a clause tree. The script
+    /// taptree and the clause list are both derived from `clause_tree`, so they
+    /// cannot drift apart; the encoded params are stored to be self-describing.
+    pub fn new(naked_internal_pubkey: XOnlyPublicKey, params: &P, clause_tree: ClauseTree) -> Self {
+        let taptree = Arc::new(clause_tree.to_script_tree());
+        let clauses = clause_tree.clauses();
+        debug_assert_no_duplicate_clauses(&clauses);
         Self {
             naked_internal_pubkey,
             taptree,
             clauses,
+            params_bytes: params.encode(),
             _phantom: PhantomData,
         }
     }
 
     /// Compute the internal pubkey tweaked with the state.
-    pub fn compute_internal_key(&self, state: &S) -> Result<XOnlyPublicKey, String> {
+    pub fn compute_internal_key(&self, state: &S) -> Result<XOnlyPublicKey, ContractError> {
         let state_bytes = state.encode();
 
         // For state commitment, we typically hash the state to get a 32-byte value
@@ -1315,7 +1463,7 @@ impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
     }
 
     /// Get the taproot output key for this contract with the given state.
-    pub fn output_key(&self, state: &S) -> Result<XOnlyPublicKey, String> {
+    pub fn output_key(&self, state: &S) -> Result<XOnlyPublicKey, ContractError> {
         let internal_key = self.compute_internal_key(state)?;
         Ok(compute_taproot_output_key(
             &internal_key,
@@ -1324,7 +1472,7 @@ impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
     }
 
     /// Get the scriptPubKey for this contract with the given state.
-    pub fn script_pubkey(&self, state: &S) -> Result<ScriptBuf, String> {
+    pub fn script_pubkey(&self, state: &S) -> Result<ScriptBuf, ContractError> {
         let output_key = self.output_key(state)?;
         Ok(ScriptBuf::new_p2tr_tweaked(
             TweakedPublicKey::dangerous_assume_tweaked(output_key),
@@ -1348,6 +1496,7 @@ impl<P: ContractParams, S: ContractState> Clone for StandardAugmentedP2TR<P, S> 
             naked_internal_pubkey: self.naked_internal_pubkey,
             taptree: self.taptree.clone(),
             clauses: self.clauses.clone(),
+            params_bytes: self.params_bytes.clone(),
             _phantom: PhantomData,
         }
     }
@@ -1358,6 +1507,10 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
 {
     fn clauses(&self) -> &[Arc<dyn ErasedClause>] {
         &self.clauses
+    }
+
+    fn params_bytes(&self) -> &[u8] {
+        &self.params_bytes
     }
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
@@ -1395,9 +1548,9 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         Ok(witness_elements)
     }
 
-    fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String> {
-        let state_bytes = state_bytes.ok_or("State required for augmented contract")?;
-        let state = S::decode(state_bytes).map_err(|e| format!("Failed to decode state: {}", e))?;
+    fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
+        let state_bytes = state_bytes.ok_or(ContractError::MissingState)?;
+        let state = S::decode(state_bytes)?;
         let output_key = self.output_key(&state)?;
         Ok(ScriptBuf::new_p2tr_tweaked(
             TweakedPublicKey::dangerous_assume_tweaked(output_key),
@@ -1413,9 +1566,9 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
     fn control_block_internal_key(
         &self,
         state_bytes: Option<&[u8]>,
-    ) -> Result<XOnlyPublicKey, String> {
-        let state_bytes = state_bytes.ok_or("State required for augmented contract")?;
-        let state = S::decode(state_bytes).map_err(|e| format!("Failed to decode state: {}", e))?;
+    ) -> Result<XOnlyPublicKey, ContractError> {
+        let state_bytes = state_bytes.ok_or(ContractError::MissingState)?;
+        let state = S::decode(state_bytes)?;
         self.compute_internal_key(&state)
     }
 
@@ -1425,226 +1578,6 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
 
     fn clone_boxed(&self) -> Box<dyn ErasedContract> {
         Box::new(self.clone())
-    }
-}
-
-// ============================================================================
-// Builder Patterns
-// ============================================================================
-
-/// Builder for creating StandardClause instances.
-pub struct StandardClauseBuilder<P, S, A>
-where
-    P: ContractParams + 'static,
-    S: ContractState + 'static,
-    A: ClauseArgs + 'static,
-{
-    name: Option<String>,
-    script: Option<ScriptBuf>,
-    arg_specs: Vec<ArgSpec>,
-    next_outputs_fn: Option<NextOutputsFn<P, S, A>>,
-    _phantom: PhantomData<(P, S, A)>,
-}
-
-impl<P, S, A> StandardClauseBuilder<P, S, A>
-where
-    P: ContractParams + 'static,
-    S: ContractState + 'static,
-    A: ClauseArgs + 'static,
-{
-    /// Create a new builder.
-    pub fn new() -> Self {
-        Self {
-            name: None,
-            script: None,
-            arg_specs: Vec::new(),
-            next_outputs_fn: None,
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Set the clause name.
-    pub fn name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    /// Set the clause script.
-    pub fn script(mut self, script: ScriptBuf) -> Self {
-        self.script = Some(script);
-        self
-    }
-
-    /// Add an argument specification.
-    pub fn arg(mut self, name: impl Into<String>, arg_type: Arc<dyn ArgType>) -> Self {
-        self.arg_specs.push(ArgSpec {
-            name: name.into(),
-            arg_type,
-        });
-        self
-    }
-
-    /// Add multiple argument specifications.
-    pub fn args(mut self, specs: Vec<ArgSpec>) -> Self {
-        self.arg_specs.extend(specs);
-        self
-    }
-
-    /// Set the next_outputs function.
-    pub fn next_outputs(
-        mut self,
-        f: impl Fn(&P, &A, Option<&S>) -> Result<Vec<ClauseOutput>, ClauseError> + Send + Sync + 'static,
-    ) -> Self {
-        self.next_outputs_fn = Some(Arc::new(f));
-        self
-    }
-
-    /// Build the StandardClause.
-    pub fn build(self) -> Result<StandardClause<P, S, A>, String> {
-        let name = self.name.ok_or("Clause name is required")?;
-        let script = self.script.ok_or("Clause script is required")?;
-
-        Ok(StandardClause::new(
-            name,
-            script,
-            self.arg_specs,
-            self.next_outputs_fn,
-        ))
-    }
-}
-
-impl<P, S, A> Default for StandardClauseBuilder<P, S, A>
-where
-    P: ContractParams + 'static,
-    S: ContractState + 'static,
-    A: ClauseArgs + 'static,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Builder for creating StandardP2TR contracts.
-pub struct StandardP2TRBuilder<P: ContractParams + 'static> {
-    internal_pubkey: Option<XOnlyPublicKey>,
-    taptree: Option<Arc<TapTree>>,
-    clauses: Vec<Arc<dyn ErasedClause>>,
-    _phantom: PhantomData<P>,
-}
-
-impl<P: ContractParams + 'static> StandardP2TRBuilder<P> {
-    /// Create a new builder.
-    pub fn new() -> Self {
-        Self {
-            internal_pubkey: None,
-            taptree: None,
-            clauses: Vec::new(),
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Set the internal pubkey.
-    pub fn internal_pubkey(mut self, key: XOnlyPublicKey) -> Self {
-        self.internal_pubkey = Some(key);
-        self
-    }
-
-    /// Set the taptree.
-    pub fn taptree(mut self, tree: Arc<TapTree>) -> Self {
-        self.taptree = Some(tree);
-        self
-    }
-
-    /// Add a clause.
-    pub fn clause(mut self, clause: Arc<dyn ErasedClause>) -> Self {
-        self.clauses.push(clause);
-        self
-    }
-
-    /// Add multiple clauses.
-    pub fn clauses(mut self, clauses: Vec<Arc<dyn ErasedClause>>) -> Self {
-        self.clauses.extend(clauses);
-        self
-    }
-
-    /// Build the StandardP2TR contract.
-    pub fn build(self) -> Result<StandardP2TR<P>, String> {
-        let internal_pubkey = self.internal_pubkey.ok_or("Internal pubkey is required")?;
-        let taptree = self.taptree.ok_or("Taptree is required")?;
-
-        Ok(StandardP2TR::new(internal_pubkey, taptree, self.clauses))
-    }
-}
-
-impl<P: ContractParams + 'static> Default for StandardP2TRBuilder<P> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Builder for creating StandardAugmentedP2TR contracts.
-pub struct StandardAugmentedP2TRBuilder<P: ContractParams + 'static, S: ContractState + 'static> {
-    naked_internal_pubkey: Option<XOnlyPublicKey>,
-    taptree: Option<Arc<TapTree>>,
-    clauses: Vec<Arc<dyn ErasedClause>>,
-    _phantom: PhantomData<(P, S)>,
-}
-
-impl<P: ContractParams + 'static, S: ContractState + 'static> StandardAugmentedP2TRBuilder<P, S> {
-    /// Create a new builder.
-    pub fn new() -> Self {
-        Self {
-            naked_internal_pubkey: None,
-            taptree: None,
-            clauses: Vec::new(),
-            _phantom: PhantomData,
-        }
-    }
-
-    /// Set the naked internal pubkey.
-    pub fn naked_internal_pubkey(mut self, key: XOnlyPublicKey) -> Self {
-        self.naked_internal_pubkey = Some(key);
-        self
-    }
-
-    /// Set the taptree.
-    pub fn taptree(mut self, tree: Arc<TapTree>) -> Self {
-        self.taptree = Some(tree);
-        self
-    }
-
-    /// Add a clause.
-    pub fn clause(mut self, clause: Arc<dyn ErasedClause>) -> Self {
-        self.clauses.push(clause);
-        self
-    }
-
-    /// Add multiple clauses.
-    pub fn clauses(mut self, clauses: Vec<Arc<dyn ErasedClause>>) -> Self {
-        self.clauses.extend(clauses);
-        self
-    }
-
-    /// Build the StandardAugmentedP2TR contract.
-    pub fn build(self) -> Result<StandardAugmentedP2TR<P, S>, String> {
-        let naked_internal_pubkey = self
-            .naked_internal_pubkey
-            .ok_or("Naked internal pubkey is required")?;
-        let taptree = self.taptree.ok_or("Taptree is required")?;
-
-        Ok(StandardAugmentedP2TR::new(
-            naked_internal_pubkey,
-            taptree,
-            self.clauses,
-        ))
-    }
-}
-
-impl<P: ContractParams + 'static, S: ContractState + 'static> Default
-    for StandardAugmentedP2TRBuilder<P, S>
-{
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1672,7 +1605,7 @@ pub struct ContractInstance {
     /// The contract template (type-erased for runtime polymorphism).
     pub contract: Arc<dyn ErasedContract>,
 
-    /// Serialized contract parameters.
+    /// Serialized contract parameters (cached from `contract.params_bytes()`).
     pub params_bytes: Vec<u8>,
 
     /// Serialized contract state (None for non-augmented contracts).
@@ -1698,12 +1631,10 @@ pub struct ContractInstance {
 }
 
 impl ContractInstance {
-    /// Create a new unfunded instance.
-    pub fn new(
-        contract: Arc<dyn ErasedContract>,
-        params_bytes: Vec<u8>,
-        state_bytes: Option<Vec<u8>>,
-    ) -> Self {
+    /// Create a new unfunded instance. The params are taken from the contract,
+    /// which is self-describing, so they cannot disagree with it.
+    pub fn new(contract: Arc<dyn ErasedContract>, state_bytes: Option<Vec<u8>>) -> Self {
+        let params_bytes = contract.params_bytes().to_vec();
         Self {
             contract,
             params_bytes,

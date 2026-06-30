@@ -1,6 +1,7 @@
 //! End-to-end vault contract tests
 
 mod common;
+mod support;
 
 use std::{collections::HashMap, str::FromStr};
 
@@ -11,12 +12,12 @@ use bitcoin::{
 
 use mattrs::{
     argtypes::ArgValue,
-    contracts::{ContractParams, InstanceStatus},
+    contracts::{InstanceStatus, OutputIndex},
     ctv::create_ctv_template,
     manager::ContractManager,
     signer::{HotSigner, Signer},
-    vault::{Vault, VaultParams},
 };
+use support::vault::{Vault, VaultParams};
 
 #[test]
 fn test_vault_address_matches_reference() {
@@ -104,7 +105,11 @@ fn test_vault_trigger_outputs() {
     let outputs = vault.trigger_outputs(ctv_hash, 0).unwrap();
 
     assert_eq!(outputs.len(), 1, "Trigger should create 1 output");
-    assert_eq!(outputs[0].n, 0, "Output index should be 0");
+    assert_eq!(
+        outputs[0].index,
+        OutputIndex::Explicit(0),
+        "Output index should be 0"
+    );
     assert!(
         outputs[0].next_state.is_some(),
         "Unvaulting should have state"
@@ -129,8 +134,16 @@ fn test_vault_trigger_and_revault_outputs() {
         2,
         "Should create 2 outputs (revault + unvaulting)"
     );
-    assert_eq!(outputs[0].n, 1, "Revault output index should be 1");
-    assert_eq!(outputs[1].n, 0, "Unvaulting output index should be 0");
+    assert_eq!(
+        outputs[0].index,
+        OutputIndex::Explicit(1),
+        "Revault output index should be 1"
+    );
+    assert_eq!(
+        outputs[1].index,
+        OutputIndex::Explicit(0),
+        "Unvaulting output index should be 0"
+    );
     assert!(
         outputs[0].next_state.is_none(),
         "Revault (vault) has no state"
@@ -155,8 +168,11 @@ fn test_vault_recover_outputs() {
     assert_eq!(outputs.len(), 0, "Recover should be terminal (no outputs)");
 }
 
-// Integration test - requires running bitcoind
+// Integration test - requires a running regtest bitcoind.
+// Ignored by default so `cargo test` is green without a node; run with
+// `cargo test -- --ignored` against a configured regtest daemon.
 #[test]
+#[ignore = "requires a running regtest bitcoind"]
 fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let secp = Secp256k1::new();
     // Initialize the RPC client
@@ -194,14 +210,8 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut manager = ContractManager::new(&client);
 
-    // Create and fund a Vault instance
-    let params_bytes = vault.params.encode();
-    let inst = manager.fund_instance(
-        vault.as_erased(),
-        params_bytes,
-        None,
-        Amount::from_sat(amount),
-    )?;
+    // Create and fund a Vault instance (params come from the contract).
+    let inst = manager.fund_instance(vault.as_erased(), None, Amount::from_sat(amount))?;
 
     // Clone the instance for later use
     let inst_clone = inst.instance.clone();

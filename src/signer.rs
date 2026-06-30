@@ -70,19 +70,20 @@ pub fn compute_tap_sighash(
     prevouts: &[TxOut],
     leaf_hash: Option<bitcoin::taproot::TapLeafHash>,
     sighash_type: TapSighashType,
-) -> Result<[u8; 32], String> {
+) -> Result<[u8; 32], bitcoin::sighash::TaprootError> {
     let prevouts = Prevouts::All(prevouts);
 
     let mut sighash_cache = SighashCache::new(tx);
 
     let sighash = if let Some(leaf) = leaf_hash {
-        sighash_cache
-            .taproot_script_spend_signature_hash(input_index, &prevouts, leaf, sighash_type)
-            .map_err(|e| format!("Failed to compute sighash: {}", e))?
+        sighash_cache.taproot_script_spend_signature_hash(
+            input_index,
+            &prevouts,
+            leaf,
+            sighash_type,
+        )?
     } else {
-        sighash_cache
-            .taproot_key_spend_signature_hash(input_index, &prevouts, sighash_type)
-            .map_err(|e| format!("Failed to compute sighash: {}", e))?
+        sighash_cache.taproot_key_spend_signature_hash(input_index, &prevouts, sighash_type)?
     };
 
     Ok(*sighash.as_byte_array())

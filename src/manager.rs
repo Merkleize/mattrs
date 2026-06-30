@@ -10,7 +10,7 @@ use bitcoincore_rpc::{Client, RpcApi};
 
 use crate::{
     argtypes::ArgValue,
-    contracts::{ClauseError, ContractInstance, ErasedContract, InstanceStatus},
+    contracts::{ClauseError, ContractError, ContractInstance, ErasedContract, InstanceStatus},
     signer::Signer,
 };
 
@@ -22,6 +22,7 @@ pub type SignerMap = HashMap<XOnlyPublicKey, Box<dyn Signer>>;
 pub enum ManagerError {
     RpcError(bitcoincore_rpc::Error),
     ClauseError(ClauseError),
+    ContractError(ContractError),
     InvalidInstance(String),
     OutputNotFound,
     TransactionBuildError(String),
@@ -33,6 +34,7 @@ impl std::fmt::Display for ManagerError {
         match self {
             ManagerError::RpcError(e) => write!(f, "RPC error: {}", e),
             ManagerError::ClauseError(e) => write!(f, "Clause error: {}", e),
+            ManagerError::ContractError(e) => write!(f, "Contract error: {}", e),
             ManagerError::InvalidInstance(msg) => write!(f, "Invalid instance: {}", msg),
             ManagerError::OutputNotFound => write!(f, "Output not found on blockchain"),
             ManagerError::TransactionBuildError(msg) => {
@@ -54,6 +56,12 @@ impl From<bitcoincore_rpc::Error> for ManagerError {
 impl From<ClauseError> for ManagerError {
     fn from(e: ClauseError) -> Self {
         ManagerError::ClauseError(e)
+    }
+}
+
+impl From<ContractError> for ManagerError {
+    fn from(e: ContractError) -> Self {
+        ManagerError::ContractError(e)
     }
 }
 
@@ -92,11 +100,11 @@ impl<'a> ContractManager<'a> {
         }
     }
 
-    /// Create and fund a new contract instance.
+    /// Create and fund a new contract instance. Params are taken from the
+    /// (self-describing) contract.
     pub fn fund_instance<'b>(
         &'b mut self,
         contract: std::sync::Arc<dyn ErasedContract>,
-        params_bytes: Vec<u8>,
         state_bytes: Option<Vec<u8>>,
         amount: Amount,
     ) -> Result<InstanceHandle<'b>, ManagerError>
@@ -104,18 +112,14 @@ impl<'a> ContractManager<'a> {
         'a: 'b,
     {
         // Create the instance
-        let instance = Rc::new(RefCell::new(ContractInstance::new(
-            contract,
-            params_bytes,
-            state_bytes,
-        )));
+        let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state_bytes)));
 
         // Get the script pubkey for this instance
         let script_pubkey = self.get_instance_script_pubkey(&instance)?;
 
         // Fund it using RPC
         let params = bitcoin::Network::Regtest.params();
-        let address = bitcoin::Address::from_script(&script_pubkey, &params)
+        let address = bitcoin::Address::from_script(&script_pubkey, params)
             .map_err(|e| ManagerError::Other(format!("Failed to create address: {}", e)))?;
 
         let txid = self
@@ -240,9 +244,7 @@ impl<'a> ContractManager<'a> {
         instance: &Rc<RefCell<ContractInstance>>,
     ) -> Result<bitcoin::ScriptBuf, ManagerError> {
         let inst = instance.borrow();
-        inst.contract
-            .script_pubkey(inst.state_bytes.as_deref())
-            .map_err(|e| ManagerError::Other(e))
+        Ok(inst.contract.script_pubkey(inst.state_bytes.as_deref())?)
     }
 
     fn wait_for_transaction(&self, txid: Txid) -> Result<Transaction, ManagerError> {
@@ -259,6 +261,9 @@ impl<'a> ContractManager<'a> {
         ))
     }
 
+    // A private worker that genuinely needs the full spend context (inputs,
+    // outputs, the instance being spent, the clause, its args, signers, sequence).
+    #[allow(clippy::too_many_arguments)]
     fn build_transaction(
         &self,
         inputs: Vec<OutPoint>,
@@ -303,8 +308,7 @@ impl<'a> ContractManager<'a> {
             for clause_out in clause_outs {
                 let script_pubkey = clause_out
                     .next_contract
-                    .script_pubkey(clause_out.next_state.as_deref())
-                    .map_err(|e| ManagerError::TransactionBuildError(e))?;
+                    .script_pubkey(clause_out.next_state.as_deref())?;
 
                 let value = match clause_out.next_amount {
                     crate::contracts::ClauseOutputAmountBehaviour::PreserveOutput => input_amount,
@@ -381,19 +385,50 @@ impl<'a> ContractManager<'a> {
                 Some(leaf_hash),
                 bitcoin::sighash::TapSighashType::Default,
             )
-            .map_err(|e| ManagerError::TransactionBuildError(e))?;
+            .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
 
-            // Replace placeholder signatures (64 bytes of zeros) with real signatures
-            for elem in witness_stack.iter_mut() {
-                if elem.len() == 64 && elem.iter().all(|&b| b == 0) {
-                    // This is a placeholder signature - find a signer and sign
-                    for (_pubkey, signer) in signer_map.iter() {
-                        let sig = signer.sign(&sighash);
-                        *elem = sig;
-                        break; // Use first available signer for this placeholder
+            // Walk the clause's arg specs in witness order. Each signature arg
+            // occupies exactly one witness element and names the x-only pubkey that
+            // must sign it; sign that element with the matching signer. Non-signer
+            // args are skipped (but still advance the witness offset). This avoids
+            // the old behaviour of overwriting *any* 64-byte-zero element with an
+            // arbitrary signer from the map, which was wrong for multi-key clauses.
+            let inst = instance.borrow();
+            let clause = inst.contract.get_clause(clause_name).ok_or_else(|| {
+                ManagerError::TransactionBuildError(format!("Clause '{}' not found", clause_name))
+            })?;
+
+            let mut offset = 0usize;
+            for spec in clause.arg_specs() {
+                let value = args.get(&spec.name).ok_or_else(|| {
+                    ManagerError::TransactionBuildError(format!(
+                        "Missing argument '{}' for clause '{}'",
+                        spec.name, clause_name
+                    ))
+                })?;
+                let element_count = spec
+                    .arg_type
+                    .encode_to_witness(value)
+                    .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?
+                    .len();
+
+                if let Some(pubkey) = spec.arg_type.signer_pubkey() {
+                    let xonly = XOnlyPublicKey::from_slice(&pubkey).map_err(|e| {
+                        ManagerError::TransactionBuildError(format!(
+                            "Invalid signer pubkey for argument '{}': {}",
+                            spec.name, e
+                        ))
+                    })?;
+                    // Sign with the required key when we hold it; otherwise leave the
+                    // caller-provided value in place (it may be pre-signed).
+                    if let Some(signer) = signer_map.get(&xonly) {
+                        witness_stack[offset] = signer.sign(&sighash);
                     }
                 }
+
+                offset += element_count;
             }
+            drop(inst);
         }
 
         // Add the script and control block to complete the tapscript witness
@@ -408,8 +443,7 @@ impl<'a> ContractManager<'a> {
             // For augmented contracts, this is the state-tweaked key
             let internal_key = inst
                 .contract
-                .control_block_internal_key(inst.state_bytes.as_deref())
-                .map_err(|e| ManagerError::TransactionBuildError(e))?;
+                .control_block_internal_key(inst.state_bytes.as_deref())?;
             let taptree = inst.contract.taptree();
 
             // Generate the control block
@@ -453,31 +487,24 @@ impl<'a> ContractManager<'a> {
         let spending_tx = self.wait_for_transaction(parent_txid)?;
 
         // Create instances for each output
-        for (_idx, clause_out) in outputs.iter().enumerate() {
-            let vout = if clause_out.n == -1 {
-                // Use same index as parent's input
-                let parent_ref = parent.borrow();
-                parent_ref
-                    .outpoint
-                    .ok_or_else(|| ManagerError::InvalidInstance("No parent outpoint".to_string()))?
-                    .vout
-            } else {
-                clause_out.n as u32
+        for clause_out in outputs.iter() {
+            let vout = match clause_out.index {
+                // Use the same index as the parent's input.
+                crate::contracts::OutputIndex::Same => {
+                    let parent_ref = parent.borrow();
+                    parent_ref
+                        .outpoint
+                        .ok_or_else(|| {
+                            ManagerError::InvalidInstance("No parent outpoint".to_string())
+                        })?
+                        .vout
+                }
+                crate::contracts::OutputIndex::Explicit(n) => n,
             };
 
-            // Use next_params if provided, otherwise use parent's params
-            let params_bytes = if let Some(ref next_params) = clause_out.next_params {
-                next_params.clone()
-            } else {
-                let parent_ref = parent.borrow();
-                let params = parent_ref.params_bytes.clone();
-                drop(parent_ref);
-                params
-            };
-
+            // The child contract is self-describing, so its params come from it.
             let instance = Rc::new(RefCell::new(ContractInstance::new(
                 clause_out.next_contract.clone(),
-                params_bytes,
                 clause_out.next_state.clone(),
             )));
 
@@ -500,8 +527,8 @@ impl<'a> ContractManager<'a> {
 
 /// A handle to a contract instance that provides access to both the instance and the manager.
 ///
-/// This allows clause methods generated by the `#[clause]` macro to access the manager
-/// for spending operations.
+/// Returned by spend/fund operations so callers can inspect the resulting
+/// instance(s) and continue spending through the manager.
 pub struct InstanceHandle<'a> {
     pub instance: Rc<RefCell<ContractInstance>>,
     pub manager: &'a ContractManager<'a>,

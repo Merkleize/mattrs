@@ -193,6 +193,10 @@ impl ArgTypeTrait for SignerType {
         Ok((ArgValue::Signature(stack[0].clone()), 1))
     }
 
+    fn signer_pubkey(&self) -> Option<[u8; 32]> {
+        Some(self.pubkey)
+    }
+
     fn clone_boxed(&self) -> Box<dyn ArgTypeTrait> {
         Box::new(self.clone())
     }
