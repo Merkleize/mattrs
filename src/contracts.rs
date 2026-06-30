@@ -1,4 +1,6 @@
-use std::{cell::RefCell, collections::HashMap, fmt, fmt::Debug, marker::PhantomData, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell, collections::HashMap, fmt, fmt::Debug, marker::PhantomData, rc::Rc, sync::Arc,
+};
 
 use bitcoin::{
     OutPoint, ScriptBuf, TapTweakHash, Transaction, Txid, XOnlyPublicKey,
@@ -395,6 +397,27 @@ pub trait ClauseArgs: Debug + Clone + Send + Sync {
         Self: Sized;
 }
 
+// Implement ContractState for () to support stateless contracts
+impl ContractState for () {
+    fn encode(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
+        Ok(())
+    }
+}
+
+impl WitnessEncodable for () {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        Vec::new()
+    }
+
+    fn decode_from_witness(_witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        Ok(((), 0))
+    }
+}
+
 // ============================================================================
 // Clause Output Types
 // ============================================================================
@@ -423,6 +446,107 @@ pub struct ClauseOutput {
     pub next_state: Option<Vec<u8>>,
     /// Determines the semantic of the output amount.
     pub next_amount: ClauseOutputAmountBehaviour,
+}
+
+impl ClauseOutput {
+    /// Create a new ClauseOutput builder at the specified output index.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let output = ClauseOutput::at(0)
+    ///     .to(contract)
+    ///     .with_state(state)
+    ///     .preserve_amount();
+    /// ```
+    pub fn at(n: i32) -> ClauseOutputBuilder {
+        ClauseOutputBuilder {
+            n,
+            next_contract: None,
+            next_params: None,
+            next_state: None,
+            next_amount: ClauseOutputAmountBehaviour::PreserveOutput,
+        }
+    }
+
+    /// Create a terminal output (no next contract).
+    /// Useful for recovery or withdrawal clauses that don't constrain the output.
+    pub fn terminal() -> Vec<ClauseOutput> {
+        Vec::new()
+    }
+}
+
+/// Builder for ClauseOutput with fluent API.
+pub struct ClauseOutputBuilder {
+    n: i32,
+    next_contract: Option<Arc<dyn ErasedContract>>,
+    next_params: Option<Vec<u8>>,
+    next_state: Option<Vec<u8>>,
+    next_amount: ClauseOutputAmountBehaviour,
+}
+
+impl ClauseOutputBuilder {
+    /// Set the next contract for this output.
+    pub fn to(mut self, contract: Arc<dyn ErasedContract>) -> Self {
+        self.next_contract = Some(contract);
+        self
+    }
+
+    /// Set the next contract with params.
+    pub fn to_with_params<P: ContractParams>(mut self, contract: Arc<dyn ErasedContract>, params: &P) -> Self {
+        self.next_contract = Some(contract);
+        self.next_params = Some(params.encode());
+        self
+    }
+
+    /// Set the encoded params for the next contract.
+    pub fn with_params(mut self, params: Vec<u8>) -> Self {
+        self.next_params = Some(params);
+        self
+    }
+
+    /// Set the state for the next contract (encodes automatically).
+    pub fn with_state<S: ContractState>(mut self, state: &S) -> Self {
+        self.next_state = Some(state.encode());
+        self
+    }
+
+    /// Set the encoded state bytes directly.
+    pub fn with_state_bytes(mut self, state: Vec<u8>) -> Self {
+        self.next_state = Some(state);
+        self
+    }
+
+    /// Set amount behaviour to preserve output (default).
+    pub fn preserve_amount(mut self) -> Self {
+        self.next_amount = ClauseOutputAmountBehaviour::PreserveOutput;
+        self
+    }
+
+    /// Set amount behaviour to ignore output.
+    pub fn ignore_amount(mut self) -> Self {
+        self.next_amount = ClauseOutputAmountBehaviour::IgnoreOutput;
+        self
+    }
+
+    /// Set amount behaviour to deduct from input.
+    pub fn deduct_amount(mut self) -> Self {
+        self.next_amount = ClauseOutputAmountBehaviour::DeductOutput;
+        self
+    }
+
+    /// Build the ClauseOutput.
+    /// Panics if no next contract was set via `to`/`to_with_params`.
+    pub fn build(self) -> ClauseOutput {
+        ClauseOutput {
+            n: self.n,
+            next_contract: self
+                .next_contract
+                .expect("ClauseOutput requires a next_contract; set one with .to() or .to_with_params()"),
+            next_params: self.next_params,
+            next_state: self.next_state,
+            next_amount: self.next_amount,
+        }
+    }
 }
 
 // ============================================================================
@@ -944,6 +1068,30 @@ where
 // Contract Traits
 // ============================================================================
 
+/// High-level trait for contracts with typed parameters and state.
+///
+/// This trait provides a clean interface for working with contracts and their clauses.
+/// It's designed to be auto-implemented by the #[derive(Contract)] macro.
+pub trait Contract {
+    type Params: ContractParams;
+    type State: ContractState;
+
+    /// Get the contract parameters.
+    fn params(&self) -> &Self::Params;
+
+    /// Get the contract state (if any).
+    fn state(&self) -> Option<&Self::State>;
+
+    /// Get a clause by name.
+    fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
+
+    /// Get the taptree for this contract.
+    fn taptree(&self) -> &Arc<TapTree>;
+
+    /// Get the StandardP2TR instance for this contract.
+    fn instance(&self) -> &StandardP2TR<Self::Params>;
+}
+
 /// Type-erased contract for runtime polymorphism.
 pub trait ErasedContract: Debug + Send + Sync {
     /// Get all clauses (type-erased).
@@ -951,7 +1099,7 @@ pub trait ErasedContract: Debug + Send + Sync {
 
     /// Get a clause by name.
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
-    
+
     /// Execute a clause and get the next outputs.
     fn execute_clause_erased(
         &self,
@@ -960,7 +1108,7 @@ pub trait ErasedContract: Debug + Send + Sync {
         args: HashMap<String, ArgValue>,
         state_bytes: Option<&[u8]>,
     ) -> Result<Option<Vec<ClauseOutput>>, ClauseError>;
-    
+
     /// Build the witness stack for spending with a specific clause.
     fn build_witness_stack(
         &self,
@@ -969,7 +1117,7 @@ pub trait ErasedContract: Debug + Send + Sync {
         args: &HashMap<String, ArgValue>,
         state_bytes: Option<&[u8]>,
     ) -> Result<Vec<Vec<u8>>, ClauseError>;
-    
+
     /// Get the script pubkey for this contract (with optional state).
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String>;
 
@@ -978,7 +1126,10 @@ pub trait ErasedContract: Debug + Send + Sync {
 
     /// Get the internal pubkey to use for control block generation.
     /// For augmented contracts with state, this may be state-tweaked.
-    fn control_block_internal_key(&self, state_bytes: Option<&[u8]>) -> Result<XOnlyPublicKey, String>;
+    fn control_block_internal_key(
+        &self,
+        state_bytes: Option<&[u8]>,
+    ) -> Result<XOnlyPublicKey, String>;
 
     /// Get the taptree for this contract.
     fn taptree(&self) -> &Arc<TapTree>;
@@ -1061,7 +1212,7 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
         self.clauses.iter().find(|c| c.name() == name)
     }
-    
+
     fn execute_clause_erased(
         &self,
         clause_name: &str,
@@ -1069,13 +1220,15 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         args: HashMap<String, ArgValue>,
         state_bytes: Option<&[u8]>,
     ) -> Result<Option<Vec<ClauseOutput>>, ClauseError> {
-        let clause = self.get_clause(clause_name)
+        let clause = self
+            .get_clause(clause_name)
             .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
-        
-        clause.next_outputs_erased(params_bytes, &args, state_bytes)
+
+        clause
+            .next_outputs_erased(params_bytes, &args, state_bytes)
             .map(Some)
     }
-    
+
     fn build_witness_stack(
         &self,
         clause_name: &str,
@@ -1083,24 +1236,28 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         args: &HashMap<String, ArgValue>,
         _state_bytes: Option<&[u8]>,
     ) -> Result<Vec<Vec<u8>>, ClauseError> {
-        let clause = self.get_clause(clause_name)
+        let clause = self
+            .get_clause(clause_name)
             .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
-        
+
         let witness_elements = clause.encode_args_to_witness(args)?;
         Ok(witness_elements)
     }
-    
+
     fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String> {
-        Ok(ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(
-            self.output_key(),
-        )))
+        Ok(ScriptBuf::new_p2tr_tweaked(
+            TweakedPublicKey::dangerous_assume_tweaked(self.output_key()),
+        ))
     }
 
     fn internal_pubkey(&self) -> XOnlyPublicKey {
         self.internal_pubkey
     }
 
-    fn control_block_internal_key(&self, _state_bytes: Option<&[u8]>) -> Result<XOnlyPublicKey, String> {
+    fn control_block_internal_key(
+        &self,
+        _state_bytes: Option<&[u8]>,
+    ) -> Result<XOnlyPublicKey, String> {
         Ok(self.internal_pubkey)
     }
 
@@ -1206,7 +1363,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
         self.clauses.iter().find(|c| c.name() == name)
     }
-    
+
     fn execute_clause_erased(
         &self,
         clause_name: &str,
@@ -1214,13 +1371,15 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         args: HashMap<String, ArgValue>,
         state_bytes: Option<&[u8]>,
     ) -> Result<Option<Vec<ClauseOutput>>, ClauseError> {
-        let clause = self.get_clause(clause_name)
+        let clause = self
+            .get_clause(clause_name)
             .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
-        
-        clause.next_outputs_erased(params_bytes, &args, state_bytes)
+
+        clause
+            .next_outputs_erased(params_bytes, &args, state_bytes)
             .map(Some)
     }
-    
+
     fn build_witness_stack(
         &self,
         clause_name: &str,
@@ -1228,17 +1387,17 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         args: &HashMap<String, ArgValue>,
         _state_bytes: Option<&[u8]>,
     ) -> Result<Vec<Vec<u8>>, ClauseError> {
-        let clause = self.get_clause(clause_name)
+        let clause = self
+            .get_clause(clause_name)
             .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
-        
+
         let witness_elements = clause.encode_args_to_witness(args)?;
         Ok(witness_elements)
     }
-    
+
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, String> {
         let state_bytes = state_bytes.ok_or("State required for augmented contract")?;
-        let state = S::decode(state_bytes)
-            .map_err(|e| format!("Failed to decode state: {}", e))?;
+        let state = S::decode(state_bytes).map_err(|e| format!("Failed to decode state: {}", e))?;
         let output_key = self.output_key(&state)?;
         Ok(ScriptBuf::new_p2tr_tweaked(
             TweakedPublicKey::dangerous_assume_tweaked(output_key),
@@ -1251,10 +1410,12 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         self.naked_internal_pubkey
     }
 
-    fn control_block_internal_key(&self, state_bytes: Option<&[u8]>) -> Result<XOnlyPublicKey, String> {
+    fn control_block_internal_key(
+        &self,
+        state_bytes: Option<&[u8]>,
+    ) -> Result<XOnlyPublicKey, String> {
         let state_bytes = state_bytes.ok_or("State required for augmented contract")?;
-        let state = S::decode(state_bytes)
-            .map_err(|e| format!("Failed to decode state: {}", e))?;
+        let state = S::decode(state_bytes).map_err(|e| format!("Failed to decode state: {}", e))?;
         self.compute_internal_key(&state)
     }
 
@@ -1510,28 +1671,28 @@ pub enum InstanceStatus {
 pub struct ContractInstance {
     /// The contract template (type-erased for runtime polymorphism).
     pub contract: Arc<dyn ErasedContract>,
-    
+
     /// Serialized contract parameters.
     pub params_bytes: Vec<u8>,
-    
+
     /// Serialized contract state (None for non-augmented contracts).
     pub state_bytes: Option<Vec<u8>>,
-    
+
     /// The outpoint identifying this instance on-chain (None until funded).
     pub outpoint: Option<OutPoint>,
-    
+
     /// The transaction that funded this instance (None until funded).
     pub funding_tx: Option<Transaction>,
-    
+
     /// Current status in the instance lifecycle.
     pub status: InstanceStatus,
-    
+
     /// Transaction ID that spent this instance (None until spent).
     pub spent_in_tx: Option<Txid>,
-    
+
     /// Name of the clause used to spend this instance (None until spent).
     pub clause_name: Option<String>,
-    
+
     /// Child instances created when this instance was spent.
     pub outputs: Vec<Rc<RefCell<ContractInstance>>>,
 }
@@ -1555,21 +1716,21 @@ impl ContractInstance {
             outputs: Vec::new(),
         }
     }
-    
+
     /// Mark the instance as funded with the given outpoint and transaction.
     pub fn mark_funded(&mut self, outpoint: OutPoint, funding_tx: Transaction) {
         self.outpoint = Some(outpoint);
         self.funding_tx = Some(funding_tx);
         self.status = InstanceStatus::Funded;
     }
-    
+
     /// Mark the instance as spent with the given transaction and clause.
     pub fn mark_spent(&mut self, txid: Txid, clause_name: String) {
         self.spent_in_tx = Some(txid);
         self.clause_name = Some(clause_name);
         self.status = InstanceStatus::Spent;
     }
-    
+
     /// Add a child instance created from spending this instance.
     pub fn add_output(&mut self, instance: Rc<RefCell<ContractInstance>>) {
         self.outputs.push(instance);

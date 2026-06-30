@@ -1,13 +1,52 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, ImplItem, ItemImpl};
+use syn::{parse_macro_input, spanned::Spanned, Data, DeriveInput, Fields, ImplItem, ItemImpl, Type, Meta};
 
 /// Derive macro for ClauseArgs trait.
-/// Automatically implements encoding/decoding to witness stack.
-#[proc_macro_derive(ClauseArgs)]
+/// Automatically implements encoding/decoding to witness stack and generates arg_specs().
+/// 
+/// # Attributes
+/// 
+/// ## Struct-level attributes
+/// - `#[clause_args(params = ParamsType)]` - Specifies the params type for param-dependent arg_specs.
+///   When specified, generates `arg_specs_for_params(params: &ParamsType)` in addition to `arg_specs()`.
+/// 
+/// ## Field-level attributes
+/// - `#[signer(expr)]` - Creates a SignerType with the given pubkey expression.
+///   If `expr` is a closure like `|p| p.unvault_pk`, it will be used in `arg_specs_for_params`.
+/// - `#[arg_type(expr)]` - Uses a custom ArgType expression
+/// 
+/// # Default type mappings (when no attribute is specified)
+/// - `Vec<u8>` -> `BytesType`
+/// - `[u8; N]` -> `BytesType`
+/// - `i32`, `i64` -> `IntType`
+/// 
+/// # Examples
+/// 
+/// ```ignore
+/// // Simple args without params dependency
+/// #[derive(ClauseArgs)]
+/// pub struct RecoverArgs {
+///     pub out_i: i64,
+/// }
+/// 
+/// // Args with param-dependent signer
+/// #[derive(ClauseArgs)]
+/// #[clause_args(params = VaultParams)]
+/// pub struct TriggerArgs {
+///     #[signer(|p| p.unvault_pk.serialize())]
+///     pub sig: Vec<u8>,
+///     pub ctv_hash: [u8; 32],
+///     pub out_i: i64,
+/// }
+/// ```
+#[proc_macro_derive(ClauseArgs, attributes(signer, arg_type, clause_args))]
 pub fn derive_clause_args(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
+
+    // Check for #[clause_args(params = ParamsType)] attribute
+    let params_type = extract_params_type(&input.attrs);
 
     let fields = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -34,6 +73,84 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
     });
 
     let field_names = fields.iter().map(|f| &f.ident);
+
+    // Generate arg_specs for each field (static version without params)
+    let arg_spec_items = fields.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_name_str = field_name.as_ref().unwrap().to_string();
+        let field_type = &f.ty;
+
+        // Check for custom attributes
+        let signer_info = extract_signer_attr(&f.attrs);
+        let custom_arg_type = extract_arg_type_attr(&f.attrs);
+
+        let arg_type_expr = if let Some(expr) = custom_arg_type {
+            // Use custom arg type
+            quote! { ::std::sync::Arc::new(#expr) }
+        } else if let Some(SignerAttrInfo::Static(expr)) = &signer_info {
+            // Use SignerType with static pubkey
+            quote! { ::std::sync::Arc::new(crate::argtypes::SignerType::new(#expr)) }
+        } else if signer_info.is_some() {
+            // Has closure-based signer - use BytesType for static version
+            quote! { ::std::sync::Arc::new(crate::argtypes::BytesType) }
+        } else {
+            // Infer from type
+            infer_arg_type(field_type)
+        };
+
+        quote! {
+            crate::contracts::ArgSpec {
+                name: #field_name_str.to_string(),
+                arg_type: #arg_type_expr,
+            }
+        }
+    });
+
+    // Generate arg_specs_for_params if params type is specified
+    let arg_specs_for_params_impl = if let Some(ref params_ty) = params_type {
+        let arg_spec_items_for_params = fields.iter().map(|f| {
+            let field_name = &f.ident;
+            let field_name_str = field_name.as_ref().unwrap().to_string();
+            let field_type = &f.ty;
+
+            let signer_info = extract_signer_attr(&f.attrs);
+            let custom_arg_type = extract_arg_type_attr(&f.attrs);
+
+            let arg_type_expr = if let Some(expr) = custom_arg_type {
+                quote! { ::std::sync::Arc::new(#expr) }
+            } else if let Some(SignerAttrInfo::Closure(closure)) = &signer_info {
+                // Use closure to get pubkey from params
+                quote! { 
+                    ::std::sync::Arc::new(crate::argtypes::SignerType::new({
+                        let f: fn(&#params_ty) -> _ = #closure;
+                        f(params)
+                    }))
+                }
+            } else if let Some(SignerAttrInfo::Static(expr)) = &signer_info {
+                quote! { ::std::sync::Arc::new(crate::argtypes::SignerType::new(#expr)) }
+            } else {
+                infer_arg_type(field_type)
+            };
+
+            quote! {
+                crate::contracts::ArgSpec {
+                    name: #field_name_str.to_string(),
+                    arg_type: #arg_type_expr,
+                }
+            }
+        });
+
+        quote! {
+            /// Get the argument specifications for this clause with params.
+            pub fn arg_specs_for_params(params: &#params_ty) -> Vec<crate::contracts::ArgSpec> {
+                vec![
+                    #(#arg_spec_items_for_params),*
+                ]
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     let expanded = quote! {
         impl WitnessEncodable for #name {
@@ -68,9 +185,96 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
                 Ok(args)
             }
         }
+
+        impl #name {
+            /// Get the argument specifications for this clause.
+            pub fn arg_specs() -> Vec<crate::contracts::ArgSpec> {
+                vec![
+                    #(#arg_spec_items),*
+                ]
+            }
+
+            #arg_specs_for_params_impl
+        }
     };
 
     TokenStream::from(expanded)
+}
+
+/// Information about a #[signer(...)] attribute
+enum SignerAttrInfo {
+    /// Static expression: #[signer(pubkey_bytes)]
+    Static(proc_macro2::TokenStream),
+    /// Closure expression: #[signer(|p| p.field)]
+    Closure(proc_macro2::TokenStream),
+}
+
+/// Extract #[clause_args(params = Type)] from struct attributes
+fn extract_params_type(attrs: &[syn::Attribute]) -> Option<syn::Type> {
+    for attr in attrs {
+        if attr.path().is_ident("clause_args") {
+            if let Meta::List(meta_list) = &attr.meta {
+                let tokens_str = meta_list.tokens.to_string();
+                // Parse "params = Type"
+                if let Some(type_str) = tokens_str.strip_prefix("params").map(|s| s.trim().strip_prefix('=').map(|s| s.trim())) {
+                    if let Some(type_str) = type_str {
+                        if let Ok(ty) = syn::parse_str::<syn::Type>(type_str) {
+                            return Some(ty);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract #[signer(...)] attribute info
+fn extract_signer_attr(attrs: &[syn::Attribute]) -> Option<SignerAttrInfo> {
+    for attr in attrs {
+        if attr.path().is_ident("signer") {
+            if let Meta::List(meta_list) = &attr.meta {
+                let tokens = &meta_list.tokens;
+                let tokens_str = tokens.to_string();
+                
+                // Check if it's a closure (starts with |)
+                if tokens_str.trim_start().starts_with('|') {
+                    return Some(SignerAttrInfo::Closure(quote! { #tokens }));
+                } else {
+                    return Some(SignerAttrInfo::Static(quote! { #tokens }));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract #[arg_type(...)] attribute
+fn extract_arg_type_attr(attrs: &[syn::Attribute]) -> Option<proc_macro2::TokenStream> {
+    for attr in attrs {
+        if attr.path().is_ident("arg_type") {
+            if let Meta::List(meta_list) = &attr.meta {
+                let tokens = &meta_list.tokens;
+                return Some(quote! { #tokens });
+            }
+        }
+    }
+    None
+}
+
+/// Infer the ArgType from a Rust type.
+fn infer_arg_type(ty: &Type) -> proc_macro2::TokenStream {
+    let type_str = quote!(#ty).to_string();
+    
+    // Check for common patterns
+    if type_str == "Vec < u8 >" || type_str.contains("[u8") {
+        quote! { ::std::sync::Arc::new(crate::argtypes::BytesType) }
+    } else if type_str == "i32" || type_str == "i64" {
+        quote! { ::std::sync::Arc::new(crate::argtypes::IntType) }
+    } else {
+        // Default to BytesType for unknown types
+        quote! { ::std::sync::Arc::new(crate::argtypes::BytesType) }
+    }
 }
 
 /// Derive macro for ContractParams trait.
@@ -267,6 +471,108 @@ pub fn derive_contract_state(input: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+
+/// Derive macro for Contract trait.
+/// 
+/// Automatically implements the Contract trait by assuming the struct has these fields:
+/// - `params: ParamsType`
+/// - `contract: StandardP2TR<ParamsType>`
+/// - `taptree: Arc<TapTree>`
+/// - `clauses: HashMap<String, Arc<dyn ErasedClause>>`
+/// 
+/// You can optionally have a `state` field for stateful contracts.
+/// 
+/// # Example
+/// 
+/// ```ignore
+/// #[derive(Contract)]
+/// pub struct Vault {
+///     pub params: VaultParams,
+///     pub contract: StandardP2TR<VaultParams>,
+///     pub taptree: Arc<TapTree>,
+///     pub clauses: HashMap<String, Arc<dyn ErasedClause>>,
+/// }
+/// ```
+#[proc_macro_derive(Contract)]
+pub fn derive_contract(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    let fields = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => &fields.named,
+            _ => panic!("Contract only supports structs with named fields"),
+        },
+        _ => panic!("Contract can only be derived for structs"),
+    };
+
+    // Find the params field to determine the Params type
+    let params_field = fields
+        .iter()
+        .find(|f| f.ident.as_ref().unwrap() == "params")
+        .expect("Contract struct must have a 'params' field");
+
+    let params_type = &params_field.ty;
+
+    // Check if there's a state field
+    let has_state_field = fields
+        .iter()
+        .any(|f| f.ident.as_ref().unwrap() == "state");
+
+    let state_type = if has_state_field {
+        // Find the state field type
+        let state_field = fields
+            .iter()
+            .find(|f| f.ident.as_ref().unwrap() == "state")
+            .unwrap();
+        let ty = &state_field.ty;
+        quote! { #ty }
+    } else {
+        quote! { () }
+    };
+
+    let state_impl = if has_state_field {
+        quote! {
+            fn state(&self) -> Option<&Self::State> {
+                Some(&self.state)
+            }
+        }
+    } else {
+        quote! {
+            fn state(&self) -> Option<&Self::State> {
+                None
+            }
+        }
+    };
+
+    let expanded = quote! {
+        impl crate::contracts::Contract for #name {
+            type Params = #params_type;
+            type State = #state_type;
+
+            fn params(&self) -> &Self::Params {
+                &self.params
+            }
+
+            #state_impl
+
+            fn get_clause(&self, name: &str) -> Option<&::std::sync::Arc<dyn crate::contracts::ErasedClause>> {
+                self.clauses.get(name)
+            }
+
+            fn taptree(&self) -> &::std::sync::Arc<crate::contracts::TapTree> {
+                &self.taptree
+            }
+
+            fn instance(&self) -> &crate::contracts::StandardP2TR<Self::Params> {
+                &self.contract
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 /// Attribute macro to mark contract implementation methods as clauses.
 ///
 /// This generates an extension trait that provides functional clause calling on InstanceHandle.

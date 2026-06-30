@@ -3,6 +3,8 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 pub mod argtypes;
 pub mod contracts;
 pub mod ctv;
+#[macro_use]
+pub mod macros;
 pub mod manager;
 pub mod script_utils;
 pub mod signer;

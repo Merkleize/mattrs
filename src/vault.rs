@@ -2,17 +2,17 @@
 //!
 //! A two-stage vault with trigger and recovery mechanisms.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs_derive::ContractParams;
+use mattrs_derive::{ClauseArgs, Contract, ContractParams, ContractState};
 
-use crate::argtypes::{BytesType, IntType, SignerType};
 use crate::contracts::{
-    ArgSpec, ClauseArgs, ClauseError, ClauseOutput, ClauseOutputAmountBehaviour, ContractParams,
-    ContractState, ErasedClause, ErasedContract, StandardAugmentedP2TR, StandardClause,
-    StandardP2TR, TapTree, WitnessEncodable, WitnessError,
+    ClauseArgs, ClauseError, ClauseOutput, ContractParams,
+    ContractState, ErasedClause, ErasedContract, StandardAugmentedP2TR, StandardP2TR, TapTree,
+    WitnessEncodable, WitnessError,
 };
 
 define_pushable!();
@@ -29,164 +29,7 @@ fn optional_key(key: Option<XOnlyPublicKey>) -> XOnlyPublicKey {
 }
 
 // ============================================================================
-// Clause Argument Types for Vault
-// ============================================================================
-
-/// Empty state type for contracts without state
-#[derive(Debug, Clone)]
-pub struct NoState;
-
-impl ContractState for NoState {
-    fn encode(&self) -> Vec<u8> {
-        Vec::new()
-    }
-
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Ok(NoState)
-    }
-}
-
-impl WitnessEncodable for NoState {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        Vec::new()
-    }
-
-    fn decode_from_witness(_witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        Ok((NoState, 0))
-    }
-}
-
-/// Arguments for the trigger clause
-#[derive(Debug, Clone)]
-pub struct TriggerArgs {
-    pub sig: Vec<u8>,
-    pub ctv_hash: Vec<u8>,
-    pub out_i: i64,
-}
-
-impl ClauseArgs for TriggerArgs {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![
-            self.sig.clone(),
-            self.ctv_hash.clone(),
-            crate::script_utils::bn2vch(self.out_i),
-        ]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
-        if witness.len() < 3 {
-            return Err(WitnessError::InsufficientData);
-        }
-        Ok(TriggerArgs {
-            sig: witness[0].clone(),
-            ctv_hash: witness[1].clone(),
-            out_i: crate::script_utils::vch2bn(&witness[2])
-                .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?,
-        })
-    }
-}
-
-/// Arguments for the trigger_and_revault clause
-#[derive(Debug, Clone)]
-pub struct TriggerAndRevaultArgs {
-    pub sig: Vec<u8>,
-    pub ctv_hash: Vec<u8>,
-    pub out_i: i64,
-    pub revault_out_i: i64,
-}
-
-impl ClauseArgs for TriggerAndRevaultArgs {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![
-            crate::script_utils::bn2vch(self.revault_out_i),
-            crate::script_utils::bn2vch(self.out_i),
-            self.ctv_hash.clone(),
-            self.sig.clone(),
-        ]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
-        if witness.len() < 4 {
-            return Err(WitnessError::InsufficientData);
-        }
-        Ok(TriggerAndRevaultArgs {
-            sig: witness[3].clone(),
-            ctv_hash: witness[2].clone(),
-            out_i: crate::script_utils::vch2bn(&witness[1])
-                .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?,
-            revault_out_i: crate::script_utils::vch2bn(&witness[0])
-                .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?,
-        })
-    }
-}
-
-/// Arguments for the recover clause
-#[derive(Debug, Clone)]
-pub struct RecoverArgs {
-    pub out_i: i64,
-}
-
-impl ClauseArgs for RecoverArgs {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![crate::script_utils::bn2vch(self.out_i)]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::InsufficientData);
-        }
-        Ok(RecoverArgs {
-            out_i: crate::script_utils::vch2bn(&witness[0])
-                .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?,
-        })
-    }
-}
-
-/// Arguments for the Unvaulting withdraw clause
-#[derive(Debug, Clone)]
-pub struct WithdrawArgs {
-    pub ctv_hash: Vec<u8>,
-}
-
-impl ClauseArgs for WithdrawArgs {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![self.ctv_hash.clone()]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::InsufficientData);
-        }
-        Ok(WithdrawArgs {
-            ctv_hash: witness[0].clone(),
-        })
-    }
-}
-
-/// Arguments for the Unvaulting recover clause
-#[derive(Debug, Clone)]
-pub struct UnvaultingRecoverArgs {
-    pub out_i: i64,
-}
-
-impl ClauseArgs for UnvaultingRecoverArgs {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![crate::script_utils::bn2vch(self.out_i)]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::InsufficientData);
-        }
-        Ok(UnvaultingRecoverArgs {
-            out_i: crate::script_utils::vch2bn(&witness[0])
-                .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?,
-        })
-    }
-}
-
-// ============================================================================
-// Vault Contract (Non-Augmented)
+// Vault Parameters & Clause Arguments
 // ============================================================================
 
 #[derive(Debug, Clone, ContractParams)]
@@ -197,139 +40,101 @@ pub struct VaultParams {
     pub unvault_pk: XOnlyPublicKey,
 }
 
-/// Vault contract structure
+#[derive(Debug, Clone, ClauseArgs)]
+#[clause_args(params = VaultParams)]
+pub struct TriggerArgs {
+    #[signer(|p| p.unvault_pk.serialize())]
+    pub sig: Vec<u8>,
+    pub ctv_hash: [u8; 32],  // Fixed-size array with auto-validation
+    pub out_i: i64,
+}
+
+#[derive(Debug, Clone, ClauseArgs)]
+#[clause_args(params = VaultParams)]
+pub struct TriggerAndRevaultArgs {
+    #[signer(|p| p.unvault_pk.serialize())]
+    pub sig: Vec<u8>,
+    pub ctv_hash: [u8; 32],  // Fixed-size array with auto-validation
+    pub out_i: i64,
+    pub revault_out_i: i64,
+}
+
+#[derive(Debug, Clone, ClauseArgs)]
+pub struct RecoverArgs {
+    pub out_i: i64,
+}
+
+// ============================================================================
+// Vault Contract
+// ============================================================================
+
+#[derive(Contract)]
 pub struct Vault {
     pub params: VaultParams,
     pub contract: StandardP2TR<VaultParams>,
+    pub taptree: Arc<TapTree>,
+    pub clauses: HashMap<String, Arc<dyn ErasedClause>>,
 }
 
 impl Vault {
     pub fn new(params: VaultParams) -> Self {
         let internal_key = optional_key(params.alternate_pk);
 
-        // Build taptree
-        let trigger = Self::trigger_script(&params);
-        let trigger_and_revault = Self::trigger_and_revault_script(&params);
-        let recover = Self::recover_script(&params);
+        // Build scripts
+        let trigger_script = Self::trigger_script(&params);
+        let trigger_and_revault_script = Self::trigger_and_revault_script(&params);
+        let recover_script = Self::recover_script(&params);
 
-        let taptree = Arc::new(TapTree::Branch {
-            left: Arc::new(TapTree::Leaf(crate::contracts::TapLeaf {
-                name: "trigger".to_string(),
-                script: trigger.clone(),
-            })),
-            right: Arc::new(TapTree::Branch {
-                left: Arc::new(TapTree::Leaf(crate::contracts::TapLeaf {
-                    name: "trigger_and_revault".to_string(),
-                    script: trigger_and_revault.clone(),
-                })),
-                right: Arc::new(TapTree::Leaf(crate::contracts::TapLeaf {
-                    name: "recover".to_string(),
-                    script: recover.clone(),
-                })),
-            }),
-        });
+        // Create clauses - explicitly cast to Arc<dyn ErasedClause>
+        let trigger: Arc<dyn ErasedClause> = clause!(
+            "trigger",
+            TriggerArgs,
+            trigger_script,
+            &params,  // Auto-calls TriggerArgs::arg_specs_for_params(&params)
+            |p: &VaultParams, args: &TriggerArgs, _s: Option<&()>| {
+                Vault::new(p.clone()).trigger_outputs(args.ctv_hash, args.out_i as i32)
+            }
+        );
 
-        // Create clause objects
-        let trigger_clause: Arc<dyn ErasedClause> =
-            Arc::new(StandardClause::<VaultParams, NoState, TriggerArgs>::new(
-                "trigger".to_string(),
-                trigger,
-                vec![
-                    ArgSpec {
-                        name: "sig".to_string(),
-                        arg_type: Arc::new(SignerType::new(params.unvault_pk.serialize())),
-                    },
-                    ArgSpec {
-                        name: "ctv_hash".to_string(),
-                        arg_type: Arc::new(BytesType),
-                    },
-                    ArgSpec {
-                        name: "out_i".to_string(),
-                        arg_type: Arc::new(IntType),
-                    },
-                ],
-                Some(Arc::new(
-                    move |p: &VaultParams, args: &TriggerArgs, _state: Option<&NoState>| {
-                        let mut ctv_hash = [0u8; 32];
-                        if args.ctv_hash.len() != 32 {
-                            return Err(ClauseError::Other("Invalid ctv_hash length".to_string()));
-                        }
-                        ctv_hash.copy_from_slice(&args.ctv_hash);
-
-                        let vault = Vault::new(p.clone());
-                        vault
-                            .trigger_outputs(ctv_hash, args.out_i as i32)
-                            .map_err(|e| ClauseError::Other(e))
-                    },
-                )),
-            ));
-
-        let trigger_and_revault_clause: Arc<dyn ErasedClause> = Arc::new(StandardClause::<
-            VaultParams,
-            NoState,
+        let trigger_and_revault: Arc<dyn ErasedClause> = clause!(
+            "trigger_and_revault",
             TriggerAndRevaultArgs,
-        >::new(
-            "trigger_and_revault".to_string(),
-            trigger_and_revault,
-            vec![
-                ArgSpec {
-                    name: "sig".to_string(),
-                    arg_type: Arc::new(SignerType::new(params.unvault_pk.serialize())),
-                },
-                ArgSpec {
-                    name: "ctv_hash".to_string(),
-                    arg_type: Arc::new(BytesType),
-                },
-                ArgSpec {
-                    name: "out_i".to_string(),
-                    arg_type: Arc::new(IntType),
-                },
-                ArgSpec {
-                    name: "revault_out_i".to_string(),
-                    arg_type: Arc::new(IntType),
-                },
-            ],
-            Some(Arc::new(
-                move |p: &VaultParams, args: &TriggerAndRevaultArgs, _state: Option<&NoState>| {
-                    let mut ctv_hash = [0u8; 32];
-                    if args.ctv_hash.len() != 32 {
-                        return Err(ClauseError::Other("Invalid ctv_hash length".to_string()));
-                    }
-                    ctv_hash.copy_from_slice(&args.ctv_hash);
+            trigger_and_revault_script,
+            &params,
+            |p: &VaultParams, args: &TriggerAndRevaultArgs, _s: Option<&()>| {
+                Vault::new(p.clone()).trigger_and_revault_outputs(
+                    args.ctv_hash,
+                    args.out_i as i32,
+                    args.revault_out_i as i32,
+                )
+            }
+        );
 
-                    let vault = Vault::new(p.clone());
-                    vault
-                        .trigger_and_revault_outputs(
-                            ctv_hash,
-                            args.out_i as i32,
-                            args.revault_out_i as i32,
-                        )
-                        .map_err(|e| ClauseError::Other(e))
-                },
-            )),
-        ));
+        let recover: Arc<dyn ErasedClause> = clause!(
+            "recover",
+            RecoverArgs,
+            recover_script,
+            |p: &VaultParams, _args: &RecoverArgs, _s: Option<&()>| {
+                Vault::new(p.clone()).recover_outputs()
+            }
+        );
 
-        let recover_clause: Arc<dyn ErasedClause> =
-            Arc::new(StandardClause::<VaultParams, NoState, RecoverArgs>::new(
-                "recover".to_string(),
-                recover,
-                vec![ArgSpec {
-                    name: "out_i".to_string(),
-                    arg_type: Arc::new(IntType),
-                }],
-                Some(Arc::new(
-                    move |p: &VaultParams, _args: &RecoverArgs, _state: Option<&NoState>| {
-                        let vault = Vault::new(p.clone());
-                        vault.recover_outputs().map_err(|e| ClauseError::Other(e))
-                    },
-                )),
-            ));
+        // Build taptree with macro - returns (Arc<TapTree>, HashMap<String, Arc<dyn ErasedClause>>)
+        let (taptree, clauses) = taptree![
+            trigger,
+            [trigger_and_revault, recover]
+        ];
 
-        let clauses = vec![trigger_clause, trigger_and_revault_clause, recover_clause];
+        // Build contract
+        let clause_vec: Vec<Arc<dyn ErasedClause>> = clauses.values().cloned().collect();
+        let contract = StandardP2TR::new(internal_key, taptree.clone(), clause_vec);
 
-        let contract = StandardP2TR::new(internal_key, taptree, clauses);
-
-        Vault { params, contract }
+        Self {
+            params,
+            contract,
+            taptree,
+            clauses,
+        }
     }
 
     fn trigger_script(params: &VaultParams) -> ScriptBuf {
@@ -345,7 +150,6 @@ impl Vault {
             { unvaulting_taptree_root }
             0
             CHECKCONTRACTVERIFY
-
             { params.unvault_pk }
             CHECKSIG
         }
@@ -360,17 +164,15 @@ impl Vault {
         let unvaulting_taptree_root = Unvaulting::build_taptree(&unvaulting_params).root_hash();
 
         script! {
-            0 OP_SWAP // no data tweak
-            -1 // current input's taptweak
-            -1 // taptree
+            0 OP_SWAP
+            -1
+            -1
             { crate::contracts::CCV_FLAG_DEDUCT_OUTPUT_AMOUNT }
             CHECKCONTRACTVERIFY
-
             { crate::optional_key(params.alternate_pk) }
             { unvaulting_taptree_root }
             0
             CHECKCONTRACTVERIFY
-
             { params.unvault_pk }
             CHECKSIG
         }
@@ -378,11 +180,11 @@ impl Vault {
 
     fn recover_script(params: &VaultParams) -> ScriptBuf {
         script! {
-            0 // data
-            SWAP // <out_i> (from witness)
+            0
+            SWAP
             { params.recover_pk }
-            0 // taptree
-            0 // flags
+            0
+            0
             CHECKCONTRACTVERIFY
             TRUE
         }
@@ -393,12 +195,11 @@ impl Vault {
         Arc::new(self.contract.clone())
     }
 
-    /// Execute trigger clause - creates unvaulting instance
     pub fn trigger_outputs(
         &self,
-        _ctv_hash: [u8; 32],
+        ctv_hash: [u8; 32],
         out_i: i32,
-    ) -> Result<Vec<ClauseOutput>, String> {
+    ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let unvaulting_params = UnvaultingParams {
             alternate_pk: self.params.alternate_pk,
             spend_delay: self.params.spend_delay,
@@ -406,28 +207,23 @@ impl Vault {
         };
 
         let unvaulting = Unvaulting::new(unvaulting_params.clone());
+        let state = UnvaultingState { ctv_hash };
 
-        let state = UnvaultingState {
-            ctv_hash: _ctv_hash,
-        };
-        let state_bytes = state.encode();
-
-        Ok(vec![ClauseOutput {
-            n: out_i,
-            next_contract: unvaulting.as_erased(state.clone()),
-            next_params: Some(unvaulting_params.encode()),
-            next_state: Some(state_bytes),
-            next_amount: ClauseOutputAmountBehaviour::PreserveOutput,
-        }])
+        Ok(vec![
+            ClauseOutput::at(out_i)
+                .to_with_params(unvaulting.as_erased(state.clone()), &unvaulting_params)
+                .with_state(&state)
+                .preserve_amount()
+                .build()
+        ])
     }
 
-    /// Execute trigger_and_revault clause
     pub fn trigger_and_revault_outputs(
         &self,
         ctv_hash: [u8; 32],
         out_i: i32,
         revault_out_i: i32,
-    ) -> Result<Vec<ClauseOutput>, String> {
+    ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let unvaulting_params = UnvaultingParams {
             alternate_pk: self.params.alternate_pk,
             spend_delay: self.params.spend_delay,
@@ -435,36 +231,28 @@ impl Vault {
         };
 
         let unvaulting = Unvaulting::new(unvaulting_params.clone());
-
         let state = UnvaultingState { ctv_hash };
-        let state_bytes = state.encode();
 
         Ok(vec![
-            ClauseOutput {
-                n: revault_out_i,
-                next_contract: Arc::new(Vault::new(self.params.clone()).contract),
-                next_params: None, // Revault uses same params as parent
-                next_state: None,
-                next_amount: ClauseOutputAmountBehaviour::DeductOutput,
-            },
-            ClauseOutput {
-                n: out_i,
-                next_contract: unvaulting.as_erased(state.clone()),
-                next_params: Some(unvaulting_params.encode()),
-                next_state: Some(state_bytes),
-                next_amount: ClauseOutputAmountBehaviour::PreserveOutput,
-            },
+            ClauseOutput::at(revault_out_i)
+                .to(Arc::new(Vault::new(self.params.clone()).contract))
+                .deduct_amount()
+                .build(),
+            ClauseOutput::at(out_i)
+                .to_with_params(unvaulting.as_erased(state.clone()), &unvaulting_params)
+                .with_state(&state)
+                .preserve_amount()
+                .build(),
         ])
     }
 
-    /// Execute recover clause - no outputs
-    pub fn recover_outputs(&self) -> Result<Vec<ClauseOutput>, String> {
-        Ok(Vec::new())
+    pub fn recover_outputs(&self) -> Result<Vec<ClauseOutput>, ClauseError> {
+        Ok(ClauseOutput::terminal())
     }
 }
 
 // ============================================================================
-// Unvaulting Contract (Augmented)
+// Unvaulting Contract (Augmented with State)
 // ============================================================================
 
 #[derive(Debug, Clone, ContractParams)]
@@ -474,40 +262,19 @@ pub struct UnvaultingParams {
     pub recover_pk: XOnlyPublicKey,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractState)]
 pub struct UnvaultingState {
     pub ctv_hash: [u8; 32],
 }
 
-impl ContractState for UnvaultingState {
-    fn encode(&self) -> Vec<u8> {
-        self.ctv_hash.to_vec()
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
-        if bytes.len() != 32 {
-            return Err(WitnessError::InvalidData(
-                "UnvaultingState must be 32 bytes".to_string(),
-            ));
-        }
-        let mut ctv_hash = [0u8; 32];
-        ctv_hash.copy_from_slice(bytes);
-        Ok(UnvaultingState { ctv_hash })
-    }
+#[derive(Debug, Clone, ClauseArgs)]
+pub struct WithdrawArgs {
+    pub ctv_hash: [u8; 32],  // Fixed-size array
 }
 
-impl WitnessEncodable for UnvaultingState {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![self.ctv_hash.to_vec()]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::InsufficientData);
-        }
-        let state = Self::decode(&witness[0])?;
-        Ok((state, 1))
-    }
+#[derive(Debug, Clone, ClauseArgs)]
+pub struct UnvaultingRecoverArgs {
+    pub out_i: i64,
 }
 
 pub struct Unvaulting {
@@ -520,98 +287,77 @@ impl Unvaulting {
     }
 
     pub fn build_taptree(params: &UnvaultingParams) -> Arc<TapTree> {
-        let withdraw = Self::withdraw_script(params);
-        let recover = Self::recover_script(params);
+        let withdraw_script = Self::withdraw_script(params);
+        let recover_script = Self::recover_script(params);
 
-        Arc::new(TapTree::Branch {
-            left: Arc::new(TapTree::Leaf(crate::contracts::TapLeaf {
-                name: "withdraw".to_string(),
-                script: withdraw,
-            })),
-            right: Arc::new(TapTree::Leaf(crate::contracts::TapLeaf {
-                name: "recover".to_string(),
-                script: recover,
-            })),
-        })
+        let withdraw: Arc<dyn ErasedClause> = clause!(
+            "withdraw",
+            WithdrawArgs,
+            withdraw_script;
+            UnvaultingParams,
+            UnvaultingState
+        );
+
+        let recover: Arc<dyn ErasedClause> = clause!(
+            "recover",
+            UnvaultingRecoverArgs,
+            recover_script;
+            UnvaultingParams,
+            UnvaultingState
+        );
+
+        let (taptree, _clauses) = taptree![withdraw, recover];
+        taptree
     }
 
     fn withdraw_script(params: &UnvaultingParams) -> ScriptBuf {
         script! {
             DUP
-            -1 { crate::optional_key(params.alternate_pk) } -1 { crate::contracts::CCV_FLAG_CHECK_INPUT } CHECKCONTRACTVERIFY
-
-            // check timelock
+            -1
+            { crate::optional_key(params.alternate_pk) }
+            -1
+            { crate::contracts::CCV_FLAG_CHECK_INPUT }
+            CHECKCONTRACTVERIFY
             { params.spend_delay }
             CSV
             DROP
-
-            // Check that the transaction output is as expected
             CHECKTEMPLATEVERIFY
         }
     }
 
     fn recover_script(params: &UnvaultingParams) -> ScriptBuf {
         script! {
-            0 // data
-            SWAP // <out_i> (from witness)
+            0
+            SWAP
             { params.recover_pk }
-            0 // taptree
-            0 // flags
+            0
+            0
             CHECKCONTRACTVERIFY
             TRUE
         }
     }
 
-    /// Get the contract as a type-erased ErasedContract with state
     pub fn as_erased(&self, _state: UnvaultingState) -> Arc<dyn ErasedContract> {
         let naked_key = optional_key(self.params.alternate_pk);
         let taptree = Self::build_taptree(&self.params);
 
-        // Create clause objects
-        let withdraw_script = Self::withdraw_script(&self.params);
-        let recover_script = Self::recover_script(&self.params);
-
-        let withdraw_clause: Arc<dyn ErasedClause> = Arc::new(StandardClause::<
-            UnvaultingParams,
-            UnvaultingState,
+        let withdraw: Arc<dyn ErasedClause> = clause!(
+            "withdraw",
             WithdrawArgs,
-        >::new(
-            "withdraw".to_string(),
-            withdraw_script,
-            vec![ArgSpec {
-                name: "ctv_hash".to_string(),
-                arg_type: Arc::new(BytesType),
-            }],
-            Some(Arc::new(
-                |_p: &UnvaultingParams, _args: &WithdrawArgs, _state: Option<&UnvaultingState>| {
-                    // Withdraw is terminal - outputs are specified explicitly
-                    Ok(Vec::new())
-                },
-            )),
-        ));
-
-        let recover_clause: Arc<dyn ErasedClause> = Arc::new(StandardClause::<
+            Self::withdraw_script(&self.params);
             UnvaultingParams,
-            UnvaultingState,
-            UnvaultingRecoverArgs,
-        >::new(
-            "recover".to_string(),
-            recover_script,
-            vec![ArgSpec {
-                name: "out_i".to_string(),
-                arg_type: Arc::new(IntType),
-            }],
-            Some(Arc::new(
-                |_p: &UnvaultingParams,
-                 _args: &UnvaultingRecoverArgs,
-                 _state: Option<&UnvaultingState>| {
-                    // Recover is terminal
-                    Ok(Vec::new())
-                },
-            )),
-        ));
+            UnvaultingState
+        );
 
-        let clauses = vec![withdraw_clause, recover_clause];
+        let recover: Arc<dyn ErasedClause> = clause!(
+            "recover",
+            UnvaultingRecoverArgs,
+            Self::recover_script(&self.params);
+            UnvaultingParams,
+            UnvaultingState
+        );
+
+        let clauses = vec![withdraw, recover];
 
         Arc::new(
             StandardAugmentedP2TR::<UnvaultingParams, UnvaultingState>::new(
@@ -620,15 +366,12 @@ impl Unvaulting {
         )
     }
 
-    /// Execute withdraw clause - terminal (no outputs)
-    pub fn withdraw_outputs(&self, _ctv_hash: [u8; 32]) -> Result<Vec<ClauseOutput>, String> {
-        // Withdraw is terminal - outputs are specified explicitly as CTV template
-        Ok(Vec::new())
+    pub fn withdraw_outputs(&self, _ctv_hash: [u8; 32]) -> Result<Vec<ClauseOutput>, ClauseError> {
+        Ok(ClauseOutput::terminal())
     }
 
-    /// Execute recover clause - no outputs
-    pub fn recover_outputs(&self) -> Result<Vec<ClauseOutput>, String> {
-        Ok(Vec::new())
+    pub fn recover_outputs(&self) -> Result<Vec<ClauseOutput>, ClauseError> {
+        Ok(ClauseOutput::terminal())
     }
 }
 
