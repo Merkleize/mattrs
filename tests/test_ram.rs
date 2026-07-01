@@ -7,6 +7,7 @@
 mod support;
 
 use support::merkle::{ceil_lg, floor_lg, get_directions, MerkleTree};
+use support::ram::{Ram, RamParams};
 
 fn ref_leaves() -> Vec<[u8; 32]> {
     (0..4u8).map(|i| [i; 32]).collect()
@@ -51,6 +52,17 @@ fn test_merkle_proof_matches_reference() {
     // witness stack has the expected 2n+1 shape.
     assert_eq!(proof.get_new_root_after_update(proof.x), tree.root());
     assert_eq!(proof.to_wit_stack().len(), 2 * proof.hashes.len() + 1);
+}
+
+#[test]
+fn test_ram_taptree_matches_reference() {
+    // Byte-compatibility proof for the withdraw/write tapscripts: the taptree root
+    // matches the pymatt reference RAM(4).get_taptree_merkle_root().
+    let ram = Ram::new(RamParams { size: 4 });
+    assert_eq!(
+        hex::encode(ram.contract.taptree.root_hash()),
+        "c86ddcabdddb39b345fbb7bc3cc4471c4a57672dddb27615a3b7e69027cf7bad"
+    );
 }
 
 #[test]
