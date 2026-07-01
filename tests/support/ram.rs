@@ -5,36 +5,50 @@
 //! cell and commits an updated root to the next output. The tapscripts recompute
 //! the Merkle root from a proof revealed in the witness.
 //!
-//! NOTE: this ports the *contract* (its byte-exact taptree). Actually *spending* it
-//! additionally needs a multi-element `MerkleProofType` witness arg and an
-//! "expanded state" (the manager must carry the leaves, not just the committed
-//! root); both are tracked as follow-ups. The clauses are terminal here, and the
-//! args are a placeholder — neither affects the taptree.
+//! The cell vector (`RamState.leaves`) is the instance's *logical* state; its
+//! on-chain commitment is only the Merkle root, so it rides along as expanded state
+//! (see `ErasedState`) and `write`'s `next_outputs` reads it to compute the update.
+//!
+//! Fixed to a depth-2 tree (`size = 4`) via the const `WitProof<2>` proof arg.
 #![allow(dead_code)]
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{
-    ClauseArgs, ContractParams, ContractState, WitnessEncodable, WitnessError,
+    ClauseArgs, ClauseError, ClauseOutput, ContractParams, ContractState, WitnessEncodable,
+    WitnessError,
 };
 use mattrs::{contract, nums_key};
-use mattrs_derive::{ContractParams, ContractState};
+use mattrs_derive::ContractParams;
 
-use super::merkle::floor_lg;
+use super::merkle::{floor_lg, MerkleProofType, MerkleTree, WitProof};
 use super::script_helpers::check_input_contract;
 
 define_pushable!();
 
 #[derive(Debug, Clone, ContractParams)]
 pub struct RamParams {
-    /// The number of cells; must be a power of two.
+    /// The number of cells; must be a power of two. (This port fixes it to 4.)
     pub size: i64,
 }
 
-/// The committed state: the Merkle root over the cells.
-#[derive(Debug, Clone, ContractState)]
+/// The RAM cells. Committed on-chain only as their Merkle root, so instances carry
+/// this as expanded state and recover it by downcast (never by decoding the root).
+#[derive(Debug, Clone)]
 pub struct RamState {
-    pub root: [u8; 32],
+    pub leaves: Vec<[u8; 32]>,
+}
+
+impl ContractState for RamState {
+    fn encode(&self) -> Vec<u8> {
+        MerkleTree::new(self.leaves.clone()).root().to_vec()
+    }
+
+    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
+        Err(WitnessError::InvalidData(
+            "RAM cells cannot be recovered from their Merkle-root commitment".to_string(),
+        ))
+    }
 }
 
 contract! {
@@ -43,16 +57,41 @@ contract! {
         state RamState;
         internal_key |_p| nums_key();
 
-        // witness: <h_1> <d_1> ... <h_n> <d_n> <x> <root>
+        // witness: <h_1> <d_1> <h_2> <d_2> <x> <root>
         clause withdraw {
-            args { merkle_root: [u8; 32], }
+            args {
+                #[arg_type(MerkleProofType::new(2))]
+                proof: WitProof<2>,
+                merkle_root: [u8; 32],
+            }
             script Ram::withdraw_script;
         }
 
-        // witness: <h_1> <d_1> ... <h_n> <d_n> <x_old> <x_new> <root>
+        // witness: <h_1> <d_1> <h_2> <d_2> <x_old> <x_new> <root>
         clause write {
-            args { merkle_root: [u8; 32], }
+            args {
+                #[arg_type(MerkleProofType::new(2))]
+                proof: WitProof<2>,
+                new_value: [u8; 32],
+                merkle_root: [u8; 32],
+            }
             script Ram::write_script;
+            next(p, a, s) {
+                let state = s.ok_or_else(|| {
+                    ClauseError::Other("RAM write needs the cell state".to_string())
+                })?;
+                let index = a.proof.leaf_index();
+                let mut leaves = state.leaves.clone();
+                if index >= leaves.len() {
+                    return Err(ClauseError::Other("leaf index out of range".to_string()));
+                }
+                leaves[index] = a.new_value;
+                Ok(vec![ClauseOutput::at_same_index()
+                    .to(Ram::new(p.clone()).as_erased())
+                    .with_state(&RamState { leaves })
+                    .preserve_amount()
+                    .build()])
+            }
         }
 
         tree [withdraw, write];

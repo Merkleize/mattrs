@@ -7,7 +7,9 @@
 #![allow(dead_code)]
 
 use bitcoin::hashes::{sha256, Hash};
-use mattrs::script_utils::bn2vch;
+use mattrs::argtypes::ArgValue;
+use mattrs::contracts::{ArgType, WitnessEncodable, WitnessError};
+use mattrs::script_utils::{bn2vch, vch2bn};
 
 /// The empty-tree root.
 pub const NIL: [u8; 32] = [0u8; 32];
@@ -207,5 +209,110 @@ impl MerkleTree {
             directions: get_directions(self.leaves.len(), index),
             x: self.leaves[index],
         }
+    }
+}
+
+// ============================================================================
+// Witness serialization: MerkleProofType (a multi-element witness argument)
+// ============================================================================
+
+impl MerkleProof {
+    /// Convert to a fixed-depth witness proof. Panics if the proof's depth != `N`.
+    pub fn to_wit_proof<const N: usize>(&self) -> WitProof<N> {
+        assert_eq!(self.hashes.len(), N, "proof depth does not match N");
+        let mut hashes = [[0u8; 32]; N];
+        let mut directions = [0u8; N];
+        hashes.copy_from_slice(&self.hashes);
+        directions.copy_from_slice(&self.directions);
+        WitProof {
+            hashes,
+            directions,
+            x: self.x,
+        }
+    }
+}
+
+/// A depth-`N` Merkle proof in witness form: `<h_1> <d_1> ... <h_N> <d_N> <x>`
+/// (exactly `2N + 1` witness elements). The const depth lets it round-trip through
+/// the typed args-struct decode, which needs a fixed element count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitProof<const N: usize> {
+    pub hashes: [[u8; 32]; N],
+    pub directions: [u8; N],
+    pub x: [u8; 32],
+}
+
+impl<const N: usize> WitProof<N> {
+    /// The index of the proven leaf, reconstructed from the directions.
+    pub fn leaf_index(&self) -> usize {
+        self.directions.iter().fold(0usize, |i, d| 2 * i + (*d as usize))
+    }
+}
+
+impl<const N: usize> WitnessEncodable for WitProof<N> {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        let mut stack = Vec::with_capacity(2 * N + 1);
+        for i in 0..N {
+            stack.push(self.hashes[i].to_vec());
+            stack.push(bn2vch(self.directions[i] as i64));
+        }
+        stack.push(self.x.to_vec());
+        stack
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        let needed = 2 * N + 1;
+        if witness.len() < needed {
+            return Err(WitnessError::InsufficientData);
+        }
+        let as_hash = |bytes: &[u8]| -> Result<[u8; 32], WitnessError> {
+            bytes
+                .try_into()
+                .map_err(|_| WitnessError::InvalidValue("proof element must be 32 bytes".into()))
+        };
+        let mut hashes = [[0u8; 32]; N];
+        let mut directions = [0u8; N];
+        for i in 0..N {
+            hashes[i] = as_hash(&witness[2 * i])?;
+            directions[i] = vch2bn(&witness[2 * i + 1])? as u8;
+        }
+        let x = as_hash(&witness[2 * N])?;
+        Ok((WitProof { hashes, directions, x }, needed))
+    }
+}
+
+/// The [`ArgType`] for a depth-`depth` Merkle proof: it consumes `2*depth + 1`
+/// witness elements. Proof values themselves flow through the typed args struct
+/// (via [`WitProof`]'s [`WitnessEncodable`]); this exists so a clause's `arg_specs`
+/// account for the right number of witness elements.
+#[derive(Debug, Clone)]
+pub struct MerkleProofType {
+    pub depth: usize,
+}
+
+impl MerkleProofType {
+    pub fn new(depth: usize) -> Self {
+        Self { depth }
+    }
+}
+
+impl ArgType for MerkleProofType {
+    fn encode_to_witness(&self, _value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError> {
+        Err(WitnessError::InvalidValue(
+            "MerkleProofType args are encoded via the typed WitProof struct".into(),
+        ))
+    }
+
+    fn decode_from_witness(&self, witness: &[Vec<u8>]) -> Result<(ArgValue, usize), WitnessError> {
+        let needed = 2 * self.depth + 1;
+        if witness.len() < needed {
+            return Err(WitnessError::InsufficientData);
+        }
+        // The consumed count is what callers need; surface the leaf element.
+        Ok((ArgValue::Bytes(witness[needed - 1].clone()), needed))
+    }
+
+    fn clone_boxed(&self) -> Box<dyn ArgType> {
+        Box::new(self.clone())
     }
 }
