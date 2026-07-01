@@ -5,8 +5,9 @@ contracts using `CHECKCONTRACTVERIFY` (CCV) and `CHECKTEMPLATEVERIFY` (CTV).
 
 It provides witness (de)serialization, typed clauses with type-erased runtime
 dispatch, P2TR / augmented-P2TR contract templates, a taproot tree, derive macros
-(`mattrs-derive`), declarative macros (`clause!`, `clause_tree!`), and an
-RPC-driven `ContractManager` for funding and spending instances on regtest.
+(`mattrs-derive`), a `contract!` DSL that generates a typed handle with one spend
+method per clause, and an RPC-driven `ContractManager` for funding and spending
+instances on regtest.
 
 ## Design: one source of truth
 
@@ -25,22 +26,59 @@ contract rather than from a parallel field.
 
 ## Defining a contract
 
+A single `contract! { .. }` block generates the per-clause `*Args` structs, the
+clause objects and taptree, a contract struct (`new` / `fund` / `as_erased`), and a
+typed handle with **one spend method per clause**. Params/state stay ordinary
+derived structs; the tapscripts stay as reviewable functions the DSL references.
+
 ```rust
 #[derive(Debug, Clone, ContractParams)]
 struct VaultParams { /* ... */ }
 
-#[derive(Debug, Clone, ClauseArgs)]
-#[clause_args(params = VaultParams)]
-struct TriggerArgs {
-    #[signer(|p| p.unvault_pk.serialize())]
-    sig: Vec<u8>,
-    ctv_hash: [u8; 32],
-    out_i: i64,
-}
+contract! {
+    contract Vault {
+        params VaultParams;
+        internal_key |p| internal_key_or_nums(p.alternate_pk);
 
-let trigger = clause!("trigger", TriggerArgs, script, &params, next_outputs_fn);
-let contract = StandardP2TR::new(internal_key, &params, clause_tree![trigger, [a, b]]);
+        clause trigger {
+            args {
+                #[signer(|p| p.unvault_pk.serialize())] sig: Signature,
+                ctv_hash: [u8; 32],
+                out_i: i64,
+            }
+            script Vault::trigger_script;          // fn(&VaultParams) -> ScriptBuf
+            next(p, a) { /* -> Result<Vec<ClauseOutput>, ClauseError> */ }
+        }
+        // ... more clauses ...
+        tree [trigger, [trigger_and_revault, recover]];
+    }
+}
 ```
+
+## Spending: a clause is a typed method call
+
+```rust
+let vault = Vault::fund(&mut manager, amount, params)?;      // VaultHandle
+
+// trigger: signed, exactly one child, returned typed
+let unvaulting: UnvaultingHandle = vault
+    .trigger(ctv_hash, 0)
+    .sign(HotSigner::new(unvault_key))
+    .exec_one(&mut manager)?
+    .try_into()?;
+
+// withdraw: terminal CTV spend with explicit outputs
+unvaulting
+    .withdraw(ctv_hash)
+    .outputs(withdraw_outputs)
+    .sequence(10)
+    .exec_none(&mut manager)?;
+```
+
+Signatures are never hand-built: a `#[signer]` field stays in the `*Args` struct
+(so the struct alone is the witness layout), the generated `new()` omits it, and
+`.sign(..)` fills it by matching the clause's required pubkey — or the spend fails
+with `MissingSigner`.
 
 A complete worked example (a two-stage vault) lives in `tests/support/vault.rs`.
 

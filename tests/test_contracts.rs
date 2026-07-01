@@ -219,6 +219,38 @@ fn test_arg_specs_match_struct_and_witness_order() {
     assert_eq!(decoded.hash, args.hash);
 }
 
+// Args with a param-dependent signature field, to exercise the generated `new()`.
+#[derive(Debug, Clone, DeriveClauseArgs)]
+#[clause_args(params = RoundtripParams)]
+struct SignedArgs {
+    #[signer(|p| p.unvault_pk.serialize())]
+    sig: mattrs::Signature,
+    amount: i64,
+}
+
+#[test]
+fn test_generated_new_omits_signer_fields() {
+    // A struct with no signer fields: new() takes every field.
+    let sample = SampleArgs::new(7, vec![1, 2, 3], [9u8; 32]);
+    assert_eq!(sample.amount, 7);
+    assert_eq!(sample.blob, vec![1, 2, 3]);
+
+    // A struct with a signer field: new() omits it. The signature defaults to empty
+    // and is filled in by the manager at spend time (no placeholder from the caller).
+    let args = SignedArgs::new(42);
+    assert!(args.sig.is_empty());
+    assert_eq!(args.amount, 42);
+
+    // The encoded witness still carries the (empty) signature element in position 0,
+    // so the witness layout matches the declared field order.
+    let witness = <SignedArgs as ClauseArgs>::encode_to_witness(&args);
+    assert_eq!(witness.len(), 2);
+    assert!(witness[0].is_empty());
+
+    let decoded = <SignedArgs as ClauseArgs>::decode_from_witness(&witness).unwrap();
+    assert_eq!(decoded.amount, 42);
+}
+
 #[test]
 fn test_derived_state_roundtrip() {
     let state = DerivedState {

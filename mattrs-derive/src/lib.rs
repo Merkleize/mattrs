@@ -2,6 +2,42 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields, Meta, Type};
 
+mod contract;
+
+/// Define a MATT contract: its clauses, taproot tree, typed handle, and one method
+/// per clause.
+///
+/// A single `contract! { .. }` block generates the per-clause `*Args` structs, the
+/// clause objects and `ClauseTree`, a `Name` contract struct (with `new`, `fund`,
+/// `as_erased`), and a typed `NameHandle` whose per-clause methods return a
+/// [`SpendBuilder`](../mattrs/manager/struct.SpendBuilder.html). It expands to the
+/// ordinary `StandardClause` / `ClauseTree` / `StandardP2TR` primitives.
+///
+/// ```ignore
+/// contract! {
+///     contract Vault {
+///         params VaultParams;
+///         internal_key |p| internal_key_or_nums(p.alternate_pk);
+///
+///         clause trigger {
+///             args {
+///                 #[signer(|p| p.unvault_pk.serialize())] sig: Signature,
+///                 ctv_hash: [u8; 32],
+///                 out_i: i64,
+///             }
+///             script Vault::trigger_script;         // fn(&VaultParams) -> ScriptBuf
+///             next(p, a) { /* -> Result<Vec<ClauseOutput>, ClauseError> */ }
+///         }
+///         // ... more clauses ...
+///         tree [trigger, [trigger_and_revault, recover]];
+///     }
+/// }
+/// ```
+#[proc_macro]
+pub fn contract(input: TokenStream) -> TokenStream {
+    contract::expand(input)
+}
+
 /// Derive macro for ClauseArgs trait.
 /// Automatically implements encoding/decoding to witness stack and generates arg_specs().
 /// 
@@ -174,6 +210,35 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    // Generate `new(...)` taking only the non-signer fields. Signature fields are
+    // left to `Default` (empty) and filled by the manager at spend time, so callers
+    // never construct a placeholder signature.
+    let ctor_params = fields
+        .iter()
+        .filter(|f| extract_signer_attr(&f.attrs).is_none())
+        .map(|f| {
+            let ident = &f.ident;
+            let ty = &f.ty;
+            quote! { #ident: #ty }
+        });
+    let ctor_field_inits = fields.iter().map(|f| {
+        let ident = &f.ident;
+        if extract_signer_attr(&f.attrs).is_some() {
+            quote! { #ident: ::core::default::Default::default() }
+        } else {
+            quote! { #ident }
+        }
+    });
+    let new_impl = quote! {
+        /// Construct the clause arguments. Signature fields are left empty and are
+        /// filled in by the manager at spend time.
+        pub fn new(#(#ctor_params),*) -> Self {
+            Self {
+                #(#ctor_field_inits),*
+            }
+        }
+    };
+
     let expanded = quote! {
         impl WitnessEncodable for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -209,6 +274,7 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
         }
 
         impl #name {
+            #new_impl
             #static_arg_specs_impl
             #arg_specs_for_params_impl
         }
@@ -288,8 +354,20 @@ fn infer_arg_type(ty: &Type) -> proc_macro2::TokenStream {
     } else if type_str == "i32" || type_str == "i64" {
         quote! { ::std::sync::Arc::new(::mattrs::argtypes::IntType) }
     } else {
-        // Default to BytesType for unknown types
-        quote! { ::std::sync::Arc::new(::mattrs::argtypes::BytesType) }
+        // Refuse to guess: an unrecognized field type is a compile error rather than
+        // a silently-wrong BytesType. The user can add #[arg_type(..)]/#[signer(..)].
+        let msg = format!(
+            "#[derive(ClauseArgs)]: cannot infer an ArgType for field type `{}`; \
+             annotate the field with #[arg_type(..)] or #[signer(..)] \
+             (auto-inferred types: Vec<u8>, [u8; N], i32, i64)",
+            type_str
+        );
+        quote! {
+            {
+                compile_error!(#msg);
+                ::std::sync::Arc::new(::mattrs::argtypes::BytesType)
+            }
+        }
     }
 }
 

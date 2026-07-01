@@ -3,7 +3,7 @@
 mod common;
 mod support;
 
-use std::{collections::HashMap, str::FromStr};
+use std::str::FromStr;
 
 use bitcoin::{
     Address, Amount, KnownHrp, TapNodeHash, XOnlyPublicKey, bip32::Xpriv, hashes::Hash,
@@ -11,13 +11,12 @@ use bitcoin::{
 };
 
 use mattrs::{
-    argtypes::ArgValue,
     contracts::{InstanceStatus, OutputIndex},
     ctv::create_ctv_template,
     manager::ContractManager,
-    signer::{HotSigner, Signer},
+    signer::HotSigner,
 };
-use support::vault::{Vault, VaultParams};
+use support::vault::{UnvaultingHandle, UnvaultingState, Vault, VaultParams};
 
 #[test]
 fn test_vault_address_matches_reference() {
@@ -168,6 +167,66 @@ fn test_vault_recover_outputs() {
     assert_eq!(outputs.len(), 0, "Recover should be terminal (no outputs)");
 }
 
+#[test]
+fn test_trigger_without_signer_errors() {
+    // A trigger clause needs the unvault key. Spending without registering a signer
+    // must fail loudly (MissingSigner) rather than broadcast an unsigned witness.
+    // This builds the tx locally and does no RPC.
+    use std::{cell::RefCell, rc::Rc};
+
+    use bitcoin::{hashes::Hash, OutPoint, Transaction, TxOut, Txid};
+    use bitcoincore_rpc::{Auth, Client};
+    use mattrs::contracts::ContractInstance;
+    use mattrs::manager::{InstanceHandle, ManagerError};
+    use support::vault::VaultHandle;
+
+    let params = VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap(),
+        unvault_pk: XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap(),
+    };
+    let vault = Vault::new(params);
+    let contract = vault.as_erased();
+    let script_pubkey = contract.script_pubkey(None).unwrap();
+
+    // Fake a funded instance so the tx can be built (and a prevout exists).
+    let instance = Rc::new(RefCell::new(ContractInstance::new(contract, None)));
+    let funding_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            script_pubkey,
+            value: Amount::from_sat(100_000),
+        }],
+    };
+    instance.borrow_mut().mark_funded(
+        OutPoint {
+            txid: Txid::all_zeros(),
+            vout: 0,
+        },
+        funding_tx,
+    );
+
+    let handle = VaultHandle(InstanceHandle::new(instance));
+
+    // Offline client: build_tx performs no RPC.
+    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
+    let manager = ContractManager::new(&client);
+
+    let err = handle
+        .trigger([7u8; 32], 0)
+        .build_tx(&manager)
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ManagerError::MissingSigner(_)),
+        "expected MissingSigner, got: {:?}",
+        err
+    );
+}
+
 // Integration test - requires a running regtest bitcoind.
 // Ignored by default so `cargo test` is green without a node; run with
 // `cargo test -- --ignored` against a configured regtest daemon.
@@ -188,15 +247,16 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let recover_pubkey: XOnlyPublicKey = recover_privkey.to_priv().public_key(&secp).into();
 
-    let vault = Vault::new(VaultParams {
+    let params = VaultParams {
         alternate_pk: None,
         spend_delay: 10,
         recover_pk: recover_pubkey,
         unvault_pk: unvault_pubkey,
-    });
+    };
 
-    let internal_key = vault.contract.internal_pubkey;
-    let taptree_hash = TapNodeHash::from_byte_array(vault.contract.taptree.root_hash());
+    let vault_contract = Vault::new(params.clone());
+    let internal_key = vault_contract.contract.internal_pubkey;
+    let taptree_hash = TapNodeHash::from_byte_array(vault_contract.contract.taptree.root_hash());
 
     let address = Address::p2tr(&secp, internal_key, Some(taptree_hash), KnownHrp::Regtest);
 
@@ -210,15 +270,8 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut manager = ContractManager::new(&client);
 
-    // Create and fund a Vault instance (params come from the contract).
-    let inst = manager.fund_instance(vault.as_erased(), None, Amount::from_sat(amount))?;
-
-    // Clone the instance for later use
-    let inst_clone = inst.instance.clone();
-
-    let mut signers: HashMap<XOnlyPublicKey, Box<dyn Signer>> = HashMap::new();
-
-    signers.insert(unvault_pubkey, Box::new(HotSigner::new(unvault_privkey)));
+    // Create and fund a Vault instance, getting a typed VaultHandle back.
+    let vault = Vault::fund(&mut manager, Amount::from_sat(amount), params)?;
 
     let ctv_template = vec![
         (
@@ -242,44 +295,20 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         "b288279b3012acaedfde4e4e347ad6f3147d416edbebf76668f16b91f2969215"
     );
 
-    // Prepare arguments for the trigger clause
-    let mut args = HashMap::new();
-    args.insert(
-        "sig".to_string(),
-        ArgValue::Signature(vec![0u8; 64]), // Placeholder signature - will be filled by manager
-    );
-    args.insert("ctv_hash".to_string(), ArgValue::Bytes(ctv_hash.to_vec()));
-    args.insert("out_i".to_string(), ArgValue::Int(0));
+    // Trigger the vault: read like a function call, signed, one child returned.
+    let unvaulting: UnvaultingHandle = vault
+        .trigger(ctv_hash, 0)
+        .sign(HotSigner::new(unvault_privkey))
+        .exec_one(&mut manager)?
+        .try_into()?;
 
-    // Spend the Vault instance with the "trigger" clause
-    let out_instances =
-        manager.spend_instance(inst_clone, "trigger", args, None, Some(&signers), None)?;
-
-    // Verify that the unvaulting instance was created
-    assert_eq!(
-        out_instances.len(),
-        1,
-        "Should create one unvaulting instance"
-    );
-
-    let unvaulting_inst = &out_instances[0];
-
-    // Verify the unvaulting instance has correct state
-    {
-        let inst = unvaulting_inst.instance.borrow();
-        assert_eq!(inst.status, InstanceStatus::Funded);
-
-        if let Some(state_bytes) = &inst.state_bytes {
-            // Verify it contains our ctv_hash
-            assert_eq!(state_bytes.as_slice(), ctv_hash);
-        } else {
-            panic!("Unvaulting instance should have state");
-        }
-    }
-
-    // Try to withdraw BEFORE the spend_delay - should fail
-    let mut withdraw_args = HashMap::new();
-    withdraw_args.insert("ctv_hash".to_string(), ArgValue::Bytes(ctv_hash.to_vec()));
+    // The child Unvaulting instance is funded and carries the ctv_hash as its state.
+    assert_eq!(unvaulting.handle().status(), InstanceStatus::Funded);
+    let state = unvaulting
+        .handle()
+        .state::<UnvaultingState>()
+        .expect("Unvaulting instance should have state");
+    assert_eq!(state.ctv_hash, ctv_hash);
 
     let withdraw_outputs: Vec<bitcoin::TxOut> = ctv_template
         .iter()
@@ -289,20 +318,13 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    // Clone before borrowing manager
-    let unvaulting_inst_clone = unvaulting_inst.instance.clone();
-    let unvaulting_inst_clone2 = unvaulting_inst.instance.clone();
+    // Try to withdraw BEFORE the spend_delay - should fail (non-BIP68-final).
+    let withdraw_result_early = unvaulting
+        .withdraw(ctv_hash)
+        .outputs(withdraw_outputs.clone())
+        .sequence(10) // Must match the nSequence in the CTV template
+        .exec_none(&mut manager);
 
-    let withdraw_result_early = manager.spend_instance(
-        unvaulting_inst_clone,
-        "withdraw",
-        withdraw_args.clone(),
-        Some(withdraw_outputs.clone()),
-        None, // No signatures needed for CTV
-        Some(bitcoin::Sequence(10)), // Must match the nSequence in the CTV template
-    );
-
-    // Verify that withdrawal fails with the expected RPC error
     assert!(
         withdraw_result_early.is_err(),
         "Withdrawal should fail before spend_delay"
@@ -318,22 +340,12 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     manager.mine_blocks(10)?;
 
-    // Now try to withdraw AFTER the spend_delay - should succeed
-    let final_insts = manager.spend_instance(
-        unvaulting_inst_clone2,
-        "withdraw",
-        withdraw_args,
-        Some(withdraw_outputs),
-        None, // No signatures needed for CTV
-        Some(bitcoin::Sequence(10)), // Must match the nSequence in the CTV template
-    )?;
-
-    // Withdraw tx is terminal - should create no new instances
-    assert_eq!(
-        final_insts.len(),
-        0,
-        "Withdraw transaction should be terminal (no new instances)"
-    );
+    // Now withdraw AFTER the spend_delay - should succeed; terminal (no children).
+    unvaulting
+        .withdraw(ctv_hash)
+        .outputs(withdraw_outputs)
+        .sequence(10)
+        .exec_none(&mut manager)?;
 
     Ok(())
 }

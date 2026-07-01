@@ -386,6 +386,49 @@ impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
     }
 }
 
+/// A Schnorr signature witness element.
+///
+/// Signature fields in a clause's `*Args` struct use this type. It defaults to
+/// empty (unsigned): the manager fills it in at spend time by matching the
+/// clause's `SignerType` pubkey against the registered signers, so callers never
+/// build a placeholder signature by hand. It occupies exactly one witness element.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Signature(pub Vec<u8>);
+
+impl Signature {
+    /// Wrap raw signature bytes.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Signature(bytes)
+    }
+
+    /// The signature bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Whether the signature is unset (the default, to be filled by the manager).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<Vec<u8>> for Signature {
+    fn from(bytes: Vec<u8>) -> Self {
+        Signature(bytes)
+    }
+}
+
+impl WitnessEncodable for Signature {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        vec![self.0.clone()]
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        let first = witness.first().ok_or(WitnessError::StackUnderflow)?;
+        Ok((Signature(first.clone()), 1))
+    }
+}
+
 // ============================================================================
 // Marker Trait Implementations
 // ============================================================================
@@ -941,11 +984,15 @@ pub trait ErasedClause: Debug + Send + Sync {
         witness: &[Vec<u8>],
     ) -> Result<HashMap<String, ArgValue>, WitnessError>;
 
-    /// Compute next outputs (with erased state as bytes).
-    fn next_outputs_erased(
+    /// Compute next outputs from the spend's witness stack (args in witness order).
+    ///
+    /// The witness stack is the authoritative, ordered argument encoding; params and
+    /// state are the instance's encoded bytes. This decodes them into the clause's
+    /// concrete types and runs the typed `next_outputs`.
+    fn next_outputs_from_witness(
         &self,
         params_bytes: &[u8],
-        args: &HashMap<String, ArgValue>,
+        witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
     ) -> Result<Vec<ClauseOutput>, ClauseError>;
 
@@ -1185,10 +1232,10 @@ where
         Ok(result)
     }
 
-    fn next_outputs_erased(
+    fn next_outputs_from_witness(
         &self,
         params_bytes: &[u8],
-        args: &HashMap<String, ArgValue>,
+        witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         // Decode params
@@ -1202,10 +1249,9 @@ where
             None
         };
 
-        // Decode args from HashMap to concrete Args type
-        // We build a witness stack from the args map and then decode it
-        let witness_stack = self.encode_args_to_witness(args)?;
-        let concrete_args = A::decode_from_witness(&witness_stack)?;
+        // The witness stack is already the ordered argument encoding; decode it
+        // straight into the concrete Args type (no HashMap round-trip).
+        let concrete_args = A::decode_from_witness(witness)?;
 
         // Call the typed version
         self.next_outputs(&params, &concrete_args, state.as_ref())
@@ -1232,23 +1278,19 @@ pub trait ErasedContract: Debug + Send + Sync {
     /// Get a clause by name.
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
 
-    /// Execute a clause and get the next outputs.
-    fn execute_clause_erased(
+    /// Execute a clause (selected by name) against a spend's witness stack and
+    /// return the next outputs.
+    fn execute_clause_from_witness(
         &self,
         clause_name: &str,
         params_bytes: &[u8],
-        args: HashMap<String, ArgValue>,
+        witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
-    ) -> Result<Option<Vec<ClauseOutput>>, ClauseError>;
+    ) -> Result<Vec<ClauseOutput>, ClauseError>;
 
-    /// Build the witness stack for spending with a specific clause.
-    fn build_witness_stack(
-        &self,
-        clause_name: &str,
-        params_bytes: &[u8],
-        args: &HashMap<String, ArgValue>,
-        state_bytes: Option<&[u8]>,
-    ) -> Result<Vec<Vec<u8>>, ClauseError>;
+    /// The `TypeId` of the concrete contract type, used to check that a
+    /// type-erased instance is the contract a typed handle expects.
+    fn contract_type_id(&self) -> std::any::TypeId;
 
     /// Get the script pubkey for this contract (with optional state).
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError>;
@@ -1356,35 +1398,22 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         self.clauses.iter().find(|c| c.name() == name)
     }
 
-    fn execute_clause_erased(
+    fn execute_clause_from_witness(
         &self,
         clause_name: &str,
         params_bytes: &[u8],
-        args: HashMap<String, ArgValue>,
+        witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
-    ) -> Result<Option<Vec<ClauseOutput>>, ClauseError> {
+    ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let clause = self
             .get_clause(clause_name)
             .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
 
-        clause
-            .next_outputs_erased(params_bytes, &args, state_bytes)
-            .map(Some)
+        clause.next_outputs_from_witness(params_bytes, witness, state_bytes)
     }
 
-    fn build_witness_stack(
-        &self,
-        clause_name: &str,
-        _params_bytes: &[u8],
-        args: &HashMap<String, ArgValue>,
-        _state_bytes: Option<&[u8]>,
-    ) -> Result<Vec<Vec<u8>>, ClauseError> {
-        let clause = self
-            .get_clause(clause_name)
-            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
-
-        let witness_elements = clause.encode_args_to_witness(args)?;
-        Ok(witness_elements)
+    fn contract_type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Self>()
     }
 
     fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
@@ -1517,35 +1546,22 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         self.clauses.iter().find(|c| c.name() == name)
     }
 
-    fn execute_clause_erased(
+    fn execute_clause_from_witness(
         &self,
         clause_name: &str,
         params_bytes: &[u8],
-        args: HashMap<String, ArgValue>,
+        witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
-    ) -> Result<Option<Vec<ClauseOutput>>, ClauseError> {
+    ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let clause = self
             .get_clause(clause_name)
             .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
 
-        clause
-            .next_outputs_erased(params_bytes, &args, state_bytes)
-            .map(Some)
+        clause.next_outputs_from_witness(params_bytes, witness, state_bytes)
     }
 
-    fn build_witness_stack(
-        &self,
-        clause_name: &str,
-        _params_bytes: &[u8],
-        args: &HashMap<String, ArgValue>,
-        _state_bytes: Option<&[u8]>,
-    ) -> Result<Vec<Vec<u8>>, ClauseError> {
-        let clause = self
-            .get_clause(clause_name)
-            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
-
-        let witness_elements = clause.encode_args_to_witness(args)?;
-        Ok(witness_elements)
+    fn contract_type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<Self>()
     }
 
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {

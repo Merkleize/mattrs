@@ -2,15 +2,28 @@
 //!
 //! Manages the lifecycle of contract instances from funding through spending,
 //! with automatic output tracking and witness decoding.
+//!
+//! Spending goes through the fluent [`SpendBuilder`]: a clause is invoked with its
+//! typed arguments (already encoded to a witness stack), signers are registered by
+//! public key, and `exec`/`exec_one`/`exec_none` build, sign, broadcast and
+//! materialize the resulting child instances.
 
-use std::{cell::RefCell, collections::HashMap, rc::Rc, thread::sleep, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    rc::Rc,
+    thread::sleep,
+    time::Duration,
+};
 
-use bitcoin::{Amount, OutPoint, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey};
+use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::{Client, RpcApi};
 
 use crate::{
-    argtypes::ArgValue,
-    contracts::{ClauseError, ContractError, ContractInstance, ErasedContract, InstanceStatus},
+    contracts::{
+        ClauseError, ClauseOutput, ClauseOutputAmountBehaviour, ContractError, ContractInstance,
+        ContractState, ErasedContract, InstanceStatus, OutputIndex,
+    },
     signer::Signer,
 };
 
@@ -26,6 +39,12 @@ pub enum ManagerError {
     InvalidInstance(String),
     OutputNotFound,
     TransactionBuildError(String),
+    /// A clause requires a signature from this key, but no signer was registered
+    /// and no signature was pre-filled.
+    MissingSigner(XOnlyPublicKey),
+    /// A spend produced a different number of child instances than the caller
+    /// asserted via `exec_one` / `exec_none`.
+    UnexpectedOutputCount { expected: usize, got: usize },
     Other(String),
 }
 
@@ -40,6 +59,14 @@ impl std::fmt::Display for ManagerError {
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
             }
+            ManagerError::MissingSigner(pk) => {
+                write!(f, "No signer registered for required key {}", pk)
+            }
+            ManagerError::UnexpectedOutputCount { expected, got } => write!(
+                f,
+                "Unexpected number of spend outputs: expected {}, got {}",
+                expected, got
+            ),
             ManagerError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -83,34 +110,25 @@ impl<'a> ContractManager<'a> {
         }
     }
 
-    /// Add an existing instance to the manager.
-    ///
-    /// Note: This returns a handle with lifetime tied to this borrow of the manager.
-    pub fn add_instance<'b>(
-        &'b mut self,
-        instance: Rc<RefCell<ContractInstance>>,
-    ) -> InstanceHandle<'b>
-    where
-        'a: 'b,
-    {
+    /// The RPC client, for callers that need direct access (e.g. mining or funding).
+    pub fn rpc(&self) -> &Client {
+        self.rpc
+    }
+
+    /// Add an existing instance to the manager and return a handle to it.
+    pub fn add_instance(&mut self, instance: Rc<RefCell<ContractInstance>>) -> InstanceHandle {
         self.instances.push(instance.clone());
-        InstanceHandle {
-            instance,
-            manager: self,
-        }
+        InstanceHandle { instance }
     }
 
     /// Create and fund a new contract instance. Params are taken from the
     /// (self-describing) contract.
-    pub fn fund_instance<'b>(
-        &'b mut self,
+    pub fn fund_instance(
+        &mut self,
         contract: std::sync::Arc<dyn ErasedContract>,
         state_bytes: Option<Vec<u8>>,
         amount: Amount,
-    ) -> Result<InstanceHandle<'b>, ManagerError>
-    where
-        'a: 'b,
-    {
+    ) -> Result<InstanceHandle, ManagerError> {
         // Create the instance
         let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state_bytes)));
 
@@ -147,87 +165,7 @@ impl<'a> ContractManager<'a> {
         // Add to managed instances
         self.instances.push(instance.clone());
 
-        Ok(InstanceHandle {
-            instance,
-            manager: self,
-        })
-    }
-
-    /// Spend a contract instance using the specified clause.
-    pub fn spend_instance<'b>(
-        &'b mut self,
-        instance: Rc<RefCell<ContractInstance>>,
-        clause_name: &str,
-        args: HashMap<String, ArgValue>,
-        explicit_outputs: Option<Vec<TxOut>>,
-        signers: Option<&SignerMap>,
-        sequence: Option<bitcoin::Sequence>,
-    ) -> Result<Vec<InstanceHandle<'b>>, ManagerError>
-    where
-        'a: 'b,
-    {
-        // Verify instance is funded
-        let inst = instance.borrow();
-        if inst.status != InstanceStatus::Funded {
-            return Err(ManagerError::InvalidInstance(
-                "Instance is not funded".to_string(),
-            ));
-        }
-
-        let outpoint = inst
-            .outpoint
-            .ok_or(ManagerError::InvalidInstance("No outpoint".to_string()))?;
-
-        // Get the clause outputs
-        let clause_outputs = inst.contract.execute_clause_erased(
-            clause_name,
-            &inst.params_bytes,
-            args.clone(),
-            inst.state_bytes.as_deref(),
-        )?;
-
-        drop(inst);
-
-        // Build the transaction
-        let tx = self.build_transaction(
-            vec![outpoint],
-            explicit_outputs,
-            clause_outputs.as_ref(),
-            &instance,
-            clause_name,
-            &args,
-            signers,
-            sequence,
-        )?;
-
-        // Broadcast it
-        let txid = self.rpc.send_raw_transaction(&tx)?;
-
-        // Mark instance as spent
-        instance
-            .borrow_mut()
-            .mark_spent(txid, clause_name.to_string());
-
-        // Create child instances from outputs
-        let child_instances = if let Some(outputs) = clause_outputs {
-            self.create_output_instances(&instance, outputs)?
-        } else {
-            Vec::new()
-        };
-
-        // Add children to parent
-        for child in &child_instances {
-            instance.borrow_mut().add_output(child.clone());
-        }
-
-        // Return handles to child instances
-        Ok(child_instances
-            .into_iter()
-            .map(|inst| InstanceHandle {
-                instance: inst,
-                manager: self,
-            })
-            .collect())
+        Ok(InstanceHandle { instance })
     }
 
     /// Mine blocks (for regtest).
@@ -235,6 +173,63 @@ impl<'a> ContractManager<'a> {
         let address = self.rpc.get_new_address(None, None)?.assume_checked();
         self.rpc.generate_to_address(n, &address)?;
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Spend execution (driven by SpendBuilder)
+    // ------------------------------------------------------------------
+
+    /// Build (and sign) the spending transaction for `builder`, without
+    /// broadcasting. Also returns the clause's next outputs (for child creation).
+    fn build_spend_tx(
+        &self,
+        builder: &SpendBuilder,
+    ) -> Result<(Transaction, Vec<ClauseOutput>), ManagerError> {
+        let inst = builder.instance.borrow();
+        if inst.status != InstanceStatus::Funded {
+            return Err(ManagerError::InvalidInstance(
+                "Instance is not funded".to_string(),
+            ));
+        }
+        let outpoint = inst
+            .outpoint
+            .ok_or_else(|| ManagerError::InvalidInstance("No outpoint".to_string()))?;
+
+        let clause_outputs = inst.contract.execute_clause_from_witness(
+            builder.clause_name,
+            &inst.params_bytes,
+            &builder.witness_args,
+            inst.state_bytes.as_deref(),
+        )?;
+        drop(inst);
+
+        let tx = self.build_transaction(outpoint, builder, &clause_outputs)?;
+        Ok((tx, clause_outputs))
+    }
+
+    /// Execute a spend: build, sign, broadcast, and materialize child instances.
+    fn execute_spend(&mut self, builder: SpendBuilder) -> Result<Vec<InstanceHandle>, ManagerError> {
+        let (tx, clause_outputs) = self.build_spend_tx(&builder)?;
+
+        // Broadcast
+        let txid = self.rpc.send_raw_transaction(&tx)?;
+
+        // Mark the spent instance
+        builder
+            .instance
+            .borrow_mut()
+            .mark_spent(txid, builder.clause_name.to_string());
+
+        // Materialize children
+        let child_instances = self.create_output_instances(&builder.instance, clause_outputs)?;
+        for child in &child_instances {
+            builder.instance.borrow_mut().add_output(child.clone());
+        }
+
+        Ok(child_instances
+            .into_iter()
+            .map(|instance| InstanceHandle { instance })
+            .collect())
     }
 
     // Helper methods
@@ -261,75 +256,27 @@ impl<'a> ContractManager<'a> {
         ))
     }
 
-    // A private worker that genuinely needs the full spend context (inputs,
-    // outputs, the instance being spent, the clause, its args, signers, sequence).
-    #[allow(clippy::too_many_arguments)]
+    /// Build the (single-input) spending transaction for `builder`, deriving
+    /// outputs from the clause outputs (or the caller's explicit outputs), filling
+    /// signature witness elements, and appending the tapscript + control block.
     fn build_transaction(
         &self,
-        inputs: Vec<OutPoint>,
-        explicit_outputs: Option<Vec<TxOut>>,
-        clause_outputs: Option<&Vec<crate::contracts::ClauseOutput>>,
-        instance: &Rc<RefCell<ContractInstance>>,
-        clause_name: &str,
-        args: &HashMap<String, ArgValue>,
-        signers: Option<&SignerMap>,
-        sequence: Option<bitcoin::Sequence>,
+        outpoint: OutPoint,
+        builder: &SpendBuilder,
+        clause_outputs: &[ClauseOutput],
     ) -> Result<Transaction, ManagerError> {
-        // Build unsigned transaction
-        let seq = sequence.unwrap_or(bitcoin::Sequence::ZERO);
-        let tx_inputs: Vec<TxIn> = inputs
-            .iter()
-            .map(|outpoint| TxIn {
-                previous_output: *outpoint,
-                script_sig: bitcoin::ScriptBuf::new(),
-                sequence: seq,
-                witness: bitcoin::Witness::new(),
-            })
-            .collect();
+        let seq = builder.sequence.unwrap_or(Sequence::ZERO);
+        let tx_inputs = vec![TxIn {
+            previous_output: outpoint,
+            script_sig: bitcoin::ScriptBuf::new(),
+            sequence: seq,
+            witness: bitcoin::Witness::new(),
+        }];
 
-        let tx_outputs = if let Some(outputs) = explicit_outputs {
-            outputs
-        } else if let Some(clause_outs) = clause_outputs {
-            // Generate outputs from clause execution
-            let mut outputs = Vec::new();
-            let inst = instance.borrow();
-            let input_amount = inst
-                .funding_tx
-                .as_ref()
-                .and_then(|tx| {
-                    inst.outpoint
-                        .as_ref()
-                        .map(|op| &tx.output[op.vout as usize])
-                })
-                .map(|out| out.value)
-                .unwrap_or(Amount::ZERO);
-            drop(inst);
-
-            for clause_out in clause_outs {
-                let script_pubkey = clause_out
-                    .next_contract
-                    .script_pubkey(clause_out.next_state.as_deref())?;
-
-                let value = match clause_out.next_amount {
-                    crate::contracts::ClauseOutputAmountBehaviour::PreserveOutput => input_amount,
-                    crate::contracts::ClauseOutputAmountBehaviour::IgnoreOutput => Amount::ZERO,
-                    crate::contracts::ClauseOutputAmountBehaviour::DeductOutput => {
-                        // DeductOutput requires explicit amounts to be provided
-                        // This should not be reached when explicit_outputs is Some
-                        return Err(ManagerError::TransactionBuildError(
-                            "DeductOutput requires explicit outputs to be provided".to_string(),
-                        ));
-                    }
-                };
-
-                outputs.push(TxOut {
-                    script_pubkey,
-                    value,
-                });
-            }
-            outputs
+        let tx_outputs = if let Some(outputs) = &builder.explicit_outputs {
+            outputs.clone()
         } else {
-            Vec::new()
+            self.derive_outputs(builder, clause_outputs)?
         };
 
         let mut tx = Transaction {
@@ -339,40 +286,41 @@ impl<'a> ContractManager<'a> {
             output: tx_outputs,
         };
 
-        // Build witness
-        let inst = instance.borrow();
-        let mut witness_stack = inst.contract.build_witness_stack(
-            clause_name,
-            &inst.params_bytes,
-            args,
-            inst.state_bytes.as_deref(),
-        )?;
-        drop(inst);
+        // The witness starts as the (already-encoded) clause arguments.
+        let mut witness_stack = builder.witness_args.clone();
 
-        // Sign if signers provided
-        if let Some(signer_map) = signers {
-            // Get the prevout for sighash computation
-            let inst = instance.borrow();
+        // Fill signature elements, then append the leaf script and control block.
+        let inst = builder.instance.borrow();
+        let clause = inst
+            .contract
+            .get_clause(builder.clause_name)
+            .ok_or_else(|| {
+                ManagerError::TransactionBuildError(format!(
+                    "Clause '{}' not found",
+                    builder.clause_name
+                ))
+            })?;
+        let leaf_script = clause.script().clone();
+
+        // Only compute a sighash / sign when the clause actually has signature args.
+        let needs_signature = clause
+            .arg_specs()
+            .iter()
+            .any(|spec| spec.arg_type.signer_pubkey().is_some());
+
+        if needs_signature {
             let prevout = inst
                 .funding_tx
                 .as_ref()
-                .and_then(|tx| {
+                .and_then(|ftx| {
                     inst.outpoint
                         .as_ref()
-                        .map(|op| tx.output[op.vout as usize].clone())
+                        .map(|op| ftx.output[op.vout as usize].clone())
                 })
                 .ok_or_else(|| {
                     ManagerError::TransactionBuildError("No prevout available".to_string())
                 })?;
 
-            // Get the clause to access its script
-            let clause = inst.contract.get_clause(clause_name).ok_or_else(|| {
-                ManagerError::TransactionBuildError(format!("Clause '{}' not found", clause_name))
-            })?;
-            let leaf_script = clause.script().clone();
-            drop(inst);
-
-            // Compute the sighash for signing
             let leaf_hash = bitcoin::taproot::TapLeafHash::from_script(
                 &leaf_script,
                 bitcoin::taproot::LeafVersion::TapScript,
@@ -380,37 +328,22 @@ impl<'a> ContractManager<'a> {
 
             let sighash = crate::signer::compute_tap_sighash(
                 &tx,
-                0, // first input
+                0,
                 &[prevout],
                 Some(leaf_hash),
                 bitcoin::sighash::TapSighashType::Default,
             )
             .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
 
-            // Walk the clause's arg specs in witness order. Each signature arg
-            // occupies exactly one witness element and names the x-only pubkey that
-            // must sign it; sign that element with the matching signer. Non-signer
-            // args are skipped (but still advance the witness offset). This avoids
-            // the old behaviour of overwriting *any* 64-byte-zero element with an
-            // arbitrary signer from the map, which was wrong for multi-key clauses.
-            let inst = instance.borrow();
-            let clause = inst.contract.get_clause(clause_name).ok_or_else(|| {
-                ManagerError::TransactionBuildError(format!("Clause '{}' not found", clause_name))
-            })?;
-
+            // Walk arg specs in witness order. A signature arg names the x-only key
+            // that must sign its (single) witness element; sign with the registered
+            // signer, or error if the element is empty and no signer is available.
             let mut offset = 0usize;
             for spec in clause.arg_specs() {
-                let value = args.get(&spec.name).ok_or_else(|| {
-                    ManagerError::TransactionBuildError(format!(
-                        "Missing argument '{}' for clause '{}'",
-                        spec.name, clause_name
-                    ))
-                })?;
-                let element_count = spec
+                let (_value, consumed) = spec
                     .arg_type
-                    .encode_to_witness(value)
-                    .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?
-                    .len();
+                    .decode_from_witness(&witness_stack[offset..])
+                    .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
 
                 if let Some(pubkey) = spec.arg_type.signer_pubkey() {
                     let xonly = XOnlyPublicKey::from_slice(&pubkey).map_err(|e| {
@@ -419,60 +352,127 @@ impl<'a> ContractManager<'a> {
                             spec.name, e
                         ))
                     })?;
-                    // Sign with the required key when we hold it; otherwise leave the
-                    // caller-provided value in place (it may be pre-signed).
-                    if let Some(signer) = signer_map.get(&xonly) {
+                    if let Some(signer) = builder.signers.get(&xonly) {
                         witness_stack[offset] = signer.sign(&sighash);
+                    } else if witness_stack[offset].is_empty() {
+                        // No signer and no pre-filled signature: fail loudly instead
+                        // of broadcasting an invalid witness.
+                        return Err(ManagerError::MissingSigner(xonly));
                     }
                 }
 
-                offset += element_count;
+                offset += consumed;
             }
-            drop(inst);
         }
 
-        // Add the script and control block to complete the tapscript witness
-        {
-            let inst = instance.borrow();
-            let clause = inst.contract.get_clause(clause_name).ok_or_else(|| {
-                ManagerError::TransactionBuildError(format!("Clause '{}' not found", clause_name))
+        // Append the leaf script and control block (state-tweaked key for augmented).
+        let internal_key = inst
+            .contract
+            .control_block_internal_key(inst.state_bytes.as_deref())?;
+        let taptree = inst.contract.taptree();
+        let control_block = taptree
+            .control_block(&internal_key, builder.clause_name)
+            .ok_or_else(|| {
+                ManagerError::TransactionBuildError(format!(
+                    "Could not generate control block for clause '{}'",
+                    builder.clause_name
+                ))
             })?;
-            let leaf_script = clause.script().clone();
+        drop(inst);
 
-            // Get the internal key for control block generation
-            // For augmented contracts, this is the state-tweaked key
-            let internal_key = inst
-                .contract
-                .control_block_internal_key(inst.state_bytes.as_deref())?;
-            let taptree = inst.contract.taptree();
+        witness_stack.push(leaf_script.to_bytes());
+        witness_stack.push(control_block);
 
-            // Generate the control block
-            let control_block = taptree
-                .control_block(&internal_key, clause_name)
-                .ok_or_else(|| {
+        tx.input[0].witness = bitcoin::Witness::from_slice(&witness_stack);
+        Ok(tx)
+    }
+
+    /// Derive the transaction outputs from a clause's outputs, honoring each
+    /// output's index and amount behaviour. `PreserveOutput`s receive the input
+    /// amount minus any `DeductOutput` amounts (which must be supplied via
+    /// [`SpendBuilder::output_amount`]).
+    fn derive_outputs(
+        &self,
+        builder: &SpendBuilder,
+        clause_outputs: &[ClauseOutput],
+    ) -> Result<Vec<TxOut>, ManagerError> {
+        // The spending input index (single input => 0), used to resolve `Same`.
+        let input_index = 0u32;
+
+        let input_amount = {
+            let inst = builder.instance.borrow();
+            inst.funding_tx
+                .as_ref()
+                .and_then(|ftx| {
+                    inst.outpoint
+                        .as_ref()
+                        .map(|op| ftx.output[op.vout as usize].value)
+                })
+                .unwrap_or(Amount::ZERO)
+        };
+
+        let index_of = |co: &ClauseOutput| -> u32 {
+            match co.index {
+                OutputIndex::Same => input_index,
+                OutputIndex::Explicit(n) => n,
+            }
+        };
+
+        // Sum the explicitly-deducted amounts; the preserved output gets the rest.
+        let mut total_deduct = Amount::ZERO;
+        for co in clause_outputs {
+            if co.next_amount == ClauseOutputAmountBehaviour::DeductOutput {
+                let idx = index_of(co);
+                let amt = builder.output_amounts.get(&idx).ok_or_else(|| {
                     ManagerError::TransactionBuildError(format!(
-                        "Could not generate control block for clause '{}'",
-                        clause_name
+                        "DeductOutput at index {} needs an amount (SpendBuilder::output_amount)",
+                        idx
                     ))
                 })?;
+                total_deduct += *amt;
+            }
+        }
+        let preserve_value = input_amount.checked_sub(total_deduct).ok_or_else(|| {
+            ManagerError::TransactionBuildError(
+                "Deducted output amounts exceed the input amount".to_string(),
+            )
+        })?;
 
-            // Append script and control block to witness
-            witness_stack.push(leaf_script.to_bytes());
-            witness_stack.push(control_block);
+        let mut outputs_map: BTreeMap<u32, TxOut> = BTreeMap::new();
+        for co in clause_outputs {
+            let idx = index_of(co);
+            let script_pubkey = co
+                .next_contract
+                .script_pubkey(co.next_state.as_deref())?;
+            let value = match co.next_amount {
+                ClauseOutputAmountBehaviour::PreserveOutput => preserve_value,
+                ClauseOutputAmountBehaviour::IgnoreOutput => Amount::ZERO,
+                ClauseOutputAmountBehaviour::DeductOutput => *builder
+                    .output_amounts
+                    .get(&idx)
+                    .expect("checked above"),
+            };
+            outputs_map.insert(idx, TxOut { script_pubkey, value });
         }
 
-        // Attach witness to first input
-        if !tx.input.is_empty() {
-            tx.input[0].witness = bitcoin::Witness::from_slice(&witness_stack);
+        // Flatten into a contiguous 0..n vector.
+        let mut outputs = Vec::with_capacity(outputs_map.len());
+        for i in 0..outputs_map.len() as u32 {
+            let out = outputs_map.remove(&i).ok_or_else(|| {
+                ManagerError::TransactionBuildError(format!(
+                    "Clause outputs are not contiguous (missing index {})",
+                    i
+                ))
+            })?;
+            outputs.push(out);
         }
-
-        Ok(tx)
+        Ok(outputs)
     }
 
     fn create_output_instances(
         &mut self,
         parent: &Rc<RefCell<ContractInstance>>,
-        outputs: Vec<crate::contracts::ClauseOutput>,
+        outputs: Vec<ClauseOutput>,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, ManagerError> {
         let mut instances = Vec::new();
 
@@ -489,8 +489,7 @@ impl<'a> ContractManager<'a> {
         // Create instances for each output
         for clause_out in outputs.iter() {
             let vout = match clause_out.index {
-                // Use the same index as the parent's input.
-                crate::contracts::OutputIndex::Same => {
+                OutputIndex::Same => {
                     let parent_ref = parent.borrow();
                     parent_ref
                         .outpoint
@@ -499,7 +498,7 @@ impl<'a> ContractManager<'a> {
                         })?
                         .vout
                 }
-                crate::contracts::OutputIndex::Explicit(n) => n,
+                OutputIndex::Explicit(n) => n,
             };
 
             // The child contract is self-describing, so its params come from it.
@@ -508,7 +507,6 @@ impl<'a> ContractManager<'a> {
                 clause_out.next_state.clone(),
             )));
 
-            // Mark as funded
             let outpoint = OutPoint {
                 txid: parent_txid,
                 vout,
@@ -525,16 +523,43 @@ impl<'a> ContractManager<'a> {
     }
 }
 
-/// A handle to a contract instance that provides access to both the instance and the manager.
-///
-/// Returned by spend/fund operations so callers can inspect the resulting
-/// instance(s) and continue spending through the manager.
-pub struct InstanceHandle<'a> {
-    pub instance: Rc<RefCell<ContractInstance>>,
-    pub manager: &'a ContractManager<'a>,
+/// Error returned when converting an [`InstanceHandle`] into a typed per-contract
+/// handle whose contract does not match the instance's actual contract.
+#[derive(Debug, Clone)]
+pub struct WrongContractType {
+    /// The contract type the conversion expected.
+    pub expected: &'static str,
 }
 
-impl<'a> InstanceHandle<'a> {
+impl std::fmt::Display for WrongContractType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "instance is not a `{}` contract",
+            self.expected
+        )
+    }
+}
+
+impl std::error::Error for WrongContractType {}
+
+/// A handle to a contract instance.
+///
+/// Cheap to clone (it is an `Rc` inside). Unlike the old design it does not borrow
+/// the manager, so callers can hold handles across spends and chain naturally. The
+/// `contract!` macro wraps this in a typed per-contract handle whose methods return
+/// a [`SpendBuilder`]; drop down to [`InstanceHandle::spend_clause`] for advanced use.
+#[derive(Clone)]
+pub struct InstanceHandle {
+    pub instance: Rc<RefCell<ContractInstance>>,
+}
+
+impl InstanceHandle {
+    /// Wrap a raw instance pointer.
+    pub fn new(instance: Rc<RefCell<ContractInstance>>) -> Self {
+        Self { instance }
+    }
+
     /// Get the instance status.
     pub fn status(&self) -> InstanceStatus {
         self.instance.borrow().status
@@ -545,8 +570,129 @@ impl<'a> InstanceHandle<'a> {
         self.instance.borrow().outpoint
     }
 
+    /// The `TypeId` of the underlying contract (for typed-handle conversions).
+    pub fn contract_type_id(&self) -> std::any::TypeId {
+        self.instance.borrow().contract.contract_type_id()
+    }
+
+    /// Decode this instance's state as `S`, if it has any.
+    pub fn state<S: ContractState>(&self) -> Option<S> {
+        let inst = self.instance.borrow();
+        inst.state_bytes
+            .as_deref()
+            .and_then(|bytes| S::decode(bytes).ok())
+    }
+
     /// Get the child instances created from spending this instance.
-    pub fn outputs(&self) -> Vec<Rc<RefCell<ContractInstance>>> {
-        self.instance.borrow().outputs.clone()
+    pub fn outputs(&self) -> Vec<InstanceHandle> {
+        self.instance
+            .borrow()
+            .outputs
+            .iter()
+            .cloned()
+            .map(|instance| InstanceHandle { instance })
+            .collect()
+    }
+
+    /// Begin a spend of `clause_name` with the given (already-encoded) witness
+    /// arguments. The `contract!`-generated per-clause methods call this; most code
+    /// should prefer those typed methods.
+    pub fn spend_clause(
+        &self,
+        clause_name: &'static str,
+        witness_args: Vec<Vec<u8>>,
+    ) -> SpendBuilder {
+        SpendBuilder {
+            instance: self.instance.clone(),
+            clause_name,
+            witness_args,
+            signers: HashMap::new(),
+            explicit_outputs: None,
+            output_amounts: BTreeMap::new(),
+            sequence: None,
+        }
+    }
+}
+
+/// A fluent builder for spending a single contract instance through one clause.
+///
+/// Created by the `contract!`-generated per-clause methods (or
+/// [`InstanceHandle::spend_clause`]). Register signers with [`SpendBuilder::sign`],
+/// then finish with [`SpendBuilder::exec`] / [`exec_one`](SpendBuilder::exec_one) /
+/// [`exec_none`](SpendBuilder::exec_none).
+pub struct SpendBuilder {
+    instance: Rc<RefCell<ContractInstance>>,
+    clause_name: &'static str,
+    witness_args: Vec<Vec<u8>>,
+    signers: SignerMap,
+    explicit_outputs: Option<Vec<TxOut>>,
+    output_amounts: BTreeMap<u32, Amount>,
+    sequence: Option<Sequence>,
+}
+
+impl SpendBuilder {
+    /// Register a signer (matched to the clause's signature args by public key).
+    pub fn sign(mut self, signer: impl Signer + 'static) -> Self {
+        self.signers.insert(signer.public_key(), Box::new(signer));
+        self
+    }
+
+    /// Register a boxed signer.
+    pub fn signer(mut self, signer: Box<dyn Signer>) -> Self {
+        self.signers.insert(signer.public_key(), signer);
+        self
+    }
+
+    /// Provide the transaction outputs explicitly (e.g. a CTV template), instead of
+    /// deriving them from the clause's outputs.
+    pub fn outputs(mut self, outputs: Vec<TxOut>) -> Self {
+        self.explicit_outputs = Some(outputs);
+        self
+    }
+
+    /// Set the amount for a `DeductOutput` clause output at `index` (e.g. a revault).
+    pub fn output_amount(mut self, index: u32, amount: Amount) -> Self {
+        self.output_amounts.insert(index, amount);
+        self
+    }
+
+    /// Set the input's `nSequence` (e.g. to satisfy a CSV timelock / CTV template).
+    pub fn sequence(mut self, sequence: u32) -> Self {
+        self.sequence = Some(Sequence(sequence));
+        self
+    }
+
+    /// Build and sign the spending transaction without broadcasting it.
+    pub fn build_tx(&self, manager: &ContractManager) -> Result<Transaction, ManagerError> {
+        Ok(manager.build_spend_tx(self)?.0)
+    }
+
+    /// Build, sign, broadcast, and return handles to all child instances.
+    pub fn exec(self, manager: &mut ContractManager) -> Result<Vec<InstanceHandle>, ManagerError> {
+        manager.execute_spend(self)
+    }
+
+    /// Like [`exec`](Self::exec) but asserts exactly one child instance is produced.
+    pub fn exec_one(self, manager: &mut ContractManager) -> Result<InstanceHandle, ManagerError> {
+        let mut outputs = self.exec(manager)?;
+        if outputs.len() != 1 {
+            return Err(ManagerError::UnexpectedOutputCount {
+                expected: 1,
+                got: outputs.len(),
+            });
+        }
+        Ok(outputs.pop().expect("length checked"))
+    }
+
+    /// Like [`exec`](Self::exec) but asserts the clause is terminal (no children).
+    pub fn exec_none(self, manager: &mut ContractManager) -> Result<(), ManagerError> {
+        let outputs = self.exec(manager)?;
+        if !outputs.is_empty() {
+            return Err(ManagerError::UnexpectedOutputCount {
+                expected: 0,
+                got: outputs.len(),
+            });
+        }
+        Ok(())
     }
 }

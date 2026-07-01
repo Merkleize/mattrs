@@ -240,9 +240,9 @@ fn main() {
         let decoded_args = clause.decode_witness_to_args(&witness).unwrap();
         println!("  Decoded {} arguments", decoded_args.len());
 
-        // Compute next outputs
+        // Compute next outputs from the (ordered) witness stack
         let _outputs = clause
-            .next_outputs_erased(&params_bytes, &args, Some(&state_bytes))
+            .next_outputs_from_witness(&params_bytes, &witness, Some(&state_bytes))
             .unwrap();
         println!();
     }
@@ -264,9 +264,9 @@ fn main() {
         let decoded_args = clause.decode_witness_to_args(&witness).unwrap();
         println!("  Decoded {} arguments", decoded_args.len());
 
-        // Compute next outputs
+        // Compute next outputs from the (ordered) witness stack
         let _outputs = clause
-            .next_outputs_erased(&params_bytes, &args, Some(&state_bytes))
+            .next_outputs_from_witness(&params_bytes, &witness, Some(&state_bytes))
             .unwrap();
         println!();
     }

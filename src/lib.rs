@@ -35,6 +35,12 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 /// Derive macros, re-exported so users can `use mattrs::{ContractParams, ..}`.
 pub use mattrs_derive::{ClauseArgs, ContractParams, ContractState};
 
+/// The `contract!` DSL macro, re-exported so users can `use mattrs::contract`.
+pub use mattrs_derive::contract;
+
+/// A signature witness element, re-exported for use in clause `*Args` structs.
+pub use contracts::Signature;
+
 pub mod argtypes;
 pub mod contracts;
 pub mod ctv;
