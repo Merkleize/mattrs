@@ -104,3 +104,217 @@ fn test_merkle_root_and_dup_script_bytes() {
     assert_eq!(hex::encode(merkle_root(3).as_bytes()), "6b7ea86c7ea8");
     assert_eq!(hex::encode(dup(1).as_bytes()), "76");
 }
+
+// ----------------------------------------------------------------------------
+// Spend flow (build-level, no node): each state transition drives its child.
+// ----------------------------------------------------------------------------
+
+use bitcoin::bip32::Xpriv;
+use mattrs::contracts::{ContractState, ErasedContract};
+use mattrs::manager::ContractManager;
+use mattrs::signer::HotSigner;
+use std::sync::Arc;
+use support::game256::{
+    Bisect1Handle, Bisect1State, Bisect2Handle, Bisect2State, G256S0Handle, G256S1Handle,
+    G256S1State, G256S2Handle, G256S2State, LeafState,
+};
+use support::testkit::{fund_fake, offline_client};
+
+fn alice_xpriv() -> Xpriv {
+    Xpriv::from_str(
+        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
+    )
+    .unwrap()
+}
+fn bob_xpriv() -> Xpriv {
+    Xpriv::from_str(
+        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
+    )
+    .unwrap()
+}
+
+/// The committed address of `contract` with committed `state`.
+fn addr<S: ContractState + 'static>(contract: Arc<dyn ErasedContract>, state: &S) -> bitcoin::ScriptBuf {
+    contract
+        .script_pubkey(Some(ContractState::encode(state).as_slice()))
+        .unwrap()
+}
+
+#[test]
+fn test_game256_state_transitions() {
+    let (alice_pk, bob_pk) = keys();
+    let p = G256Params { alice_pk, bob_pk };
+    let bp = |i, j| BisectParams {
+        alice_pk,
+        bob_pk,
+        i,
+        j,
+    };
+    let client = offline_client();
+    let manager = ContractManager::new(&client);
+
+    // 1. G256S0.choose(x) -> G256S1 committed to x.
+    let s0 = G256S0Handle(fund_fake(G256S0::new(p.clone()).as_erased(), None, 100_000, 1));
+    let tx = s0.choose(5).sign(HotSigner::new(bob_xpriv())).build_tx(&manager).unwrap();
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        addr(G256S1::new(p.clone()).as_erased(), &G256S1State { x: 5 })
+    );
+
+    // 2. G256S2.start_challenge -> Bisect_1(0,7) with sha256-committed endpoints.
+    let s2 = G256S2Handle(fund_fake(
+        G256S2::new(p.clone()).as_erased(),
+        Some(Box::new(G256S2State { t_a: [7; 32], y: 10, x: 5 })),
+        100_000,
+        2,
+    ));
+    let tx = s2
+        .start_challenge([7; 32], 10, 5, 11, [8; 32])
+        .sign(HotSigner::new(bob_xpriv()))
+        .build_tx(&manager)
+        .unwrap();
+    let commit = |v: i64| {
+        use bitcoin::hashes::Hash;
+        bitcoin::hashes::sha256::Hash::hash(&mattrs::script_utils::bn2vch(v)).to_byte_array()
+    };
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        addr(
+            Bisect1::new(bp(0, 7)).as_erased(),
+            &Bisect1State {
+                h_start: commit(5),
+                h_end_a: commit(10),
+                h_end_b: commit(11),
+                trace_a: [7; 32],
+                trace_b: [8; 32],
+            }
+        )
+    );
+
+    // 3. Bisect_2(0,7).bob_reveal_left -> a *sub-Bisect_1(0,3)* (children not leaves).
+    let b2 = Bisect2Handle(fund_fake(
+        Bisect2::new(bp(0, 7)).as_erased(),
+        Some(Box::new(Bisect2State {
+            h_start: [1; 32],
+            h_end_a: [2; 32],
+            h_end_b: [3; 32],
+            trace_a: [4; 32],
+            trace_b: [5; 32],
+            h_mid_a: [6; 32],
+            trace_left_a: [7; 32],
+            trace_right_a: [8; 32],
+        })),
+        100_000,
+        3,
+    ));
+    let tx = b2
+        .bob_reveal_left(
+            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32], [9; 32],
+            [10; 32], [11; 32],
+        )
+        .sign(HotSigner::new(bob_xpriv()))
+        .build_tx(&manager)
+        .unwrap();
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        addr(
+            Bisect1::new(bp(0, 3)).as_erased(),
+            &Bisect1State {
+                h_start: [1; 32],   // h_start
+                h_end_a: [6; 32],   // h_mid_a
+                h_end_b: [9; 32],   // h_mid_b
+                trace_a: [7; 32],   // trace_left_a
+                trace_b: [10; 32],  // trace_left_b
+            }
+        )
+    );
+
+    // 4. Bisect_2(0,1).bob_reveal_left -> a *Leaf* (children ARE leaves).
+    let b2_leaf = Bisect2Handle(fund_fake(
+        Bisect2::new(bp(0, 1)).as_erased(),
+        Some(Box::new(Bisect2State {
+            h_start: [1; 32],
+            h_end_a: [2; 32],
+            h_end_b: [3; 32],
+            trace_a: [4; 32],
+            trace_b: [5; 32],
+            h_mid_a: [6; 32],
+            trace_left_a: [7; 32],
+            trace_right_a: [8; 32],
+        })),
+        100_000,
+        4,
+    ));
+    let tx = b2_leaf
+        .bob_reveal_left(
+            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32], [9; 32],
+            [10; 32], [11; 32],
+        )
+        .sign(HotSigner::new(bob_xpriv()))
+        .build_tx(&manager)
+        .unwrap();
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        addr(
+            Leaf::new(LeafParams { alice_pk, bob_pk }).as_erased(),
+            &LeafState { h_start: [1; 32], h_end_alice: [6; 32], h_end_bob: [9; 32] }
+        )
+    );
+
+    // 5. G256S1.reveal -> G256S2 (state passthrough of t_a/y/x).
+    let s1 = G256S1Handle(fund_fake(
+        G256S1::new(p.clone()).as_erased(),
+        Some(Box::new(G256S1State { x: 5 })),
+        100_000,
+        5,
+    ));
+    let tx = s1
+        .reveal([7; 32], 10, 5)
+        .sign(HotSigner::new(alice_xpriv()))
+        .build_tx(&manager)
+        .unwrap();
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        addr(
+            G256S2::new(p.clone()).as_erased(),
+            &G256S2State { t_a: [7; 32], y: 10, x: 5 }
+        )
+    );
+
+    // 6. Bisect_1.alice_reveal -> Bisect_2 (same range), state passthrough.
+    let b1 = Bisect1Handle(fund_fake(
+        Bisect1::new(bp(0, 7)).as_erased(),
+        Some(Box::new(Bisect1State {
+            h_start: [1; 32],
+            h_end_a: [2; 32],
+            h_end_b: [3; 32],
+            trace_a: [4; 32],
+            trace_b: [5; 32],
+        })),
+        100_000,
+        6,
+    ));
+    let tx = b1
+        .alice_reveal(
+            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32],
+        )
+        .sign(HotSigner::new(alice_xpriv()))
+        .build_tx(&manager)
+        .unwrap();
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        addr(
+            Bisect2::new(bp(0, 7)).as_erased(),
+            &Bisect2State {
+                h_start: [1; 32],
+                h_end_a: [2; 32],
+                h_end_b: [3; 32],
+                trace_a: [4; 32],
+                trace_b: [5; 32],
+                h_mid_a: [6; 32],
+                trace_left_a: [7; 32],
+                trace_right_a: [8; 32],
+            }
+        )
+    );
+}

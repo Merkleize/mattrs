@@ -318,6 +318,8 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             quote! { #fname }
         });
         methods.push(quote! {
+            // A clause can have many arguments; the generated method mirrors them.
+            #[allow(clippy::too_many_arguments)]
             pub fn #cname(&self, #(#method_params),*) -> ::mattrs::manager::SpendBuilder {
                 let args = #args_ident::new(#(#ctor_args),*);
                 self.0.spend_clause(

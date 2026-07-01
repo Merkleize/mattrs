@@ -4,11 +4,12 @@
 //! disagrees they bisect the computation trace down to a single disputed step,
 //! which the `Leaf` contract adjudicates by re-running that one step on-chain.
 //!
-//! This ports the byte-exact taptrees of the whole example: the `Leaf` base case,
-//! the recursive `Bisect_1`/`Bisect_2` (over any [i, j] range), and the `G256S0`/
-//! `S1`/`S2` game stages — all verified against the pymatt references. The clauses
-//! are terminal with signer-carrying args; the `next_outputs` that drive the game
-//! and full spendability are follow-ups.
+//! This ports the whole example: the `Leaf` base case, the recursive `Bisect_1`/
+//! `Bisect_2` (over any [i, j] range), and the `G256S0`/`S1`/`S2` game stages — the
+//! taptrees are byte-verified against the pymatt references, and each clause's
+//! `next_outputs` drives the game state machine (choose -> S1 -> S2 ->
+//! Bisect_1(0,7) -> Bisect_2 -> Leaf/sub-Bisect_1), so a spend produces the correct
+//! child contract and committed state (see `test_game256_state_transitions`).
 //!
 //! The step function is game256's `Compute2x`: `y = 2*x`, values committed as
 //! `sha256(x)` (encoder `OP_SHA256`, func `OP_DUP OP_ADD`).
@@ -19,7 +20,7 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::XOnlyPublicKey;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{
-    ClauseArgs, ContractParams, ContractState, WitnessEncodable, WitnessError,
+    ClauseArgs, ClauseOutput, ContractParams, ContractState, WitnessEncodable, WitnessError,
 };
 use mattrs::script_utils::bn2vch;
 use mattrs::{contract, nums_key, Signature};
@@ -126,12 +127,10 @@ impl Leaf {
 }
 
 // ============================================================================
-// Bisect contracts (recursive core), ported at the base range i=0, j=1 — where
-// both children are Leaves (are_children_leaves).
-//
-// This ports the byte-exact tapscripts (and thus taptrees); the clauses carry
-// signer-only args and are terminal here. Full args, the next_outputs that drive
-// the recursion, and the general (i, j) range are follow-ups.
+// Bisect contracts (recursive core), over any range [i, j]. The two children are
+// Leaves when the sub-range is a single step, otherwise sub-Bisect_1s; the
+// bob_reveal scripts and next_outputs branch on this. next_outputs produces the
+// disputed child (Leaf or Bisect_1) with its committed state.
 // ============================================================================
 
 use mattrs::script_helpers::{check_output_contract, drop as script_drop};
@@ -271,24 +270,103 @@ contract! {
         state Bisect2State;
         internal_key |_p| nums_key();
 
+        // Bob disputes the LEFT child: <bob_sig> <h_start> <h_end_a> <h_end_b>
+        // <trace_a> <trace_b> <h_mid_a> <trace_left_a> <trace_right_a>
+        // <h_mid_b> <trace_left_b> <trace_right_b>
         clause bob_reveal_left {
             args {
                 #[signer(|p| p.bob_pk.serialize())]
                 bob_sig: Signature,
+                h_start: [u8; 32],
+                h_end_a: [u8; 32],
+                h_end_b: [u8; 32],
+                trace_a: [u8; 32],
+                trace_b: [u8; 32],
+                h_mid_a: [u8; 32],
+                trace_left_a: [u8; 32],
+                trace_right_a: [u8; 32],
+                h_mid_b: [u8; 32],
+                trace_left_b: [u8; 32],
+                trace_right_b: [u8; 32],
             }
             script Bisect2::bob_reveal_left_script;
+            next(p, a) {
+                if p.children_are_leaves() {
+                    Ok(vec![ClauseOutput::at_same_index()
+                        .to(p.leaf().as_erased())
+                        .with_state(&LeafState {
+                            h_start: a.h_start,
+                            h_end_alice: a.h_mid_a,
+                            h_end_bob: a.h_mid_b,
+                        })
+                        .preserve_amount()
+                        .build()])
+                } else {
+                    let m = p.m();
+                    Ok(vec![ClauseOutput::at_same_index()
+                        .to(Bisect1::new(p.child(p.i, p.i + m - 1)).as_erased())
+                        .with_state(&Bisect1State {
+                            h_start: a.h_start,
+                            h_end_a: a.h_mid_a,
+                            h_end_b: a.h_mid_b,
+                            trace_a: a.trace_left_a,
+                            trace_b: a.trace_left_b,
+                        })
+                        .preserve_amount()
+                        .build()])
+                }
+            }
         }
+        // Bob disputes the RIGHT child (same witness layout).
         clause bob_reveal_right {
             args {
                 #[signer(|p| p.bob_pk.serialize())]
                 bob_sig: Signature,
+                h_start: [u8; 32],
+                h_end_a: [u8; 32],
+                h_end_b: [u8; 32],
+                trace_a: [u8; 32],
+                trace_b: [u8; 32],
+                h_mid_a: [u8; 32],
+                trace_left_a: [u8; 32],
+                trace_right_a: [u8; 32],
+                h_mid_b: [u8; 32],
+                trace_left_b: [u8; 32],
+                trace_right_b: [u8; 32],
             }
             script Bisect2::bob_reveal_right_script;
+            next(p, a) {
+                if p.children_are_leaves() {
+                    Ok(vec![ClauseOutput::at_same_index()
+                        .to(p.leaf().as_erased())
+                        .with_state(&LeafState {
+                            h_start: a.h_mid_a,
+                            h_end_alice: a.h_end_a,
+                            h_end_bob: a.h_end_b,
+                        })
+                        .preserve_amount()
+                        .build()])
+                } else {
+                    let m = p.m();
+                    Ok(vec![ClauseOutput::at_same_index()
+                        .to(Bisect1::new(p.child(p.i + m, p.j)).as_erased())
+                        .with_state(&Bisect1State {
+                            h_start: a.h_mid_a,
+                            h_end_a: a.h_end_a,
+                            h_end_b: a.h_end_b,
+                            trace_a: a.trace_right_a,
+                            trace_b: a.trace_right_b,
+                        })
+                        .preserve_amount()
+                        .build()])
+                }
+            }
         }
+        // Alice can claim the pot if Bob abandons the challenge.
         clause forfait {
             args {
-                #[signer(|p| p.bob_pk.serialize())]
-                bob_sig: Signature,
+                #[signer(|p| p.alice_pk.serialize())]
+                alice_sig: Signature,
             }
             script Bisect2::forfait_script;
         }
@@ -382,13 +460,41 @@ contract! {
         state Bisect1State;
         internal_key |_p| nums_key();
 
+        // Alice reveals the midstate and child traces: <alice_sig> <h_start>
+        // <h_end_a> <h_end_b> <trace_a> <trace_b> <h_mid_a> <trace_left_a>
+        // <trace_right_a>
         clause alice_reveal {
             args {
                 #[signer(|p| p.alice_pk.serialize())]
                 alice_sig: Signature,
+                h_start: [u8; 32],
+                h_end_a: [u8; 32],
+                h_end_b: [u8; 32],
+                trace_a: [u8; 32],
+                trace_b: [u8; 32],
+                h_mid_a: [u8; 32],
+                trace_left_a: [u8; 32],
+                trace_right_a: [u8; 32],
             }
             script Bisect1::alice_reveal_script;
+            next(p, a) {
+                Ok(vec![ClauseOutput::at_same_index()
+                    .to(Bisect2::new(p.clone()).as_erased())
+                    .with_state(&Bisect2State {
+                        h_start: a.h_start,
+                        h_end_a: a.h_end_a,
+                        h_end_b: a.h_end_b,
+                        trace_a: a.trace_a,
+                        trace_b: a.trace_b,
+                        h_mid_a: a.h_mid_a,
+                        trace_left_a: a.trace_left_a,
+                        trace_right_a: a.trace_right_a,
+                    })
+                    .preserve_amount()
+                    .build()])
+            }
         }
+        // Bob can claim the pot if Alice abandons the challenge.
         clause forfait {
             args {
                 #[signer(|p| p.bob_pk.serialize())]
@@ -521,6 +627,13 @@ contract! {
                 x: i64,
             }
             script G256S0::choose_script;
+            next(p, a) {
+                Ok(vec![ClauseOutput::at_same_index()
+                    .to(G256S1::new(p.clone()).as_erased())
+                    .with_state(&G256S1State { x: a.x })
+                    .preserve_amount()
+                    .build()])
+            }
         }
 
         tree [choose];
@@ -555,6 +668,17 @@ contract! {
                 x: i64,
             }
             script G256S1::reveal_script;
+            next(p, a) {
+                Ok(vec![ClauseOutput::at_same_index()
+                    .to(G256S2::new(p.clone()).as_erased())
+                    .with_state(&G256S2State {
+                        t_a: a.t_a,
+                        y: a.y,
+                        x: a.x,
+                    })
+                    .preserve_amount()
+                    .build()])
+            }
         }
 
         tree [reveal];
@@ -602,6 +726,20 @@ contract! {
                 t_b: [u8; 32],
             }
             script G256S2::start_challenge_script;
+            next(p, a) {
+                let commit = |v: i64| sha256::Hash::hash(&bn2vch(v)).to_byte_array();
+                Ok(vec![ClauseOutput::at_same_index()
+                    .to(Bisect1::new(p.bisect()).as_erased())
+                    .with_state(&Bisect1State {
+                        h_start: commit(a.x),
+                        h_end_a: commit(a.y),
+                        h_end_b: commit(a.z),
+                        trace_a: a.t_a,
+                        trace_b: a.t_b,
+                    })
+                    .preserve_amount()
+                    .build()])
+            }
         }
 
         tree [withdraw, start_challenge];

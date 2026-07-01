@@ -232,6 +232,7 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
     let new_impl = quote! {
         /// Construct the clause arguments. Signature fields are left empty and are
         /// filled in by the manager at spend time.
+        #[allow(clippy::too_many_arguments)]
         pub fn new(#(#ctor_params),*) -> Self {
             Self {
                 #(#ctor_field_inits),*
