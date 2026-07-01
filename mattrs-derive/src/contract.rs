@@ -279,8 +279,14 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                             ::mattrs::contracts::NextOutputs,
                             ::mattrs::contracts::ClauseError,
                         > {
+                            // Pin the error type so a bare `Ok(..)` body isn't
+                            // ambiguous between the identity and WitnessError `From`s.
+                            let __result: ::core::result::Result<
+                                _,
+                                ::mattrs::contracts::ClauseError,
+                            > = #block;
                             let __next: ::mattrs::contracts::NextOutputs =
-                                ::core::convert::Into::into((#block)?);
+                                ::core::convert::Into::into(__result?);
                             ::core::result::Result::Ok(__next)
                         }
                     ))
