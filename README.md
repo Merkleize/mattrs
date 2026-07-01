@@ -95,10 +95,10 @@ The examples from the Python reference framework (`pymatt`) are ported under
 | **ram** (`ram.rs`) | a Merkle-committed cell vector; the `MerkleProofType` witness arg; **expanded state** | root matches; `write` spends |
 | **game256** (`game256.rs`) | a recursive **bisection fraud proof** (`Leaf` → `Bisect_1`/`Bisect_2` → `G256S0/1/2`) | all taptrees match |
 
-Supporting infrastructure ported alongside them: a data `MerkleTree` and
-`MerkleProof`, and the `merkle_root(n)` / `dup(n)` / `drop(n)` /
-`check_input_contract` / `check_output_contract` / `older` script fragments
-(`tests/support/merkle.rs`, `tests/support/script_helpers.rs`).
+Supporting MATT infrastructure lives in the library for downstream reuse: a data
+`MerkleTree` / `MerkleProof` / `WitProof` / `MerkleProofType` (`mattrs::merkle`)
+and the `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
+`check_output_contract` / `older` script fragments (`mattrs::script_helpers`).
 
 ## Spend-API features
 
