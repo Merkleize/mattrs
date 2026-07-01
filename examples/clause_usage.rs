@@ -138,7 +138,7 @@ fn main() {
                 }
 
                 // Return empty outputs for this example
-                Ok(Vec::new())
+                Ok(NextOutputs::Contracts(Vec::new()))
             },
         )),
     );
@@ -167,7 +167,7 @@ fn main() {
                     println!("    Remaining: {}", state.amount as i64 - args.amount);
                 }
 
-                Ok(Vec::new())
+                Ok(NextOutputs::Contracts(Vec::new()))
             },
         )),
     );

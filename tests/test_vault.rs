@@ -227,6 +227,91 @@ fn test_trigger_without_signer_errors() {
     );
 }
 
+#[test]
+fn test_batch_merges_and_deducts_outputs() {
+    // Three vaults spent in one transaction: one triggers with a partial revault,
+    // the other two trigger normally. All three unvaulting outputs share index 0 and
+    // merge into a single output; the revault is a separate deducted output at
+    // index 1. Mirrors pymatt's trigger_with_revault batch. Builds locally, no RPC.
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use bitcoin::{hashes::Hash, OutPoint, Transaction, TxOut, Txid};
+    use bitcoincore_rpc::{Auth, Client};
+    use mattrs::contracts::ContractInstance;
+    use mattrs::manager::InstanceHandle;
+    use mattrs::signer::HotSigner;
+    use support::vault::VaultHandle;
+
+    let secp = Secp256k1::new();
+    let unvault_privkey = Xpriv::from_str(
+        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
+    )
+    .unwrap();
+    let unvault_pubkey: XOnlyPublicKey = unvault_privkey.to_priv().public_key(&secp).into();
+    let recover_pubkey = XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap();
+
+    let params = VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: recover_pubkey,
+        unvault_pk: unvault_pubkey,
+    };
+    let vault = Vault::new(params);
+    let script_pubkey = vault.as_erased().script_pubkey(None).unwrap();
+
+    // Fund three vault instances of 100_000 sat each (same address, distinct txids).
+    let funded = |seed: u8| -> Rc<RefCell<ContractInstance>> {
+        let instance = Rc::new(RefCell::new(ContractInstance::new(vault.as_erased(), None)));
+        let funding_tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut {
+                script_pubkey: script_pubkey.clone(),
+                value: Amount::from_sat(100_000),
+            }],
+        };
+        instance.borrow_mut().mark_funded(
+            OutPoint {
+                txid: Txid::from_byte_array([seed; 32]),
+                vout: 0,
+            },
+            funding_tx,
+        );
+        instance
+    };
+
+    let h1 = VaultHandle(InstanceHandle::new(funded(1)));
+    let h2 = VaultHandle(InstanceHandle::new(funded(2)));
+    let h3 = VaultHandle(InstanceHandle::new(funded(3)));
+
+    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
+    let manager = ContractManager::new(&client);
+
+    let ctv_hash = [7u8; 32];
+    let revault_amount = Amount::from_sat(30_000);
+
+    let tx = manager
+        .build_batch_tx(&[
+            h1.trigger_and_revault(ctv_hash, 0, 1)
+                .sign(HotSigner::new(unvault_privkey))
+                .output_amount(1, revault_amount),
+            h2.trigger(ctv_hash, 0).sign(HotSigner::new(unvault_privkey)),
+            h3.trigger(ctv_hash, 0).sign(HotSigner::new(unvault_privkey)),
+        ])
+        .unwrap();
+
+    assert_eq!(tx.input.len(), 3);
+    assert_eq!(tx.output.len(), 2);
+    // index 0: merged unvaulting output = (100k - 30k revault) + 100k + 100k
+    assert_eq!(tx.output[0].value, Amount::from_sat(270_000));
+    // index 1: the deducted revault output
+    assert_eq!(tx.output[1].value, revault_amount);
+    // every input carries a completed witness (args + sig + script + control block)
+    assert!(tx.input.iter().all(|i| !i.witness.is_empty()));
+}
+
 // Integration test - requires a running regtest bitcoind.
 // Ignored by default so `cargo test` is green without a node; run with
 // `cargo test -- --ignored` against a configured regtest daemon.

@@ -3,7 +3,7 @@ use std::{
 };
 
 use bitcoin::{
-    OutPoint, ScriptBuf, TapTweakHash, Transaction, Txid, XOnlyPublicKey,
+    OutPoint, ScriptBuf, Sequence, TapTweakHash, Transaction, TxOut, Txid, XOnlyPublicKey,
     hashes::{Hash, sha256},
     key::{Secp256k1, TweakedPublicKey},
     taproot::{LeafVersion, TapLeafHash, TapNodeHash},
@@ -644,6 +644,58 @@ impl ClauseOutputBuilder {
     }
 }
 
+/// A CTV (`CHECKTEMPLATEVERIFY`) transaction template: the exact outputs and input
+/// sequence that a clause commits its spending transaction to.
+///
+/// A clause whose `next_outputs` returns [`NextOutputs::Template`] fixes the whole
+/// spending transaction (its outputs and `nSequence`), rather than declaring
+/// per-output child contracts. Such a spend is terminal — it creates no tracked
+/// child instances.
+#[derive(Debug, Clone)]
+pub struct CtvTemplate {
+    /// The transaction outputs the template commits to.
+    pub outputs: Vec<TxOut>,
+    /// The `nSequence` of the (single) spending input the template commits to.
+    pub sequence: Sequence,
+}
+
+impl CtvTemplate {
+    /// Build a template from its outputs and input sequence.
+    pub fn new(outputs: Vec<TxOut>, sequence: Sequence) -> Self {
+        Self { outputs, sequence }
+    }
+
+    /// The BIP-119 standard template hash for this template (single-input spend).
+    pub fn ctv_hash(&self) -> [u8; 32] {
+        crate::ctv::compute_ctv_hash(&self.outputs, self.sequence)
+    }
+}
+
+/// What a clause produces when spent.
+///
+/// Either a set of covenant ([`ClauseOutput`]) outputs whose amounts are derived
+/// from the input, or a fixed CTV [`CtvTemplate`]. A clause with no next-outputs
+/// function is terminal and yields `Contracts(vec![])`.
+#[derive(Debug, Clone)]
+pub enum NextOutputs {
+    /// `CHECKCONTRACTVERIFY` outputs — (possibly stateful) contracts, amounts derived.
+    Contracts(Vec<ClauseOutput>),
+    /// A fixed `CHECKTEMPLATEVERIFY` template — terminal (no child instances).
+    Template(CtvTemplate),
+}
+
+impl From<Vec<ClauseOutput>> for NextOutputs {
+    fn from(outputs: Vec<ClauseOutput>) -> Self {
+        NextOutputs::Contracts(outputs)
+    }
+}
+
+impl From<CtvTemplate> for NextOutputs {
+    fn from(template: CtvTemplate) -> Self {
+        NextOutputs::Template(template)
+    }
+}
+
 // ============================================================================
 // TapTree Structure
 // ============================================================================
@@ -953,7 +1005,7 @@ pub trait Clause {
         params: &Self::Params,
         args: &Self::Args,
         state: Option<&Self::State>,
-    ) -> Result<Vec<ClauseOutput>, ClauseError>;
+    ) -> Result<NextOutputs, ClauseError>;
 }
 
 // ============================================================================
@@ -994,7 +1046,7 @@ pub trait ErasedClause: Debug + Send + Sync {
         params_bytes: &[u8],
         witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
-    ) -> Result<Vec<ClauseOutput>, ClauseError>;
+    ) -> Result<NextOutputs, ClauseError>;
 
     /// Clone into a Box.
     fn clone_boxed(&self) -> Box<dyn ErasedClause>;
@@ -1064,7 +1116,7 @@ impl Debug for ArgSpec {
 
 /// Type-safe function for computing next outputs.
 pub type NextOutputsFn<P, S, A> =
-    Arc<dyn Fn(&P, &A, Option<&S>) -> Result<Vec<ClauseOutput>, ClauseError> + Send + Sync>;
+    Arc<dyn Fn(&P, &A, Option<&S>) -> Result<NextOutputs, ClauseError> + Send + Sync>;
 
 /// Standard implementation of a clause.
 pub struct StandardClause<P, S, A>
@@ -1158,11 +1210,11 @@ where
         params: &Self::Params,
         args: &Self::Args,
         state: Option<&Self::State>,
-    ) -> Result<Vec<ClauseOutput>, ClauseError> {
+    ) -> Result<NextOutputs, ClauseError> {
         if let Some(ref f) = self.next_outputs_fn {
             f(params, args, state)
         } else {
-            Ok(Vec::new())
+            Ok(NextOutputs::Contracts(Vec::new()))
         }
     }
 }
@@ -1237,7 +1289,7 @@ where
         params_bytes: &[u8],
         witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
-    ) -> Result<Vec<ClauseOutput>, ClauseError> {
+    ) -> Result<NextOutputs, ClauseError> {
         // Decode params
         let params = P::decode(params_bytes)
             .map_err(|e| ClauseError::Other(format!("Failed to decode params: {}", e)))?;
@@ -1286,7 +1338,7 @@ pub trait ErasedContract: Debug + Send + Sync {
         params_bytes: &[u8],
         witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
-    ) -> Result<Vec<ClauseOutput>, ClauseError>;
+    ) -> Result<NextOutputs, ClauseError>;
 
     /// The `TypeId` of the concrete contract type, used to check that a
     /// type-erased instance is the contract a typed handle expects.
@@ -1404,7 +1456,7 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         params_bytes: &[u8],
         witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
-    ) -> Result<Vec<ClauseOutput>, ClauseError> {
+    ) -> Result<NextOutputs, ClauseError> {
         let clause = self
             .get_clause(clause_name)
             .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
@@ -1552,7 +1604,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         params_bytes: &[u8],
         witness: &[Vec<u8>],
         state_bytes: Option<&[u8]>,
-    ) -> Result<Vec<ClauseOutput>, ClauseError> {
+    ) -> Result<NextOutputs, ClauseError> {
         let clause = self
             .get_clause(clause_name)
             .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;

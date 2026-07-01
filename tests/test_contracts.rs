@@ -267,6 +267,87 @@ fn test_derived_state_roundtrip() {
 }
 
 #[test]
+fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use bitcoin::{
+        hashes::Hash, Address, Amount, OutPoint, Sequence, Transaction, TxOut, Txid,
+    };
+    use bitcoincore_rpc::{Auth, Client};
+    use mattrs::manager::{ContractManager, InstanceHandle};
+
+    // The exact outputs + input sequence the clause commits to.
+    let dest = Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")
+        .unwrap()
+        .assume_checked();
+    let template_outputs = vec![TxOut {
+        script_pubkey: dest.script_pubkey(),
+        value: Amount::from_sat(90_000),
+    }];
+    let template_seq = Sequence(10);
+
+    // A one-clause contract whose clause returns a CTV template.
+    let outs = template_outputs.clone();
+    let clause: Arc<dyn ErasedClause> = Arc::new(StandardClause::<(), (), TriggerArgs>::new(
+        "pay".to_string(),
+        ScriptBuf::from_hex("51").unwrap(),
+        vec![ArgSpec {
+            name: "withdraw_amount".to_string(),
+            arg_type: Arc::new(IntType),
+        }],
+        Some(Arc::new(move |_p: &(), _a: &TriggerArgs, _s: Option<&()>| {
+            Ok(NextOutputs::Template(CtvTemplate::new(
+                outs.clone(),
+                template_seq,
+            )))
+        })),
+    ));
+
+    let owner = XOnlyPublicKey::from_str(
+        "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    )
+    .unwrap();
+    let erased: Arc<dyn ErasedContract> =
+        Arc::new(StandardP2TR::<()>::new(owner, &(), ClauseTree::leaf(clause)));
+    let script_pubkey = erased.script_pubkey(None).unwrap();
+
+    // Fake a funded instance (building the tx does no RPC).
+    let instance = Rc::new(RefCell::new(ContractInstance::new(erased, None)));
+    let funding_tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            script_pubkey,
+            value: Amount::from_sat(100_000),
+        }],
+    };
+    instance.borrow_mut().mark_funded(
+        OutPoint {
+            txid: Txid::all_zeros(),
+            vout: 0,
+        },
+        funding_tx,
+    );
+    let handle = InstanceHandle::new(instance);
+
+    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
+    let manager = ContractManager::new(&client);
+
+    let witness =
+        <TriggerArgs as ClauseArgs>::encode_to_witness(&TriggerArgs { withdraw_amount: 1 });
+    let tx = handle
+        .spend_clause("pay", witness)
+        .build_tx(&manager)
+        .unwrap();
+
+    // The template fixes the outputs and the input sequence.
+    assert_eq!(tx.output, template_outputs);
+    assert_eq!(tx.input[0].sequence, template_seq);
+}
+
+#[test]
 fn test_params_encoding() {
     let owner_pubkey = XOnlyPublicKey::from_str(
         "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",

@@ -269,14 +269,20 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 let a = &nd.a;
                 let s = nd.s.clone().unwrap_or_else(|| format_ident!("_state"));
                 let block = &nd.body;
+                // The body may evaluate to a Result of Vec<ClauseOutput>, a
+                // CtvTemplate, or a NextOutputs; convert whatever it yields into
+                // NextOutputs (all three implement Into<NextOutputs>).
                 quote! {
                     ::core::option::Option::Some(::std::sync::Arc::new(
                         |#p: &#params_ty, #a: &#args_ident, #s: ::core::option::Option<&#state_ty>|
                         -> ::core::result::Result<
-                            ::std::vec::Vec<::mattrs::contracts::ClauseOutput>,
+                            ::mattrs::contracts::NextOutputs,
                             ::mattrs::contracts::ClauseError,
-                        >
-                        #block
+                        > {
+                            let __next: ::mattrs::contracts::NextOutputs =
+                                ::core::convert::Into::into((#block)?);
+                            ::core::result::Result::Ok(__next)
+                        }
                     ))
                 }
             }
