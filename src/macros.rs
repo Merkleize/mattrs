@@ -108,6 +108,15 @@ macro_rules! clause_tree {
         $crate::contracts::ClauseTree::leaf($clause)
     };
 
+    // Bracketed left subtree, then the rest (must precede the `$left:expr` arms so
+    // the leading bracket isn't captured as an array expression).
+    ([$($left:tt),+ $(,)?], $($rest:tt),+ $(,)?) => {
+        $crate::contracts::ClauseTree::branch(
+            $crate::clause_tree!($($left),+),
+            $crate::clause_tree!($($rest),+),
+        )
+    };
+
     // left expr, bracketed right subtree.
     ($left:expr, [$($right:tt),+ $(,)?]) => {
         $crate::contracts::ClauseTree::branch(

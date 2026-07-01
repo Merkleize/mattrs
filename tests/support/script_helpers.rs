@@ -92,6 +92,19 @@ pub fn merkle_root(n_leaves: usize) -> ScriptBuf {
     concat(parts)
 }
 
+/// Script that drops the top `n` stack elements. Mirrors pymatt's
+/// `script_helpers.drop`.
+pub fn drop(n: usize) -> ScriptBuf {
+    let mut parts = Vec::new();
+    for _ in 0..(n / 2) {
+        parts.push(script! { OP_2DROP });
+    }
+    if n % 2 == 1 {
+        parts.push(script! { OP_DROP });
+    }
+    concat(parts)
+}
+
 /// Script that duplicates the top `n` stack elements. Mirrors pymatt's
 /// `script_helpers.dup`.
 pub fn dup(n: usize) -> ScriptBuf {
