@@ -6,7 +6,7 @@
 
 mod support;
 
-use support::merkle::{ceil_lg, floor_lg, get_directions, MerkleProofType, MerkleTree, WitProof};
+use mattrs::merkle::{ceil_lg, floor_lg, get_directions, MerkleProofType, MerkleTree, WitProof};
 use support::ram::{Ram, RamHandle, RamParams, RamState};
 
 fn ref_leaves() -> Vec<[u8; 32]> {

@@ -12,7 +12,7 @@ use bitcoin::XOnlyPublicKey;
 use support::game256::{
     Bisect1, Bisect2, BisectParams, G256Params, G256S0, G256S1, G256S2, Leaf, LeafParams,
 };
-use support::script_helpers::{dup, merkle_root};
+use mattrs::script_helpers::{dup, merkle_root};
 
 fn keys() -> (XOnlyPublicKey, XOnlyPublicKey) {
     (

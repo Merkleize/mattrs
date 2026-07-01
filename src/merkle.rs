@@ -4,12 +4,11 @@
 //! leaves are *not* re-hashed). Internal nodes are `sha256(left || right)`. This is
 //! the off-chain half of the RAM / fraud-proof contracts: it produces the root that
 //! a contract commits to, and the membership proofs a spend reveals.
-#![allow(dead_code)]
 
 use bitcoin::hashes::{sha256, Hash};
-use mattrs::argtypes::ArgValue;
-use mattrs::contracts::{ArgType, WitnessEncodable, WitnessError};
-use mattrs::script_utils::{bn2vch, vch2bn};
+use crate::argtypes::ArgValue;
+use crate::contracts::{ArgType, WitnessEncodable, WitnessError};
+use crate::script_utils::{bn2vch, vch2bn};
 
 /// The empty-tree root.
 pub const NIL: [u8; 32] = [0u8; 32];

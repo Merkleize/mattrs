@@ -25,8 +25,8 @@ use mattrs::script_utils::bn2vch;
 use mattrs::{contract, nums_key, Signature};
 use mattrs_derive::ContractParams;
 
-use super::merkle::MerkleTree;
-use super::script_helpers::{check_input_contract, dup, merkle_root, older};
+use mattrs::merkle::MerkleTree;
+use mattrs::script_helpers::{check_input_contract, dup, merkle_root, older};
 
 define_pushable!();
 
@@ -134,7 +134,7 @@ impl Leaf {
 // the recursion, and the general (i, j) range are follow-ups.
 // ============================================================================
 
-use super::script_helpers::{check_output_contract, drop as script_drop};
+use mattrs::script_helpers::{check_output_contract, drop as script_drop};
 
 #[derive(Debug, Clone, ContractParams)]
 pub struct BisectParams {
@@ -369,7 +369,7 @@ impl Bisect2 {
 
     fn forfait_script(p: &BisectParams) -> ScriptBuf {
         script! {
-            { super::script_helpers::older(10) }
+            { mattrs::script_helpers::older(10) }
             { p.alice_pk }
             OP_CHECKSIG
         }
@@ -426,7 +426,7 @@ impl Bisect1 {
 
     fn forfait_script(p: &BisectParams) -> ScriptBuf {
         script! {
-            { super::script_helpers::older(10) }
+            { mattrs::script_helpers::older(10) }
             { p.bob_pk }
             OP_CHECKSIG
         }

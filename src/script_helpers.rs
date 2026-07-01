@@ -1,11 +1,10 @@
 //! Reusable `CHECKCONTRACTVERIFY` / timelock script fragments, ported from
 //! pymatt's `matt/script_helpers.py`. These build the small CCV/CSV building
 //! blocks that MATT contracts assemble their tapscripts from.
-#![allow(dead_code)]
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::{contracts::CCV_FLAG_CHECK_INPUT, optional_key_script};
+use crate::{contracts::CCV_FLAG_CHECK_INPUT, optional_key_script};
 
 define_pushable!();
 

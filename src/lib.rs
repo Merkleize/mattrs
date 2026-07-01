@@ -47,6 +47,8 @@ pub mod ctv;
 #[macro_use]
 pub mod macros;
 pub mod manager;
+pub mod merkle;
+pub mod script_helpers;
 pub mod script_utils;
 pub mod signer;
 

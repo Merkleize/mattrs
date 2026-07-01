@@ -21,8 +21,8 @@ use mattrs::contracts::{
 use mattrs::{contract, nums_key};
 use mattrs_derive::ContractParams;
 
-use super::merkle::{floor_lg, MerkleProofType, MerkleTree, WitProof};
-use super::script_helpers::check_input_contract;
+use mattrs::merkle::{floor_lg, MerkleProofType, MerkleTree, WitProof};
+use mattrs::script_helpers::check_input_contract;
 
 define_pushable!();
 

@@ -22,7 +22,7 @@ use mattrs::contracts::{
 use mattrs::{contract, nums_key, script_utils::bn2vch, Signature};
 use mattrs_derive::{ContractParams, ContractState};
 
-use super::script_helpers::{check_input_contract, check_output_contract};
+use mattrs::script_helpers::{check_input_contract, check_output_contract};
 
 define_pushable!();
 
