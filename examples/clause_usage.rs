@@ -222,7 +222,6 @@ fn main() {
         amount: 100_000,
         unlock_time: 1000,
     };
-    let state_bytes = state.encode();
 
     // Test 1: Trigger clause
     println!("1. Using 'trigger' clause:");
@@ -242,7 +241,7 @@ fn main() {
 
         // Compute next outputs from the (ordered) witness stack
         let _outputs = clause
-            .next_outputs_from_witness(&params_bytes, &witness, Some(&state_bytes))
+            .next_outputs_from_witness(&params_bytes, &witness, Some(&state as &dyn ErasedState))
             .unwrap();
         println!();
     }
@@ -266,7 +265,7 @@ fn main() {
 
         // Compute next outputs from the (ordered) witness stack
         let _outputs = clause
-            .next_outputs_from_witness(&params_bytes, &witness, Some(&state_bytes))
+            .next_outputs_from_witness(&params_bytes, &witness, Some(&state as &dyn ErasedState))
             .unwrap();
         println!();
     }

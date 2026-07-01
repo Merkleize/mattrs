@@ -22,7 +22,7 @@ use bitcoincore_rpc::{Client, RpcApi};
 use crate::{
     contracts::{
         ClauseError, ClauseOutput, ClauseOutputAmountBehaviour, ContractError, ContractInstance,
-        ContractState, ErasedContract, InstanceStatus, NextOutputs, OutputIndex,
+        ContractState, ErasedContract, ErasedState, InstanceStatus, NextOutputs, OutputIndex,
     },
     signer::Signer,
 };
@@ -126,11 +126,13 @@ impl<'a> ContractManager<'a> {
     pub fn fund_instance(
         &mut self,
         contract: std::sync::Arc<dyn ErasedContract>,
-        state_bytes: Option<Vec<u8>>,
+        state: Option<Box<dyn ErasedState>>,
         amount: Amount,
     ) -> Result<InstanceHandle, ManagerError> {
-        // Create the instance
-        let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state_bytes)));
+        // Create the instance (its committed bytes derive from the logical state).
+        let instance = Rc::new(RefCell::new(ContractInstance::new_with_expanded(
+            contract, state,
+        )));
 
         // Get the script pubkey for this instance
         let script_pubkey = self.get_instance_script_pubkey(&instance)?;
@@ -199,7 +201,7 @@ impl<'a> ContractManager<'a> {
             builder.clause_name,
             &inst.params_bytes,
             &builder.witness_args,
-            inst.state_bytes.as_deref(),
+            inst.expanded_state.as_deref(),
         )?;
         drop(inst);
 
@@ -284,9 +286,10 @@ impl<'a> ContractManager<'a> {
 
         let mut handles = Vec::new();
         for (idx, clause_output) in by_index {
-            let instance = Rc::new(RefCell::new(ContractInstance::new(
+            let instance = Rc::new(RefCell::new(ContractInstance::new_with_parts(
                 clause_output.next_contract.clone(),
                 clause_output.next_state.clone(),
+                clause_output.next_state_expanded.clone(),
             )));
             instance
                 .borrow_mut()
@@ -344,7 +347,7 @@ impl<'a> ContractManager<'a> {
                 builder.clause_name,
                 &inst.params_bytes,
                 &builder.witness_args,
-                inst.state_bytes.as_deref(),
+                inst.expanded_state.as_deref(),
             )?;
             nexts.push(next);
         }
@@ -753,10 +756,12 @@ impl<'a> ContractManager<'a> {
                 OutputIndex::Explicit(n) => n,
             };
 
-            // The child contract is self-describing, so its params come from it.
-            let instance = Rc::new(RefCell::new(ContractInstance::new(
+            // The child contract is self-describing, so its params come from it;
+            // it also carries the logical state for its own future spends.
+            let instance = Rc::new(RefCell::new(ContractInstance::new_with_parts(
                 clause_out.next_contract.clone(),
                 clause_out.next_state.clone(),
+                clause_out.next_state_expanded.clone(),
             )));
 
             let outpoint = OutPoint {

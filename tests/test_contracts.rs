@@ -348,6 +348,69 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
 }
 
 #[test]
+fn test_expanded_state_flows_to_next_outputs() {
+    use bitcoin::hashes::{sha256, Hash};
+
+    // A lossy state: the commitment is a hash, so `decode` cannot recover `secret`
+    // (it returns a -1 sentinel). A clause's next_outputs must therefore see the
+    // real secret via the instance's logical (expanded) state, not the fallback.
+    #[derive(Debug, Clone)]
+    struct CounterState {
+        secret: i64,
+    }
+    impl ContractState for CounterState {
+        fn encode(&self) -> Vec<u8> {
+            sha256::Hash::hash(&script_utils::bn2vch(self.secret))
+                .to_byte_array()
+                .to_vec()
+        }
+        fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
+            Ok(CounterState { secret: -1 })
+        }
+    }
+
+    // Succeeds only when next_outputs observes secret == 42.
+    let clause: StandardClause<(), CounterState, SampleArgs> = StandardClause::new(
+        "check".to_string(),
+        ScriptBuf::from_hex("51").unwrap(),
+        SampleArgs::arg_specs(),
+        Some(Arc::new(
+            |_p: &(), _a: &SampleArgs, s: Option<&CounterState>| match s {
+                Some(st) if st.secret == 42 => Ok(NextOutputs::Contracts(vec![])),
+                other => Err(ClauseError::Other(format!("unexpected state: {:?}", other))),
+            },
+        )),
+    );
+    let erased: &dyn ErasedClause = &clause;
+
+    let witness = <SampleArgs as ClauseArgs>::encode_to_witness(&SampleArgs::new(
+        1,
+        vec![],
+        [0u8; 32],
+    ));
+
+    // The commitment is a 32-byte hash and decode cannot recover the secret.
+    let state = CounterState { secret: 42 };
+    assert_eq!(ContractState::encode(&state).len(), 32);
+    assert_eq!(
+        CounterState::decode(&ContractState::encode(&state))
+            .unwrap()
+            .secret,
+        -1
+    );
+
+    // With the expanded state, next_outputs sees the real secret (via downcast).
+    assert!(erased
+        .next_outputs_from_witness(&[], &witness, Some(&state))
+        .is_ok());
+
+    // Without it, next_outputs gets no state and rejects the spend.
+    assert!(erased
+        .next_outputs_from_witness(&[], &witness, None)
+        .is_err());
+}
+
+#[test]
 fn test_params_encoding() {
     let owner_pubkey = XOnlyPublicKey::from_str(
         "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",

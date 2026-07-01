@@ -341,7 +341,8 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 let handle = manager.fund_instance(
                     this.as_erased(),
                     ::core::option::Option::Some(
-                        ::mattrs::contracts::ContractState::encode(&state),
+                        ::std::boxed::Box::new(state)
+                            as ::std::boxed::Box<dyn ::mattrs::contracts::ErasedState>,
                     ),
                     amount,
                 )?;
