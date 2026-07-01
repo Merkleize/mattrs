@@ -135,6 +135,67 @@ use super::script_helpers::{check_output_contract, drop as script_drop};
 pub struct BisectParams {
     pub alice_pk: bitcoin::XOnlyPublicKey,
     pub bob_pk: bitcoin::XOnlyPublicKey,
+    /// The disputed step range [i, j] (inclusive), `n = j - i + 1` a power of two.
+    pub i: i64,
+    pub j: i64,
+}
+
+impl BisectParams {
+    /// Half the range size, `m = n/2`. The children cover [i, i+m-1] and [i+m, j].
+    fn m(&self) -> i64 {
+        (self.j - self.i + 1) / 2
+    }
+
+    /// Whether the two children are single steps (Leaves) rather than sub-Bisects.
+    fn children_are_leaves(&self) -> bool {
+        self.m() == 1
+    }
+
+    fn leaf(&self) -> Leaf {
+        Leaf::new(LeafParams {
+            alice_pk: self.alice_pk,
+            bob_pk: self.bob_pk,
+        })
+    }
+
+    fn leaf_root(&self) -> [u8; 32] {
+        self.leaf().contract.taptree.root_hash()
+    }
+
+    fn child(&self, i: i64, j: i64) -> BisectParams {
+        BisectParams {
+            alice_pk: self.alice_pk,
+            bob_pk: self.bob_pk,
+            i,
+            j,
+        }
+    }
+
+    /// The taptree root of the left child (a Leaf, or Bisect_1 on [i, i+m-1]).
+    fn left_child_root(&self) -> [u8; 32] {
+        if self.children_are_leaves() {
+            self.leaf_root()
+        } else {
+            let m = self.m();
+            Bisect1::new(self.child(self.i, self.i + m - 1))
+                .contract
+                .taptree
+                .root_hash()
+        }
+    }
+
+    /// The taptree root of the right child (a Leaf, or Bisect_1 on [i+m, j]).
+    fn right_child_root(&self) -> [u8; 32] {
+        if self.children_are_leaves() {
+            self.leaf_root()
+        } else {
+            let m = self.m();
+            Bisect1::new(self.child(self.i + m, self.j))
+                .contract
+                .taptree
+                .root_hash()
+        }
+    }
 }
 
 /// Bisect_1 state: {h_start, h_end_a, h_end_b, trace_a, trace_b} (commit = Merkle root).
@@ -199,16 +260,6 @@ impl ContractState for Bisect2State {
     }
 }
 
-fn leaf_root(p: &BisectParams) -> [u8; 32] {
-    Leaf::new(LeafParams {
-        alice_pk: p.alice_pk,
-        bob_pk: p.bob_pk,
-    })
-    .contract
-    .taptree
-    .root_hash()
-}
-
 contract! {
     contract Bisect2 {
         params BisectParams;
@@ -243,6 +294,21 @@ contract! {
 
 impl Bisect2 {
     fn bob_reveal_left_script(p: &BisectParams) -> ScriptBuf {
+        // The output construction differs when the child is a Leaf vs a sub-Bisect_1:
+        // it pushes its state fields (3 vs 5) then commits to the child's root.
+        let (picks, encoder, child_root) = if p.children_are_leaves() {
+            (
+                script! { 10 OP_PICK 6 OP_PICK 4 OP_PICK },
+                merkle_root(3),
+                p.leaf_root(),
+            )
+        } else {
+            (
+                script! { 10 OP_PICK 6 OP_PICK 4 OP_PICK 7 OP_PICK 5 OP_PICK },
+                merkle_root(5),
+                p.left_child_root(),
+            )
+        };
         script! {
             OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
             { dup(8) }
@@ -252,12 +318,11 @@ impl Bisect2 {
             // t_{i,j;b} = H(h_i || h_{j+1;b} || t_left_b || t_right_b)
             10 OP_PICK 9 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
             7 OP_PICK OP_EQUALVERIFY
-            // h_mid_a != h_mid_b
+            // h_mid_a != h_mid_b (Bob iterates on the LEFT child)
             5 OP_PICK 3 OP_PICK OP_EQUAL OP_NOT OP_VERIFY
-            // output: [h_i, h_mid_a, h_mid_b] -> left leaf
-            10 OP_PICK 6 OP_PICK 4 OP_PICK
-            { merkle_root(3) }
-            { check_output_contract(leaf_root(p), -1, None) }
+            { picks }
+            { encoder }
+            { check_output_contract(child_root, -1, None) }
             { script_drop(11) }
             { p.bob_pk }
             OP_CHECKSIG
@@ -265,6 +330,19 @@ impl Bisect2 {
     }
 
     fn bob_reveal_right_script(p: &BisectParams) -> ScriptBuf {
+        let (picks, encoder, child_root) = if p.children_are_leaves() {
+            (
+                script! { 5 OP_PICK 10 OP_PICK 10 OP_PICK },
+                merkle_root(3),
+                p.leaf_root(),
+            )
+        } else {
+            (
+                script! { 5 OP_PICK 10 OP_PICK 10 OP_PICK 6 OP_PICK 4 OP_PICK },
+                merkle_root(5),
+                p.right_child_root(),
+            )
+        };
         script! {
             OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
             { dup(8) }
@@ -273,12 +351,11 @@ impl Bisect2 {
             OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
             10 OP_PICK 9 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
             7 OP_PICK OP_EQUALVERIFY
-            // h_mid_a == h_mid_b
+            // h_mid_a == h_mid_b (Bob iterates on the RIGHT child)
             5 OP_PICK 3 OP_PICK OP_EQUALVERIFY
-            // output: [h_mid, h_{j+1;a}, h_{j+1;b}] -> right leaf
-            5 OP_PICK 10 OP_PICK 10 OP_PICK
-            { merkle_root(3) }
-            { check_output_contract(leaf_root(p), -1, None) }
+            { picks }
+            { encoder }
+            { check_output_contract(child_root, -1, None) }
             { script_drop(11) }
             { p.bob_pk }
             OP_CHECKSIG

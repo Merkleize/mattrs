@@ -37,18 +37,40 @@ fn test_leaf_taptree_matches_reference() {
 
 #[test]
 fn test_bisect_taptrees_match_reference() {
-    // Bisect_2(0,1) and Bisect_1(0,1) — the base range where both children are
-    // leaves; roots match the pymatt reference (hub/fraud.py).
+    // The recursion at every level: base range (children are leaves), size-4
+    // (children are sub-Bisect_1s), and the full 8-step game bisect. All roots
+    // match the pymatt reference (hub/fraud.py).
     let (alice_pk, bob_pk) = keys();
-    let params = BisectParams { alice_pk, bob_pk };
+    let bp = |i, j| BisectParams {
+        alice_pk,
+        bob_pk,
+        i,
+        j,
+    };
+    let root = |b: &[u8; 32]| hex::encode(b);
 
+    // base range: both children are Leaves
     assert_eq!(
-        hex::encode(Bisect2::new(params.clone()).contract.taptree.root_hash()),
+        root(&Bisect2::new(bp(0, 1)).contract.taptree.root_hash()),
         "051002010223fec1898647323c278a6f9aebdae955ba66b2c1989875204bbe60"
     );
     assert_eq!(
-        hex::encode(Bisect1::new(params).contract.taptree.root_hash()),
+        root(&Bisect1::new(bp(0, 1)).contract.taptree.root_hash()),
         "646593ebe11ebd3b03663c56b502d0cc910678aafabac268bb33381b7dedbc52"
+    );
+    // size 4: children are sub-Bisect_1s
+    assert_eq!(
+        root(&Bisect2::new(bp(0, 3)).contract.taptree.root_hash()),
+        "6eebc0a155c3b98c6b812f44e75242a39187c2e4a8f0f145ee4de83347e7b942"
+    );
+    assert_eq!(
+        root(&Bisect1::new(bp(0, 3)).contract.taptree.root_hash()),
+        "0b82edb494d12798f767348922edeed15ba45f13771bee50133d23561a1af263"
+    );
+    // the full 8-step game bisect nests the entire recursion
+    assert_eq!(
+        root(&Bisect1::new(bp(0, 7)).contract.taptree.root_hash()),
+        "3f9b156e3ccf21e59c79c6de2b4cb8f018a1f11e9a6c133af4906e7e6b9cfc2f"
     );
 }
 
