@@ -172,12 +172,8 @@ fn test_trigger_without_signer_errors() {
     // A trigger clause needs the unvault key. Spending without registering a signer
     // must fail loudly (MissingSigner) rather than broadcast an unsigned witness.
     // This builds the tx locally and does no RPC.
-    use std::{cell::RefCell, rc::Rc};
-
-    use bitcoin::{hashes::Hash, OutPoint, Transaction, TxOut, Txid};
-    use bitcoincore_rpc::{Auth, Client};
-    use mattrs::contracts::ContractInstance;
-    use mattrs::manager::{InstanceHandle, ManagerError};
+    use mattrs::manager::ManagerError;
+    use support::testkit::{fund_fake, offline_client};
     use support::vault::VaultHandle;
 
     let params = VaultParams {
@@ -187,32 +183,11 @@ fn test_trigger_without_signer_errors() {
         unvault_pk: XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap(),
     };
     let vault = Vault::new(params);
-    let contract = vault.as_erased();
-    let script_pubkey = contract.script_pubkey(None).unwrap();
 
     // Fake a funded instance so the tx can be built (and a prevout exists).
-    let instance = Rc::new(RefCell::new(ContractInstance::new(contract, None)));
-    let funding_tx = Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![TxOut {
-            script_pubkey,
-            value: Amount::from_sat(100_000),
-        }],
-    };
-    instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: Txid::all_zeros(),
-            vout: 0,
-        },
-        funding_tx,
-    );
+    let handle = VaultHandle(fund_fake(vault.as_erased(), None, 100_000, 0));
 
-    let handle = VaultHandle(InstanceHandle::new(instance));
-
-    // Offline client: build_tx performs no RPC.
-    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
+    let client = offline_client();
     let manager = ContractManager::new(&client);
 
     let err = handle
@@ -233,14 +208,8 @@ fn test_batch_merges_and_deducts_outputs() {
     // the other two trigger normally. All three unvaulting outputs share index 0 and
     // merge into a single output; the revault is a separate deducted output at
     // index 1. Mirrors pymatt's trigger_with_revault batch. Builds locally, no RPC.
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    use bitcoin::{hashes::Hash, OutPoint, Transaction, TxOut, Txid};
-    use bitcoincore_rpc::{Auth, Client};
-    use mattrs::contracts::ContractInstance;
-    use mattrs::manager::InstanceHandle;
     use mattrs::signer::HotSigner;
+    use support::testkit::{fund_fake, offline_client};
     use support::vault::VaultHandle;
 
     let secp = Secp256k1::new();
@@ -258,35 +227,14 @@ fn test_batch_merges_and_deducts_outputs() {
         unvault_pk: unvault_pubkey,
     };
     let vault = Vault::new(params);
-    let script_pubkey = vault.as_erased().script_pubkey(None).unwrap();
 
     // Fund three vault instances of 100_000 sat each (same address, distinct txids).
-    let funded = |seed: u8| -> Rc<RefCell<ContractInstance>> {
-        let instance = Rc::new(RefCell::new(ContractInstance::new(vault.as_erased(), None)));
-        let funding_tx = Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-            input: vec![],
-            output: vec![TxOut {
-                script_pubkey: script_pubkey.clone(),
-                value: Amount::from_sat(100_000),
-            }],
-        };
-        instance.borrow_mut().mark_funded(
-            OutPoint {
-                txid: Txid::from_byte_array([seed; 32]),
-                vout: 0,
-            },
-            funding_tx,
-        );
-        instance
-    };
+    let funded = |seed: u8| VaultHandle(fund_fake(vault.as_erased(), None, 100_000, seed));
+    let h1 = funded(1);
+    let h2 = funded(2);
+    let h3 = funded(3);
 
-    let h1 = VaultHandle(InstanceHandle::new(funded(1)));
-    let h2 = VaultHandle(InstanceHandle::new(funded(2)));
-    let h3 = VaultHandle(InstanceHandle::new(funded(3)));
-
-    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
+    let client = offline_client();
     let manager = ContractManager::new(&client);
 
     let ctv_hash = [7u8; 32];

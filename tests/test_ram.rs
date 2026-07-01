@@ -108,13 +108,9 @@ fn test_ram_write_commits_updated_root() {
     // Spend the `write` clause: it decodes the Merkle proof from the witness
     // (MerkleProofType), reads the cells from the instance's expanded state, updates
     // cell 2, and commits the new Merkle root to the output. Builds locally, no RPC.
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    use bitcoin::{hashes::Hash, Amount, OutPoint, Transaction, TxOut, Txid};
-    use bitcoincore_rpc::{Auth, Client};
-    use mattrs::contracts::ContractInstance;
-    use mattrs::manager::{ContractManager, InstanceHandle};
+    use bitcoin::Amount;
+    use mattrs::manager::ContractManager;
+    use support::testkit::{fund_fake, offline_client};
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
     let ram = Ram::new(RamParams { size: 4 });
@@ -122,33 +118,16 @@ fn test_ram_write_commits_updated_root() {
     // The instance commits the initial leaves' Merkle root, and carries the leaves
     // themselves as expanded state.
     let committed = MerkleTree::new(leaves.clone()).root();
-    let script_pubkey = ram.as_erased().script_pubkey(Some(committed.as_slice())).unwrap();
-
-    let instance = Rc::new(RefCell::new(ContractInstance::new_with_expanded(
+    let handle = RamHandle(fund_fake(
         ram.as_erased(),
         Some(Box::new(RamState {
             leaves: leaves.clone(),
         })),
-    )));
-    let funding_tx = Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![TxOut {
-            script_pubkey,
-            value: Amount::from_sat(100_000),
-        }],
-    };
-    instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: Txid::all_zeros(),
-            vout: 0,
-        },
-        funding_tx,
-    );
-    let handle = RamHandle(InstanceHandle::new(instance));
+        100_000,
+        0,
+    ));
 
-    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
+    let client = offline_client();
     let manager = ContractManager::new(&client);
 
     // Prove cell 2 and write a new value into it.

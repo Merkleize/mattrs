@@ -74,18 +74,13 @@ fn test_move_commitment_values() {
 // Spend flow (build-level, no node): bob_move -> RpsGameS1 -> CTV payout.
 // ----------------------------------------------------------------------------
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 use bitcoin::bip32::Xpriv;
-use bitcoin::hashes::Hash;
 use bitcoin::key::Secp256k1;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxOut, Txid};
-use bitcoincore_rpc::{Auth, Client};
-use mattrs::contracts::ContractInstance;
-use mattrs::manager::{ContractManager, InstanceHandle};
+use bitcoin::{Amount, ScriptBuf, Sequence, TxOut};
+use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use support::rps::{RpsGameS0Handle, RpsGameS1Handle, RpsGameS1State};
+use support::testkit::{fund_fake, offline_client};
 
 fn bob_xpriv() -> Xpriv {
     // The private key whose x-only pubkey is the reference bob_pk (5f6929..).
@@ -95,35 +90,18 @@ fn bob_xpriv() -> Xpriv {
     .unwrap()
 }
 
-fn funding_tx(script_pubkey: ScriptBuf, value: u64) -> Transaction {
-    Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![TxOut {
-            script_pubkey,
-            value: Amount::from_sat(value),
-        }],
-    }
-}
-
 #[test]
 fn test_rps_bob_move_commits_s1_state() {
     let params = reference_params();
 
-    // Fund an RpsGameS0 instance with the game stake.
-    let s0 = RpsGameS0::new(params.clone());
-    let instance = Rc::new(RefCell::new(ContractInstance::new(s0.as_erased(), None)));
-    instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: Txid::all_zeros(),
-            vout: 0,
-        },
-        funding_tx(s0.as_erased().script_pubkey(None).unwrap(), 2000),
-    );
-    let handle = RpsGameS0Handle(InstanceHandle::new(instance));
+    let handle = RpsGameS0Handle(fund_fake(
+        RpsGameS0::new(params.clone()).as_erased(),
+        None,
+        2000,
+        0,
+    ));
 
-    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
+    let client = offline_client();
     let manager = ContractManager::new(&client);
 
     // Bob plays paper (m_b = 1), signing with his key.
@@ -147,29 +125,16 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
     let params = reference_params();
     let bob_pk = params.bob_pk;
 
-    // Fund an RpsGameS1 instance committed to some m_b (Bob's move).
-    let s1 = RpsGameS1::new(params.clone());
-    let instance = Rc::new(RefCell::new(ContractInstance::new_with_expanded(
-        s1.as_erased(),
+    let handle = RpsGameS1Handle(fund_fake(
+        RpsGameS1::new(params).as_erased(),
         Some(Box::new(RpsGameS1State {
             commitment: move_commitment(1),
         })),
-    )));
-    instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: Txid::all_zeros(),
-            vout: 0,
-        },
-        funding_tx(
-            s1.as_erased()
-                .script_pubkey(Some(move_commitment(1).as_slice()))
-                .unwrap(),
-            2000,
-        ),
-    );
-    let handle = RpsGameS1Handle(InstanceHandle::new(instance));
+        2000,
+        0,
+    ));
 
-    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
+    let client = offline_client();
     let manager = ContractManager::new(&client);
 
     // The bob_wins clause pays out the whole pot to Bob via a CTV template.

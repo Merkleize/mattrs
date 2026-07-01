@@ -6,4 +6,5 @@ pub mod merkle;
 pub mod ram;
 pub mod rps;
 pub mod script_helpers;
+pub mod testkit;
 pub mod vault;
