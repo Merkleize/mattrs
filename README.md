@@ -82,6 +82,33 @@ with `MissingSigner`.
 
 A complete worked example (a two-stage vault) lives in `tests/support/vault.rs`.
 
+## Ported examples
+
+The examples from the Python reference framework (`pymatt`) are ported under
+`tests/support/`, each with tests asserting **byte-for-byte** taproot compatibility
+(the taptree root / address matches pymatt's) and, where applicable, the spend:
+
+| Example | Demonstrates | Status |
+| --- | --- | --- |
+| **vault** (`vault.rs`) | two-stage vault; CCV + CTV; augmented state; multi-input trigger-with-revault | address matches; spendable (regtest e2e) |
+| **rps** (`rps.rs`) | hashed state; clause-owned **CTV templates** for payouts; `check_in/out_contract` | roots match; spends build |
+| **ram** (`ram.rs`) | a Merkle-committed cell vector; the `MerkleProofType` witness arg; **expanded state** | root matches; `write` spends |
+| **game256** (`game256.rs`) | a recursive **bisection fraud proof** (`Leaf` → `Bisect_1`/`Bisect_2` → `G256S0/1/2`) | all taptrees match |
+
+Supporting infrastructure ported alongside them: a data `MerkleTree` and
+`MerkleProof`, and the `merkle_root(n)` / `dup(n)` / `drop(n)` /
+`check_input_contract` / `check_output_contract` / `older` script fragments
+(`tests/support/merkle.rs`, `tests/support/script_helpers.rs`).
+
+## Spend-API features
+
+- **CTV templates as clause outputs** — a clause's `next` may return a
+  `CtvTemplate`, which fixes the transaction outputs and `nSequence` (see rps).
+- **Multi-input batch spends** — `ContractManager::spend_batch(..)` merges several
+  instances' outputs by index (pymatt's `get_spend_tx` semantics).
+- **Expanded state** — an instance can carry logical state richer than its on-chain
+  commitment (e.g. RAM's cells vs their Merkle root), recovered by `next_outputs`.
+
 ## Testing
 
 ```sh
