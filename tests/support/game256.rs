@@ -4,24 +4,29 @@
 //! disagrees they bisect the computation trace down to a single disputed step,
 //! which the `Leaf` contract adjudicates by re-running that one step on-chain.
 //!
-//! This module currently ports the base case — the `Leaf` contract — plus the
-//! reusable `merkle_root`/`dup` script fragments it needs. The recursive `Bisect_1`
-//! / `Bisect_2` contracts and the `G256_S*` game stages are follow-ups.
+//! This ports the byte-exact taptrees of the whole example: the `Leaf` base case,
+//! the recursive `Bisect_1`/`Bisect_2` (over any [i, j] range), and the `G256S0`/
+//! `S1`/`S2` game stages — all verified against the pymatt references. The clauses
+//! are terminal with signer-carrying args; the `next_outputs` that drive the game
+//! and full spendability are follow-ups.
 //!
 //! The step function is game256's `Compute2x`: `y = 2*x`, values committed as
 //! `sha256(x)` (encoder `OP_SHA256`, func `OP_DUP OP_ADD`).
 #![allow(dead_code)]
 
 use bitcoin::ScriptBuf;
+use bitcoin::hashes::{sha256, Hash};
+use bitcoin::XOnlyPublicKey;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{
     ClauseArgs, ContractParams, ContractState, WitnessEncodable, WitnessError,
 };
+use mattrs::script_utils::bn2vch;
 use mattrs::{contract, nums_key, Signature};
 use mattrs_derive::ContractParams;
 
 use super::merkle::MerkleTree;
-use super::script_helpers::{check_input_contract, dup, merkle_root};
+use super::script_helpers::{check_input_contract, dup, merkle_root, older};
 
 define_pushable!();
 
@@ -422,6 +427,214 @@ impl Bisect1 {
     fn forfait_script(p: &BisectParams) -> ScriptBuf {
         script! {
             { super::script_helpers::older(10) }
+            { p.bob_pk }
+            OP_CHECKSIG
+        }
+    }
+}
+
+// ============================================================================
+// G256 game stages (top-level), for the computation y = f^n(x) with f = 2x.
+//
+// G256S0: Bob picks the input x, committing to G256S1.
+// G256S1: Alice reveals y = f^n(x), committing to G256S2.
+// G256S2: Alice can withdraw after a timeout, or Bob starts a challenge, which
+//         hands off to Bisect_1(0, 7) — the 8-step fraud proof ported above.
+//
+// As with the Bisect contracts this ports the byte-exact taptrees; clauses are
+// terminal with signer-carrying args, and next_outputs / spendability are
+// follow-ups.
+// ============================================================================
+
+#[derive(Debug, Clone, ContractParams)]
+pub struct G256Params {
+    pub alice_pk: XOnlyPublicKey,
+    pub bob_pk: XOnlyPublicKey,
+}
+
+impl G256Params {
+    fn bisect(&self) -> BisectParams {
+        BisectParams {
+            alice_pk: self.alice_pk,
+            bob_pk: self.bob_pk,
+            i: 0,
+            j: 7,
+        }
+    }
+}
+
+/// G256S1 state: the input x, committed as sha256(x).
+#[derive(Debug, Clone)]
+pub struct G256S1State {
+    pub x: i64,
+}
+impl ContractState for G256S1State {
+    fn encode(&self) -> Vec<u8> {
+        sha256::Hash::hash(&bn2vch(self.x)).to_byte_array().to_vec()
+    }
+    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
+        Err(WitnessError::InvalidData("G256S1 state is a commitment".to_string()))
+    }
+}
+
+/// G256S2 state: {t_a, y, x}, committed as merkle_root([t_a, sha256(y), sha256(x)]).
+#[derive(Debug, Clone)]
+pub struct G256S2State {
+    pub t_a: [u8; 32],
+    pub y: i64,
+    pub x: i64,
+}
+impl ContractState for G256S2State {
+    fn encode(&self) -> Vec<u8> {
+        MerkleTree::new(vec![
+            self.t_a,
+            sha256::Hash::hash(&bn2vch(self.y)).to_byte_array(),
+            sha256::Hash::hash(&bn2vch(self.x)).to_byte_array(),
+        ])
+        .root()
+        .to_vec()
+    }
+    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
+        Err(WitnessError::InvalidData("G256S2 state is a commitment".to_string()))
+    }
+}
+
+/// The on-chain encoder for G256S2 state: given <t_a> <y> <x>, compute its
+/// commitment merkle_root([t_a, sha256(y), sha256(x)]).
+fn g256_s2_state_encoder() -> ScriptBuf {
+    script! {
+        OP_TOALTSTACK OP_SHA256 OP_FROMALTSTACK OP_SHA256
+        { merkle_root(3) }
+    }
+}
+
+contract! {
+    contract G256S0 {
+        params G256Params;
+        internal_key |_p| nums_key();
+
+        // <bob_sig> <x>
+        clause choose {
+            args {
+                #[signer(|p| p.bob_pk.serialize())]
+                bob_sig: Signature,
+                x: i64,
+            }
+            script G256S0::choose_script;
+        }
+
+        tree [choose];
+    }
+}
+
+impl G256S0 {
+    fn choose_script(p: &G256Params) -> ScriptBuf {
+        let s1_root = G256S1::new(p.clone()).contract.taptree.root_hash();
+        script! {
+            OP_SHA256
+            { check_output_contract(s1_root, -1, None) }
+            { p.bob_pk }
+            OP_CHECKSIG
+        }
+    }
+}
+
+contract! {
+    contract G256S1 {
+        params G256Params;
+        state G256S1State;
+        internal_key |_p| nums_key();
+
+        // <alice_sig> <t_a> <y> <sha256(x)>
+        clause reveal {
+            args {
+                #[signer(|p| p.alice_pk.serialize())]
+                alice_sig: Signature,
+                t_a: [u8; 32],
+                y: i64,
+                x: i64,
+            }
+            script G256S1::reveal_script;
+        }
+
+        tree [reveal];
+    }
+}
+
+impl G256S1 {
+    fn reveal_script(p: &G256Params) -> ScriptBuf {
+        let s2_root = G256S2::new(p.clone()).contract.taptree.root_hash();
+        script! {
+            OP_DUP
+            OP_SHA256
+            { check_input_contract(-1, None) }
+            { g256_s2_state_encoder() }
+            { check_output_contract(s2_root, -1, None) }
+            { p.alice_pk }
+            OP_CHECKSIG
+        }
+    }
+}
+
+contract! {
+    contract G256S2 {
+        params G256Params;
+        state G256S2State;
+        internal_key |_p| nums_key();
+
+        clause withdraw {
+            args {
+                #[signer(|p| p.alice_pk.serialize())]
+                alice_sig: Signature,
+            }
+            script G256S2::withdraw_script;
+        }
+
+        // <bob_sig> <t_a> <y> <x> <z> <t_b>
+        clause start_challenge {
+            args {
+                #[signer(|p| p.bob_pk.serialize())]
+                bob_sig: Signature,
+                t_a: [u8; 32],
+                y: i64,
+                x: i64,
+                z: i64,
+                t_b: [u8; 32],
+            }
+            script G256S2::start_challenge_script;
+        }
+
+        tree [withdraw, start_challenge];
+    }
+}
+
+impl G256S2 {
+    fn withdraw_script(p: &G256Params) -> ScriptBuf {
+        script! {
+            { older(10) }
+            { p.alice_pk }
+            OP_CHECKSIG
+        }
+    }
+
+    fn start_challenge_script(p: &G256Params) -> ScriptBuf {
+        let bisect_root = Bisect1::new(p.bisect()).contract.taptree.root_hash();
+        script! {
+            OP_TOALTSTACK
+            // y != z
+            OP_DUP 3 OP_PICK OP_EQUAL OP_NOT OP_VERIFY
+            OP_TOALTSTACK
+            { dup(3) }
+            { g256_s2_state_encoder() }
+            { check_input_contract(-1, None) }
+            OP_SHA256 OP_SWAP OP_SHA256
+            OP_ROT
+            OP_FROMALTSTACK OP_SHA256
+            OP_SWAP
+            OP_FROMALTSTACK
+            // commit [sha256(x), sha256(y), sha256(z), t_a, t_b] as Bisect_1 state
+            { merkle_root(5) }
+            { check_output_contract(bisect_root, -1, None) }
             { p.bob_pk }
             OP_CHECKSIG
         }

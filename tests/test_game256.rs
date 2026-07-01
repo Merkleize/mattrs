@@ -9,7 +9,9 @@ use std::str::FromStr;
 
 use bitcoin::XOnlyPublicKey;
 
-use support::game256::{Bisect1, Bisect2, BisectParams, Leaf, LeafParams};
+use support::game256::{
+    Bisect1, Bisect2, BisectParams, G256Params, G256S0, G256S1, G256S2, Leaf, LeafParams,
+};
 use support::script_helpers::{dup, merkle_root};
 
 fn keys() -> (XOnlyPublicKey, XOnlyPublicKey) {
@@ -71,6 +73,28 @@ fn test_bisect_taptrees_match_reference() {
     assert_eq!(
         root(&Bisect1::new(bp(0, 7)).contract.taptree.root_hash()),
         "3f9b156e3ccf21e59c79c6de2b4cb8f018a1f11e9a6c133af4906e7e6b9cfc2f"
+    );
+}
+
+#[test]
+fn test_g256_stage_taptrees_match_reference() {
+    // The top-level game stages: G256S0 (Bob picks x) -> G256S1 (Alice reveals y)
+    // -> G256S2 (withdraw, or start_challenge which hands off to Bisect_1(0,7)).
+    // Roots match the pymatt reference (examples/game256).
+    let (alice_pk, bob_pk) = keys();
+    let p = G256Params { alice_pk, bob_pk };
+
+    assert_eq!(
+        hex::encode(G256S0::new(p.clone()).contract.taptree.root_hash()),
+        "ddba91cb57ac4e1b4c79c8dc48c5b62e39ecd4687b6256ec1eb5f77fad6f3429"
+    );
+    assert_eq!(
+        hex::encode(G256S1::new(p.clone()).contract.taptree.root_hash()),
+        "3186a6c6434dd328e3664f72b93186981087d94b13359dfd8ecc5384d8a3cc84"
+    );
+    assert_eq!(
+        hex::encode(G256S2::new(p).contract.taptree.root_hash()),
+        "d04adc2924609a0c189c095d320829e22b9879017f81bd84f245a23d3e9c18be"
     );
 }
 
