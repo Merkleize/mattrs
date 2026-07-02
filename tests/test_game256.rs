@@ -174,8 +174,7 @@ fn test_game256_state_transitions() {
         .build_tx(&manager)
         .unwrap();
     let commit = |v: i64| {
-        use bitcoin::hashes::Hash;
-        bitcoin::hashes::sha256::Hash::hash(&mattrs::script_utils::bn2vch(v)).to_byte_array()
+        mattrs::script_utils::commit_int(v)
     };
     assert_eq!(
         tx.output[0].script_pubkey,

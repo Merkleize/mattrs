@@ -16,17 +16,15 @@
 #![allow(dead_code)]
 
 use bitcoin::ScriptBuf;
-use bitcoin::hashes::{sha256, Hash};
 use bitcoin::XOnlyPublicKey;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{
     ClauseArgs, ClauseOutput, ContractParams, ContractState, WitnessEncodable, WitnessError,
 };
-use mattrs::script_utils::bn2vch;
 use mattrs::{contract, Signature};
 use mattrs_derive::{ContractParams, ContractState};
 
-use mattrs::script_helpers::{check_input_contract, dup, merkle_root, older};
+use mattrs::script_helpers::{check_input_contract, dup, merkle_root, timeout_sig_script};
 
 define_pushable!();
 
@@ -393,11 +391,7 @@ impl Bisect2 {
     }
 
     fn forfait_script(p: &BisectParams) -> ScriptBuf {
-        script! {
-            { mattrs::script_helpers::older(10) }
-            { p.alice_pk }
-            OP_CHECKSIG
-        }
+        timeout_sig_script(10, p.alice_pk)
     }
 }
 
@@ -477,11 +471,7 @@ impl Bisect1 {
     }
 
     fn forfait_script(p: &BisectParams) -> ScriptBuf {
-        script! {
-            { mattrs::script_helpers::older(10) }
-            { p.bob_pk }
-            OP_CHECKSIG
-        }
+        timeout_sig_script(10, p.bob_pk)
     }
 }
 
@@ -653,7 +643,7 @@ contract! {
             }
             script G256S2::start_challenge_script;
             next(p, a) {
-                let commit = |v: i64| sha256::Hash::hash(&bn2vch(v)).to_byte_array();
+                let commit = mattrs::script_utils::commit_int;
                 Ok(vec![ClauseOutput::at_same_index()
                     .to(Bisect1::new(p.bisect()).as_erased())
                     .with_state(&Bisect1State {
@@ -674,11 +664,7 @@ contract! {
 
 impl G256S2 {
     fn withdraw_script(p: &G256Params) -> ScriptBuf {
-        script! {
-            { older(10) }
-            { p.alice_pk }
-            OP_CHECKSIG
-        }
+        timeout_sig_script(10, p.alice_pk)
     }
 
     fn start_challenge_script(p: &G256Params) -> ScriptBuf {

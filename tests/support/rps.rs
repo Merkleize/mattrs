@@ -10,7 +10,6 @@
 #![allow(dead_code)]
 
 use bitcoin::{
-    hashes::{sha256, Hash},
     key::Secp256k1,
     Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey,
 };
@@ -19,7 +18,7 @@ use mattrs::contracts::{
     ClauseArgs, ClauseOutput, ContractParams, ContractState, CtvTemplate, WitnessEncodable,
     WitnessError,
 };
-use mattrs::{contract, script_utils::bn2vch, Signature};
+use mattrs::{contract, script_utils::commit_int, Signature};
 use mattrs_derive::{ContractParams, ContractState};
 
 use mattrs::script_helpers::{check_input_contract, check_output_contract};
@@ -46,7 +45,7 @@ pub struct RpsGameS1State {
 
 /// `sha256(bn(move))`, the way both players commit to a move on-chain.
 pub fn move_commitment(mv: i64) -> [u8; 32] {
-    sha256::Hash::hash(&bn2vch(mv)).to_byte_array()
+    commit_int(mv)
 }
 
 fn p2tr_spk(pubkey: XOnlyPublicKey) -> ScriptBuf {

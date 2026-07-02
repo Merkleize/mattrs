@@ -158,6 +158,13 @@ pub fn vch2bn(vch: &[u8]) -> Result<i64, WitnessError> {
     }
 }
 
+/// `sha256(bn2vch(value))`: the standard on-chain commitment to an integer
+/// (what `OP_SHA256` computes over a script-number witness element).
+pub fn commit_int(value: i64) -> [u8; 32] {
+    use bitcoin::hashes::Hash;
+    bitcoin::hashes::sha256::Hash::hash(&bn2vch(value)).to_byte_array()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

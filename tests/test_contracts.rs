@@ -344,7 +344,6 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
 
 #[test]
 fn test_expanded_state_flows_to_next_outputs() {
-    use bitcoin::hashes::{sha256, Hash};
 
     // A lossy state: the commitment is a hash, so `decode` cannot recover `secret`
     // (it returns a -1 sentinel). A clause's next_outputs must therefore see the
@@ -355,9 +354,7 @@ fn test_expanded_state_flows_to_next_outputs() {
     }
     impl ContractState for CounterState {
         fn encode(&self) -> Vec<u8> {
-            sha256::Hash::hash(&script_utils::bn2vch(self.secret))
-                .to_byte_array()
-                .to_vec()
+            script_utils::commit_int(self.secret).to_vec()
         }
         fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
             Ok(CounterState { secret: -1 })

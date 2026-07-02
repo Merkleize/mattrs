@@ -22,7 +22,7 @@ use mattrs::contract;
 use mattrs_derive::{ContractParams, ContractState};
 
 use mattrs::merkle::{floor_lg, WitProof};
-use mattrs::script_helpers::check_input_contract;
+use mattrs::script_helpers::{check_input_contract, concat};
 
 define_pushable!();
 
@@ -83,15 +83,6 @@ contract! {
 
         tree [withdraw, write];
     }
-}
-
-/// Concatenate script fragments (byte-for-byte, like embedding each with `{ .. }`).
-fn concat(parts: &[ScriptBuf]) -> ScriptBuf {
-    let mut bytes = Vec::new();
-    for part in parts {
-        bytes.extend_from_slice(part.as_bytes());
-    }
-    ScriptBuf::from_bytes(bytes)
 }
 
 impl Ram {

@@ -47,8 +47,19 @@ pub fn older(n: u32) -> ScriptBuf {
     }
 }
 
-/// Concatenate script fragments (byte-for-byte).
-fn concat(parts: Vec<ScriptBuf>) -> ScriptBuf {
+/// `older(delay) <pk> OP_CHECKSIG`: spendable by `pk` after a relative timelock.
+/// The building block of timeout/forfait clauses.
+pub fn timeout_sig_script(delay: u32, pk: XOnlyPublicKey) -> ScriptBuf {
+    script! {
+        { older(delay) }
+        { pk }
+        OP_CHECKSIG
+    }
+}
+
+/// Concatenate script fragments (byte-for-byte, like embedding each fragment
+/// with `{ .. }` in a `script!` block).
+pub fn concat(parts: &[ScriptBuf]) -> ScriptBuf {
     let mut bytes = Vec::new();
     for part in parts {
         bytes.extend_from_slice(part.as_bytes());
@@ -64,13 +75,13 @@ fn reduce_merkle_layer(n: usize) -> ScriptBuf {
     } else if n == 2 {
         script! { OP_CAT OP_SHA256 }
     } else if n % 2 == 1 {
-        concat(vec![
+        concat(&[
             script! { OP_TOALTSTACK },
             reduce_merkle_layer(n - 1),
             script! { OP_FROMALTSTACK },
         ])
     } else {
-        concat(vec![
+        concat(&[
             script! { OP_CAT OP_SHA256 OP_TOALTSTACK },
             reduce_merkle_layer(n - 2),
             script! { OP_FROMALTSTACK },
@@ -88,7 +99,7 @@ pub fn merkle_root(n_leaves: usize) -> ScriptBuf {
         parts.push(reduce_merkle_layer(n));
         n = n.div_ceil(2);
     }
-    concat(parts)
+    concat(&parts)
 }
 
 /// Script that drops the top `n` stack elements. Mirrors pymatt's
@@ -101,7 +112,7 @@ pub fn drop(n: usize) -> ScriptBuf {
     if n % 2 == 1 {
         parts.push(script! { OP_DROP });
     }
-    concat(parts)
+    concat(&parts)
 }
 
 /// Script that duplicates the top `n` stack elements. Mirrors pymatt's
@@ -118,7 +129,7 @@ pub fn dup(n: usize) -> ScriptBuf {
             for _ in 0..n {
                 parts.push(script! { { (n as i64) - 1 } OP_PICK });
             }
-            concat(parts)
+            concat(&parts)
         }
     }
 }
