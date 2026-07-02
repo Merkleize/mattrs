@@ -38,6 +38,17 @@ pub enum ManagerError {
     ContractError(ContractError),
     InvalidInstance(String),
     OutputNotFound,
+    /// The instance being spent is not funded (or lacks its funding data).
+    NotFunded,
+    /// The named clause does not exist on the contract being spent.
+    ClauseNotFound(String),
+    /// A `DeductOutput` at this index needs an amount, supplied via
+    /// [`SpendBuilder::output_amount`].
+    MissingDeductAmount { index: u32 },
+    /// The merged clause outputs skip a transaction output index.
+    NonContiguousOutputs { missing_index: u32 },
+    /// Deducted output amounts exceed the input amount.
+    DeductExceedsInput,
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
@@ -56,6 +67,21 @@ impl std::fmt::Display for ManagerError {
             ManagerError::ContractError(e) => write!(f, "Contract error: {}", e),
             ManagerError::InvalidInstance(msg) => write!(f, "Invalid instance: {}", msg),
             ManagerError::OutputNotFound => write!(f, "Output not found on blockchain"),
+            ManagerError::NotFunded => write!(f, "Instance is not funded"),
+            ManagerError::ClauseNotFound(name) => write!(f, "Clause '{}' not found", name),
+            ManagerError::MissingDeductAmount { index } => write!(
+                f,
+                "DeductOutput at index {} needs an amount (SpendBuilder::output_amount)",
+                index
+            ),
+            ManagerError::NonContiguousOutputs { missing_index } => write!(
+                f,
+                "Clause outputs are not contiguous (missing index {})",
+                missing_index
+            ),
+            ManagerError::DeductExceedsInput => {
+                write!(f, "Deducted output amounts exceed the input amount")
+            }
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
             }
@@ -179,25 +205,8 @@ impl<'a> ContractManager<'a> {
         &self,
         builder: &SpendBuilder,
     ) -> Result<(Transaction, NextOutputs), ManagerError> {
-        let inst = builder.instance.borrow();
-        if inst.status() != InstanceStatus::Funded {
-            return Err(ManagerError::InvalidInstance(
-                "Instance is not funded".to_string(),
-            ));
-        }
-        let outpoint = inst
-            .outpoint()
-            .ok_or_else(|| ManagerError::InvalidInstance("No outpoint".to_string()))?;
-
-        let next = inst.contract().execute_clause_from_witness(
-            builder.clause_name,
-            &builder.witness_args,
-            inst.state(),
-        )?;
-        drop(inst);
-
-        let tx = self.build_transaction(outpoint, builder, &next)?;
-        Ok((tx, next))
+        let (tx, mut nexts) = self.assemble(std::slice::from_ref(builder))?;
+        Ok((tx, nexts.pop().expect("one builder yields one next")))
     }
 
     /// Execute a spend: build, sign, broadcast, and materialize child instances.
@@ -234,7 +243,7 @@ impl<'a> ContractManager<'a> {
     /// instances at once, merging their clause outputs by index. Useful for
     /// inspection/tests; [`spend_batch`](Self::spend_batch) also broadcasts.
     pub fn build_batch_tx(&self, builders: &[SpendBuilder]) -> Result<Transaction, ManagerError> {
-        Ok(self.assemble_batch(builders)?.0)
+        Ok(self.assemble(builders)?.0)
     }
 
     /// Spend several instances in one transaction (build, sign, broadcast), and
@@ -249,7 +258,7 @@ impl<'a> ContractManager<'a> {
         &mut self,
         builders: Vec<SpendBuilder>,
     ) -> Result<Vec<InstanceHandle>, ManagerError> {
-        let (tx, nexts) = self.assemble_batch(&builders)?;
+        let (tx, nexts) = self.assemble(&builders)?;
 
         let txid = self.rpc.send_raw_transaction(&tx)?;
         for builder in &builders {
@@ -291,9 +300,10 @@ impl<'a> ContractManager<'a> {
         Ok(handles)
     }
 
-    /// Shared core of the batch spend: build the merged, signed transaction and
-    /// return it alongside each input's [`NextOutputs`] (for child creation).
-    fn assemble_batch(
+    /// Shared core of every spend (a single spend is a batch of one): build the
+    /// merged, signed transaction and return it alongside each input's
+    /// [`NextOutputs`] (for child creation).
+    fn assemble(
         &self,
         builders: &[SpendBuilder],
     ) -> Result<(Transaction, Vec<NextOutputs>), ManagerError> {
@@ -303,28 +313,18 @@ impl<'a> ContractManager<'a> {
             ));
         }
 
+        // Collect each input, its prevout, and its clause's next outputs.
         let mut prevouts = Vec::with_capacity(builders.len());
-        let mut input_amounts = Vec::with_capacity(builders.len());
         let mut tx_inputs = Vec::with_capacity(builders.len());
         let mut nexts = Vec::with_capacity(builders.len());
 
         for builder in builders {
             let inst = builder.instance.borrow();
             if inst.status() != InstanceStatus::Funded {
-                return Err(ManagerError::InvalidInstance(
-                    "Instance is not funded".to_string(),
-                ));
+                return Err(ManagerError::NotFunded);
             }
-            let outpoint = inst
-                .outpoint()
-                .ok_or_else(|| ManagerError::InvalidInstance("No outpoint".to_string()))?;
-            let prevout = inst
-                .funding_tx()
-                .map(|ftx| ftx.output[outpoint.vout as usize].clone())
-                .ok_or_else(|| {
-                    ManagerError::TransactionBuildError("No prevout available".to_string())
-                })?;
-            input_amounts.push(prevout.value);
+            let outpoint = inst.outpoint().ok_or(ManagerError::NotFunded)?;
+            let prevout = inst.prevout().ok_or(ManagerError::NotFunded)?;
             prevouts.push(prevout);
             tx_inputs.push(TxIn {
                 previous_output: outpoint,
@@ -340,6 +340,66 @@ impl<'a> ContractManager<'a> {
             nexts.push(next);
         }
 
+        let (outputs, template_sequence) = Self::derive_tx_outputs(builders, &nexts, &prevouts)?;
+
+        let mut tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+            input: tx_inputs,
+            output: outputs,
+        };
+        if let Some(sequence) = template_sequence {
+            // A CTV template commits to the input's nSequence, so it wins.
+            tx.input[0].sequence = sequence;
+        }
+
+        // Fill + finalize each input's witness (every sighash sees all prevouts).
+        for (input_index, builder) in builders.iter().enumerate() {
+            tx.input[input_index].witness =
+                self.input_witness(builder, &tx, input_index, &prevouts)?;
+        }
+
+        Ok((tx, nexts))
+    }
+
+    /// Derive the transaction outputs for a spend, and the `nSequence` a CTV
+    /// template fixes, if any.
+    ///
+    /// Caller-supplied explicit outputs win; otherwise a CTV template fixes the
+    /// whole transaction; otherwise the covenant outputs are merged by index
+    /// across all inputs (each `PreserveOutput` accumulates its input's amount
+    /// net of that input's earlier `DeductOutput`s). Explicit outputs and CTV
+    /// templates are single-input only.
+    fn derive_tx_outputs(
+        builders: &[SpendBuilder],
+        nexts: &[NextOutputs],
+        prevouts: &[TxOut],
+    ) -> Result<(Vec<TxOut>, Option<Sequence>), ManagerError> {
+        let single = builders.len() == 1;
+
+        if let Some(explicit) = builders.iter().find_map(|b| b.explicit_outputs.as_ref()) {
+            if !single {
+                return Err(ManagerError::TransactionBuildError(
+                    "explicit outputs are single-input only; not supported in a batch"
+                        .to_string(),
+                ));
+            }
+            return Ok((explicit.clone(), None));
+        }
+
+        if let Some(template) = nexts.iter().find_map(|next| match next {
+            NextOutputs::Template(template) => Some(template),
+            NextOutputs::Contracts(_) => None,
+        }) {
+            if !single {
+                return Err(ManagerError::TransactionBuildError(
+                    "CTV template clauses are single-input only; not supported in a batch"
+                        .to_string(),
+                ));
+            }
+            return Ok((template.outputs.clone(), Some(template.sequence)));
+        }
+
         // Pool the per-builder DeductOutput amounts.
         let mut output_amounts: BTreeMap<u32, Amount> = BTreeMap::new();
         for builder in builders {
@@ -352,16 +412,11 @@ impl<'a> ContractManager<'a> {
         let mut outputs_map: BTreeMap<u32, TxOut> = BTreeMap::new();
         for (input_index, next) in nexts.iter().enumerate() {
             let clause_outputs = match next {
-                NextOutputs::Template(_) => {
-                    return Err(ManagerError::TransactionBuildError(
-                        "CTV template clauses are single-input only; not supported in a batch"
-                            .to_string(),
-                    ));
-                }
                 NextOutputs::Contracts(clause_outputs) => clause_outputs,
+                NextOutputs::Template(_) => unreachable!("templates are handled above"),
             };
 
-            let mut remaining = input_amounts[input_index];
+            let mut remaining = prevouts[input_index].value;
             let mut preserve_used = false;
             for clause_output in clause_outputs {
                 let idx = match clause_output.index {
@@ -392,18 +447,13 @@ impl<'a> ContractManager<'a> {
                                 "DeductOutput must be declared before PreserveOutput".to_string(),
                             ));
                         }
-                        let amount = *output_amounts.get(&idx).ok_or_else(|| {
-                            ManagerError::TransactionBuildError(format!(
-                                "DeductOutput at index {} needs an amount (SpendBuilder::output_amount)",
-                                idx
-                            ))
-                        })?;
+                        let amount = *output_amounts
+                            .get(&idx)
+                            .ok_or(ManagerError::MissingDeductAmount { index: idx })?;
                         entry.value = amount;
-                        remaining = remaining.checked_sub(amount).ok_or_else(|| {
-                            ManagerError::TransactionBuildError(
-                                "Deducted output amounts exceed the input amount".to_string(),
-                            )
-                        })?;
+                        remaining = remaining
+                            .checked_sub(amount)
+                            .ok_or(ManagerError::DeductExceedsInput)?;
                     }
                     ClauseOutputAmountBehaviour::IgnoreOutput => {}
                 }
@@ -413,37 +463,12 @@ impl<'a> ContractManager<'a> {
         // Flatten into a contiguous 0..n output vector.
         let mut outputs = Vec::with_capacity(outputs_map.len());
         for i in 0..outputs_map.len() as u32 {
-            let out = outputs_map.remove(&i).ok_or_else(|| {
-                ManagerError::TransactionBuildError(format!(
-                    "Clause outputs are not contiguous (missing index {})",
-                    i
-                ))
-            })?;
+            let out = outputs_map
+                .remove(&i)
+                .ok_or(ManagerError::NonContiguousOutputs { missing_index: i })?;
             outputs.push(out);
         }
-
-        let mut tx = Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-            input: tx_inputs,
-            output: outputs,
-        };
-
-        // Fill + finalize each input's witness (every sighash sees all prevouts).
-        for (input_index, builder) in builders.iter().enumerate() {
-            let witness = self.input_witness(
-                &builder.instance,
-                builder.clause_name,
-                &builder.witness_args,
-                &builder.signers,
-                &tx,
-                input_index,
-                &prevouts,
-            )?;
-            tx.input[input_index].witness = witness;
-        }
-
-        Ok((tx, nexts))
+        Ok((outputs, None))
     }
 
     // Helper methods
@@ -472,94 +497,26 @@ impl<'a> ContractManager<'a> {
         ))
     }
 
-    /// Build the (single-input) spending transaction for `builder`, deriving
-    /// outputs from the clause outputs (or the caller's explicit outputs), filling
-    /// signature witness elements, and appending the tapscript + control block.
-    fn build_transaction(
-        &self,
-        outpoint: OutPoint,
-        builder: &SpendBuilder,
-        next: &NextOutputs,
-    ) -> Result<Transaction, ManagerError> {
-        // Explicit outputs (caller-supplied) win; otherwise a CTV template fixes the
-        // outputs and sequence, or the covenant outputs are derived from the input.
-        let (tx_outputs, template_sequence) = if let Some(outputs) = &builder.explicit_outputs {
-            (outputs.clone(), None)
-        } else {
-            match next {
-                NextOutputs::Template(template) => {
-                    (template.outputs.clone(), Some(template.sequence))
-                }
-                NextOutputs::Contracts(outputs) => (self.derive_outputs(builder, outputs)?, None),
-            }
-        };
-
-        // A CTV template commits to nSequence, so it takes precedence.
-        let seq = template_sequence
-            .or(builder.sequence)
-            .unwrap_or(Sequence::ZERO);
-        let tx_inputs = vec![TxIn {
-            previous_output: outpoint,
-            script_sig: bitcoin::ScriptBuf::new(),
-            sequence: seq,
-            witness: bitcoin::Witness::new(),
-        }];
-
-        let mut tx = Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-            input: tx_inputs,
-            output: tx_outputs,
-        };
-
-        // Compute this input's prevout, then fill its signatures and append the
-        // tapscript + control block.
-        let prevout = {
-            let inst = builder.instance.borrow();
-            inst.funding_tx()
-                .and_then(|ftx| {
-                    inst.outpoint()
-                        .map(|op| ftx.output[op.vout as usize].clone())
-                })
-                .ok_or_else(|| {
-                    ManagerError::TransactionBuildError("No prevout available".to_string())
-                })?
-        };
-
-        tx.input[0].witness = self.input_witness(
-            &builder.instance,
-            builder.clause_name,
-            &builder.witness_args,
-            &builder.signers,
-            &tx,
-            0,
-            &[prevout],
-        )?;
-
-        Ok(tx)
-    }
-
     /// Build the full script-path witness for one input: the clause arguments with
     /// signature elements filled (by matching each `SignerType` pubkey to a
     /// registered signer), followed by the leaf script and its control block.
-    #[allow(clippy::too_many_arguments)]
     fn input_witness(
         &self,
-        instance: &Rc<RefCell<ContractInstance>>,
-        clause_name: &str,
-        witness_args: &[Vec<u8>],
-        signers: &SignerMap,
+        builder: &SpendBuilder,
         tx: &Transaction,
         input_index: usize,
         prevouts: &[TxOut],
     ) -> Result<bitcoin::Witness, ManagerError> {
-        let inst = instance.borrow();
-        let clause = inst.contract().get_clause(clause_name).ok_or_else(|| {
-            ManagerError::TransactionBuildError(format!("Clause '{}' not found", clause_name))
-        })?;
+        let clause_name = builder.clause_name;
+        let signers = &builder.signers;
+        let inst = builder.instance.borrow();
+        let clause = inst
+            .contract()
+            .get_clause(clause_name)
+            .ok_or_else(|| ManagerError::ClauseNotFound(clause_name.to_string()))?;
         let leaf_script = clause.script().clone();
 
-        let mut witness_stack = witness_args.to_vec();
+        let mut witness_stack = builder.witness_args.to_vec();
 
         // Only compute a sighash / sign when the clause has signature args.
         let needs_signature = clause
@@ -630,83 +587,6 @@ impl<'a> ContractManager<'a> {
         Ok(bitcoin::Witness::from_slice(&witness_stack))
     }
 
-    /// Derive the transaction outputs from a clause's outputs, honoring each
-    /// output's index and amount behaviour. `PreserveOutput`s receive the input
-    /// amount minus any `DeductOutput` amounts (which must be supplied via
-    /// [`SpendBuilder::output_amount`]).
-    fn derive_outputs(
-        &self,
-        builder: &SpendBuilder,
-        clause_outputs: &[ClauseOutput],
-    ) -> Result<Vec<TxOut>, ManagerError> {
-        // The spending input index (single input => 0), used to resolve `Same`.
-        let input_index = 0u32;
-
-        let input_amount = {
-            let inst = builder.instance.borrow();
-            inst.funding_tx()
-                .and_then(|ftx| inst.outpoint().map(|op| ftx.output[op.vout as usize].value))
-                .unwrap_or(Amount::ZERO)
-        };
-
-        let index_of = |co: &ClauseOutput| -> u32 {
-            match co.index {
-                OutputIndex::Same => input_index,
-                OutputIndex::Explicit(n) => n,
-            }
-        };
-
-        // Sum the explicitly-deducted amounts; the preserved output gets the rest.
-        let mut total_deduct = Amount::ZERO;
-        for co in clause_outputs {
-            if co.next_amount == ClauseOutputAmountBehaviour::DeductOutput {
-                let idx = index_of(co);
-                let amt = builder.output_amounts.get(&idx).ok_or_else(|| {
-                    ManagerError::TransactionBuildError(format!(
-                        "DeductOutput at index {} needs an amount (SpendBuilder::output_amount)",
-                        idx
-                    ))
-                })?;
-                total_deduct += *amt;
-            }
-        }
-        let preserve_value = input_amount.checked_sub(total_deduct).ok_or_else(|| {
-            ManagerError::TransactionBuildError(
-                "Deducted output amounts exceed the input amount".to_string(),
-            )
-        })?;
-
-        let mut outputs_map: BTreeMap<u32, TxOut> = BTreeMap::new();
-        for co in clause_outputs {
-            let idx = index_of(co);
-            let script_pubkey = co
-                .next_contract
-                .script_pubkey(co.committed_state_bytes().as_deref())?;
-            let value = match co.next_amount {
-                ClauseOutputAmountBehaviour::PreserveOutput => preserve_value,
-                ClauseOutputAmountBehaviour::IgnoreOutput => Amount::ZERO,
-                ClauseOutputAmountBehaviour::DeductOutput => *builder
-                    .output_amounts
-                    .get(&idx)
-                    .expect("checked above"),
-            };
-            outputs_map.insert(idx, TxOut { script_pubkey, value });
-        }
-
-        // Flatten into a contiguous 0..n vector.
-        let mut outputs = Vec::with_capacity(outputs_map.len());
-        for i in 0..outputs_map.len() as u32 {
-            let out = outputs_map.remove(&i).ok_or_else(|| {
-                ManagerError::TransactionBuildError(format!(
-                    "Clause outputs are not contiguous (missing index {})",
-                    i
-                ))
-            })?;
-            outputs.push(out);
-        }
-        Ok(outputs)
-    }
-
     fn create_output_instances(
         &mut self,
         parent: &Rc<RefCell<ContractInstance>>,
@@ -727,15 +607,10 @@ impl<'a> ContractManager<'a> {
         // Create instances for each output
         for clause_out in outputs.iter() {
             let vout = match clause_out.index {
-                OutputIndex::Same => {
-                    let parent_ref = parent.borrow();
-                    parent_ref
-                        .outpoint()
-                        .ok_or_else(|| {
-                            ManagerError::InvalidInstance("No parent outpoint".to_string())
-                        })?
-                        .vout
-                }
+                // `Same` means "same as the spending input's index"; this path is
+                // only reached from single-input spends, whose input index is 0
+                // (matching how the transaction's outputs were derived).
+                OutputIndex::Same => 0,
                 OutputIndex::Explicit(n) => n,
             };
 
@@ -790,7 +665,7 @@ impl std::error::Error for WrongContractType {}
 /// a [`SpendBuilder`]; drop down to [`InstanceHandle::spend_clause`] for advanced use.
 #[derive(Clone)]
 pub struct InstanceHandle {
-    pub instance: Rc<RefCell<ContractInstance>>,
+    instance: Rc<RefCell<ContractInstance>>,
 }
 
 impl InstanceHandle {

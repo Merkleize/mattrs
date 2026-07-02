@@ -1610,6 +1610,16 @@ impl ContractInstance {
         self.outpoint
     }
 
+    /// The UTXO this instance controls (its funding output), once funded.
+    pub fn prevout(&self) -> Option<TxOut> {
+        let outpoint = self.outpoint?;
+        self.funding_tx
+            .as_ref()?
+            .output
+            .get(outpoint.vout as usize)
+            .cloned()
+    }
+
     /// The transaction that funded this instance (None until funded).
     pub fn funding_tx(&self) -> Option<&Transaction> {
         self.funding_tx.as_ref()
