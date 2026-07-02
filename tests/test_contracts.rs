@@ -1,5 +1,5 @@
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use mattrs::argtypes::{ArgValue, IntType};
+use mattrs::argtypes::IntType;
 use mattrs::contracts::*;
 use mattrs::script_utils;
 use mattrs_derive::{ClauseArgs as DeriveClauseArgs, ContractParams, ContractState as DeriveContractState};
@@ -183,8 +183,6 @@ struct SampleArgs {
 
 #[test]
 fn test_arg_specs_match_struct_and_witness_order() {
-    use std::collections::HashMap;
-
     let args = SampleArgs {
         amount: 7,
         blob: vec![1, 2, 3],
@@ -196,21 +194,18 @@ fn test_arg_specs_match_struct_and_witness_order() {
     let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(names, ["amount", "blob", "hash"]);
 
-    // The typed witness encoding must equal encoding a matching ArgValue map
-    // through the per-spec ArgType chain, element for element and in the same
-    // order. This is the invariant the manager relies on.
+    // Walking the specs' consume() must partition the typed witness encoding
+    // exactly — spec by spec, in field order, covering every element. This is
+    // the invariant the manager relies on to locate signature slots.
     let typed = <SampleArgs as ClauseArgs>::encode_to_witness(&args);
 
-    let mut map: HashMap<String, ArgValue> = HashMap::new();
-    map.insert("amount".to_string(), ArgValue::Int(7));
-    map.insert("blob".to_string(), ArgValue::Bytes(vec![1, 2, 3]));
-    map.insert("hash".to_string(), ArgValue::Bytes(vec![9u8; 32]));
-
-    let mut via_specs: Vec<Vec<u8>> = Vec::new();
+    let mut offset = 0usize;
     for spec in &specs {
-        via_specs.extend(spec.arg_type.encode_to_witness(&map[&spec.name]).unwrap());
+        let consumed = spec.arg_type.consume(&typed[offset..]).unwrap();
+        assert_eq!(consumed, 1, "each SampleArgs field is one witness element");
+        offset += consumed;
     }
-    assert_eq!(typed, via_specs);
+    assert_eq!(offset, typed.len());
 
     // And the typed decode round-trips.
     let decoded = <SampleArgs as ClauseArgs>::decode_from_witness(&typed).unwrap();
@@ -430,13 +425,6 @@ fn test_params_encoding() {
 
 #[test]
 fn test_erased_clause_operations() {
-    use std::collections::HashMap;
-
-    let _owner_pubkey = XOnlyPublicKey::from_str(
-        "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
-    )
-    .unwrap();
-
     let trigger_script = ScriptBuf::from_hex("51").unwrap();
 
     let trigger_clause: StandardClause<VaultParams, VaultState, TriggerArgs> = StandardClause::new(
@@ -449,27 +437,26 @@ fn test_erased_clause_operations() {
         None,
     );
 
-    // Use as ErasedClause
+    // Use as ErasedClause: the erased view exposes the name, script, and the
+    // arg specs that account for the typed witness encoding.
     let erased: &dyn ErasedClause = &trigger_clause;
+    assert_eq!(erased.name(), "trigger");
 
-    // Test encoding args to witness via HashMap
-    let mut args_map = HashMap::new();
-    args_map.insert("withdraw_amount".to_string(), ArgValue::Int(50000));
-
-    let witness = erased
-        .encode_args_to_witness(&args_map)
-        .expect("Failed to encode args");
+    let witness = TriggerArgs {
+        withdraw_amount: 50000,
+    }
+    .encode_to_witness();
     assert!(!witness.is_empty());
 
-    // Test decoding witness to args
-    let decoded_map = erased
-        .decode_witness_to_args(&witness)
-        .expect("Failed to decode args");
+    // The specs consume exactly the typed encoding...
+    let specs = erased.arg_specs();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].name, "withdraw_amount");
+    assert_eq!(specs[0].arg_type.consume(&witness).unwrap(), witness.len());
 
-    match decoded_map.get("withdraw_amount") {
-        Some(ArgValue::Int(val)) => assert_eq!(*val, 50000),
-        _ => panic!("Expected Int value"),
-    }
+    // ...and the typed decode recovers the arguments.
+    let decoded = TriggerArgs::decode_from_witness(&witness).expect("Failed to decode args");
+    assert_eq!(decoded.withdraw_amount, 50000);
 }
 
 // Params exercising the derived encoding for Option<XOnlyPublicKey>, u32 and

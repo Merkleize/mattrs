@@ -115,12 +115,6 @@ impl<'a> ContractManager<'a> {
         self.rpc
     }
 
-    /// Add an existing instance to the manager and return a handle to it.
-    pub fn add_instance(&mut self, instance: Rc<RefCell<ContractInstance>>) -> InstanceHandle {
-        self.instances.push(instance.clone());
-        InstanceHandle { instance }
-    }
-
     /// Create and fund a new contract instance. Params are taken from the
     /// (self-describing) contract.
     pub fn fund_instance(
@@ -598,9 +592,9 @@ impl<'a> ContractManager<'a> {
             // signer, or error if the element is empty and no signer is available.
             let mut offset = 0usize;
             for spec in clause.arg_specs() {
-                let (_value, consumed) = spec
+                let consumed = spec
                     .arg_type
-                    .decode_from_witness(&witness_stack[offset..])
+                    .consume(&witness_stack[offset..])
                     .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
 
                 if let Some(pubkey) = spec.arg_type.signer_pubkey() {

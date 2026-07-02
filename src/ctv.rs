@@ -1,7 +1,7 @@
 //! CheckTemplateVerify (CTV) utilities implementing BIP-119.
 
 use bitcoin::{
-    Address, Amount, ScriptBuf, Sequence, TxOut,
+    Address, Amount, Sequence, TxOut,
     consensus::encode::serialize,
     hashes::{Hash, sha256},
 };
@@ -88,24 +88,6 @@ pub fn create_ctv_template(
     let ctv_hash = compute_ctv_hash(&outputs, sequence);
 
     Ok((outputs, ctv_hash))
-}
-
-/// Build a CTV script that enforces the given hash.
-///
-/// The script is: <ctv_hash> OP_CHECKTEMPLATEVERIFY
-///
-/// # Arguments
-/// * `ctv_hash` - The 32-byte CTV hash to enforce
-///
-/// # Returns
-/// The CTV enforcement script
-pub fn ctv_script(ctv_hash: &[u8; 32]) -> ScriptBuf {
-    // Note: OP_CHECKTEMPLATEVERIFY is OP_NOP4 (0xb3) in Bitcoin Core
-    // Until it's activated, we use the opcode directly
-    bitcoin::script::Builder::new()
-        .push_slice(ctv_hash)
-        .push_opcode(bitcoin::opcodes::all::OP_NOP4) // CTV when activated
-        .into_script()
 }
 
 #[cfg(test)]

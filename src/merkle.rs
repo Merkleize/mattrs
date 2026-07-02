@@ -6,7 +6,6 @@
 //! a contract commits to, and the membership proofs a spend reveals.
 
 use bitcoin::hashes::{sha256, Hash};
-use crate::argtypes::ArgValue;
 use crate::contracts::{ArgType, WitnessEncodable, WitnessError};
 use crate::script_utils::{bn2vch, vch2bn};
 
@@ -189,16 +188,6 @@ impl MerkleTree {
         }
     }
 
-    /// The value of leaf `i`.
-    pub fn get(&self, i: usize) -> [u8; 32] {
-        self.leaves[i]
-    }
-
-    /// Set leaf `index` to `x`, recomputing the tree.
-    pub fn set(&mut self, index: usize, x: [u8; 32]) {
-        self.leaves[index] = x;
-    }
-
     /// A membership proof for leaf `index`.
     pub fn prove_leaf(&self, index: usize) -> MerkleProof {
         let mut hashes = Vec::new();
@@ -296,19 +285,12 @@ impl MerkleProofType {
 }
 
 impl ArgType for MerkleProofType {
-    fn encode_to_witness(&self, _value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError> {
-        Err(WitnessError::InvalidValue(
-            "MerkleProofType args are encoded via the typed WitProof struct".into(),
-        ))
-    }
-
-    fn decode_from_witness(&self, witness: &[Vec<u8>]) -> Result<(ArgValue, usize), WitnessError> {
+    fn consume(&self, witness: &[Vec<u8>]) -> Result<usize, WitnessError> {
         let needed = 2 * self.depth + 1;
         if witness.len() < needed {
             return Err(WitnessError::InsufficientData);
         }
-        // The consumed count is what callers need; surface the leaf element.
-        Ok((ArgValue::Bytes(witness[needed - 1].clone()), needed))
+        Ok(needed)
     }
 
     fn clone_boxed(&self) -> Box<dyn ArgType> {

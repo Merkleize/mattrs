@@ -1,6 +1,4 @@
-use std::{
-    cell::RefCell, collections::HashMap, fmt, fmt::Debug, marker::PhantomData, rc::Rc, sync::Arc,
-};
+use std::{cell::RefCell, fmt, fmt::Debug, marker::PhantomData, rc::Rc, sync::Arc};
 
 use bitcoin::{
     OutPoint, ScriptBuf, Sequence, TapTweakHash, Transaction, TxOut, Txid, XOnlyPublicKey,
@@ -9,24 +7,19 @@ use bitcoin::{
     taproot::{LeafVersion, TapLeafHash, TapNodeHash},
 };
 
-use crate::argtypes::ArgValue;
-
 // ============================================================================
 // Error Types
 // ============================================================================
 
+/// Errors from encoding/decoding values to and from the witness stack.
 #[derive(Debug)]
 pub enum WitnessError {
+    /// Data has the wrong shape or content for the type being decoded.
     InvalidData(String),
+    /// The input ended before a complete value could be decoded.
     InsufficientData,
+    /// A lower-level decoding step failed.
     DecodingFailed(String),
-    /// A required argument is missing from the arguments map.
-    MissingArgument(String),
-    /// An argument value has a type that doesn't match the expected ArgType.
-    TypeMismatch {
-        expected: String,
-        got: String,
-    },
     /// The witness stack doesn't have enough elements to deserialize.
     StackUnderflow,
     /// A value is invalid for its type (e.g., oversized integer, wrong-length pubkey).
@@ -39,10 +32,6 @@ impl fmt::Display for WitnessError {
             WitnessError::InvalidData(msg) => write!(f, "Invalid data: {}", msg),
             WitnessError::InsufficientData => write!(f, "Insufficient data in witness"),
             WitnessError::DecodingFailed(msg) => write!(f, "Decoding failed: {}", msg),
-            WitnessError::MissingArgument(name) => write!(f, "Missing required argument: {}", name),
-            WitnessError::TypeMismatch { expected, got } => {
-                write!(f, "Type mismatch: expected {}, got {}", expected, got)
-            }
             WitnessError::StackUnderflow => write!(f, "Witness stack underflow"),
             WitnessError::InvalidValue(msg) => write!(f, "Invalid value: {}", msg),
         }
@@ -51,11 +40,12 @@ impl fmt::Display for WitnessError {
 
 impl std::error::Error for WitnessError {}
 
+/// Errors from executing a clause (computing its next outputs).
 #[derive(Debug)]
 pub enum ClauseError {
+    /// The spend's witness stack could not be decoded into the clause's arguments.
     Witness(WitnessError),
-    InvalidArguments(String),
-    StateDecodingError(String),
+    /// Any other clause-specific failure.
     Other(String),
 }
 
@@ -63,8 +53,6 @@ impl fmt::Display for ClauseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ClauseError::Witness(e) => write!(f, "Witness error: {}", e),
-            ClauseError::InvalidArguments(msg) => write!(f, "Invalid arguments: {}", msg),
-            ClauseError::StateDecodingError(msg) => write!(f, "State decoding error: {}", msg),
             ClauseError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -459,11 +447,6 @@ pub trait ContractState: Debug + Clone + Send + Sync {
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError>
     where
         Self: Sized;
-
-    /// Get the script that computes the state commitment on-chain.
-    fn encoder_script(&self) -> ScriptBuf {
-        ScriptBuf::new() // Default: no encoder script needed
-    }
 }
 
 /// Trait for clause arguments.
@@ -655,13 +638,6 @@ impl ClauseOutputBuilder {
         self
     }
 
-    /// Set the committed state bytes directly (no logical state recorded).
-    pub fn with_state_bytes(mut self, state: Vec<u8>) -> Self {
-        self.next_state = Some(state);
-        self.next_state_expanded = None;
-        self
-    }
-
     /// Set amount behaviour to preserve output (default).
     pub fn preserve_amount(mut self) -> Self {
         self.next_amount = ClauseOutputAmountBehaviour::PreserveOutput;
@@ -842,22 +818,6 @@ impl TapTree {
         }
     }
 
-    /// Find a clause name by its script bytes.
-    pub fn find_clause_by_script(&self, script_bytes: &[u8]) -> Option<String> {
-        match self {
-            TapTree::Leaf(leaf) => {
-                if leaf.script.as_bytes() == script_bytes {
-                    Some(leaf.name.clone())
-                } else {
-                    None
-                }
-            }
-            TapTree::Branch { left, right } => left
-                .find_clause_by_script(script_bytes)
-                .or_else(|| right.find_clause_by_script(script_bytes)),
-        }
-    }
-
     /// Get all leaves in the tree (in order).
     pub fn leaves(&self) -> Vec<&TapLeaf> {
         match self {
@@ -1033,36 +993,10 @@ pub fn compute_taproot_output_key(
 }
 
 // ============================================================================
-// Generic Clause Trait (for compile-time usage)
-// ============================================================================
-
-/// Generic trait for clauses with specific type parameters.
-/// This is used when defining contracts with known types.
-pub trait Clause {
-    type Params: ContractParams;
-    type State: ContractState;
-    type Args: ClauseArgs;
-
-    /// Get the clause name.
-    fn name(&self) -> &str;
-
-    /// Get the clause script.
-    fn script(&self) -> &ScriptBuf;
-
-    /// Compute next outputs from parameters, arguments and state.
-    fn next_outputs(
-        &self,
-        params: &Self::Params,
-        args: &Self::Args,
-        state: Option<&Self::State>,
-    ) -> Result<NextOutputs, ClauseError>;
-}
-
-// ============================================================================
 // Type-Erased Clause Trait (for runtime polymorphism)
 // ============================================================================
 
-/// Type-erased version of Clause for dynamic dispatch.
+/// Type-erased view of a [`StandardClause`] for dynamic dispatch.
 /// This allows the manager to work with clauses without knowing their concrete types.
 pub trait ErasedClause: Debug + Send + Sync {
     /// Get the clause name.
@@ -1073,18 +1007,6 @@ pub trait ErasedClause: Debug + Send + Sync {
 
     /// Get the argument specifications, in witness order.
     fn arg_specs(&self) -> &[ArgSpec];
-
-    /// Encode arguments from a generic argument map to witness stack.
-    fn encode_args_to_witness(
-        &self,
-        args: &HashMap<String, ArgValue>,
-    ) -> Result<Vec<Vec<u8>>, WitnessError>;
-
-    /// Decode witness stack back to argument map.
-    fn decode_witness_to_args(
-        &self,
-        witness: &[Vec<u8>],
-    ) -> Result<HashMap<String, ArgValue>, WitnessError>;
 
     /// Compute next outputs from the spend's witness stack (args in witness order).
     ///
@@ -1112,14 +1034,16 @@ impl Clone for Box<dyn ErasedClause> {
 // ArgType Trait (for argument type specifications)
 // ============================================================================
 
-/// Trait for argument types that can be serialized/deserialized to/from witness.
+/// Describes one argument's slot(s) in a clause's witness layout.
+///
+/// Values themselves flow through the typed `*Args` struct
+/// ([`ClauseArgs::encode_to_witness`]); an `ArgType` only *accounts* for the
+/// witness elements an argument occupies (and, for signatures, names the key
+/// that must sign), so the manager can walk a witness stack spec by spec.
 pub trait ArgType: Debug + Send + Sync {
-    /// Encode an ArgValue to witness stack elements.
-    fn encode_to_witness(&self, value: &ArgValue) -> Result<Vec<Vec<u8>>, WitnessError>;
-
-    /// Decode witness stack elements to an ArgValue.
-    /// Returns (ArgValue, number of elements consumed).
-    fn decode_from_witness(&self, witness: &[Vec<u8>]) -> Result<(ArgValue, usize), WitnessError>;
+    /// Validate the argument at the head of `witness` and return the number of
+    /// witness elements it occupies.
+    fn consume(&self, witness: &[Vec<u8>]) -> Result<usize, WitnessError>;
 
     /// If this argument is a signature, the x-only pubkey expected to sign it.
     ///
@@ -1202,6 +1126,21 @@ where
             _phantom: PhantomData,
         }
     }
+
+    /// Compute next outputs from typed parameters, arguments and state. A clause
+    /// without a next-outputs function is terminal and yields no outputs.
+    pub fn next_outputs(
+        &self,
+        params: &P,
+        args: &A,
+        state: Option<&S>,
+    ) -> Result<NextOutputs, ClauseError> {
+        if let Some(ref f) = self.next_outputs_fn {
+            f(params, args, state)
+        } else {
+            Ok(NextOutputs::Contracts(Vec::new()))
+        }
+    }
 }
 
 impl<P, S, A> Debug for StandardClause<P, S, A>
@@ -1236,39 +1175,6 @@ where
     }
 }
 
-// Implement the generic Clause trait
-impl<P, S, A> Clause for StandardClause<P, S, A>
-where
-    P: ContractParams + 'static,
-    S: ContractState + 'static,
-    A: ClauseArgs + 'static,
-{
-    type Params = P;
-    type State = S;
-    type Args = A;
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn script(&self) -> &ScriptBuf {
-        &self.script
-    }
-
-    fn next_outputs(
-        &self,
-        params: &Self::Params,
-        args: &Self::Args,
-        state: Option<&Self::State>,
-    ) -> Result<NextOutputs, ClauseError> {
-        if let Some(ref f) = self.next_outputs_fn {
-            f(params, args, state)
-        } else {
-            Ok(NextOutputs::Contracts(Vec::new()))
-        }
-    }
-}
-
 // Implement the type-erased ErasedClause trait
 impl<P, S, A> ErasedClause for StandardClause<P, S, A>
 where
@@ -1286,52 +1192,6 @@ where
 
     fn arg_specs(&self) -> &[ArgSpec] {
         &self.arg_specs
-    }
-
-    fn encode_args_to_witness(
-        &self,
-        args: &HashMap<String, ArgValue>,
-    ) -> Result<Vec<Vec<u8>>, WitnessError> {
-        let mut result = Vec::new();
-
-        for spec in &self.arg_specs {
-            let arg_value = args
-                .get(&spec.name)
-                .ok_or_else(|| WitnessError::MissingArgument(spec.name.clone()))?;
-
-            let encoded = spec.arg_type.encode_to_witness(arg_value)?;
-            result.extend(encoded);
-        }
-
-        Ok(result)
-    }
-
-    fn decode_witness_to_args(
-        &self,
-        witness: &[Vec<u8>],
-    ) -> Result<HashMap<String, ArgValue>, WitnessError> {
-        let mut result = HashMap::new();
-        let mut offset = 0;
-
-        for spec in &self.arg_specs {
-            if offset >= witness.len() {
-                return Err(WitnessError::InsufficientData);
-            }
-
-            let (value, consumed) = spec.arg_type.decode_from_witness(&witness[offset..])?;
-            result.insert(spec.name.clone(), value);
-            offset += consumed;
-        }
-
-        if offset != witness.len() {
-            return Err(WitnessError::InvalidData(format!(
-                "Expected {} witness elements, got {}",
-                offset,
-                witness.len()
-            )));
-        }
-
-        Ok(result)
     }
 
     fn next_outputs_from_witness(
@@ -1399,9 +1259,6 @@ pub trait ErasedContract: Debug + Send + Sync {
 
     /// Get the script pubkey for this contract (with optional state).
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError>;
-
-    /// Get the internal pubkey for this contract.
-    fn internal_pubkey(&self) -> XOnlyPublicKey;
 
     /// Get the internal pubkey to use for control block generation.
     /// For augmented contracts with state, this may be state-tweaked.
@@ -1525,10 +1382,6 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         Ok(ScriptBuf::new_p2tr_tweaked(
             TweakedPublicKey::dangerous_assume_tweaked(self.output_key()),
         ))
-    }
-
-    fn internal_pubkey(&self) -> XOnlyPublicKey {
-        self.internal_pubkey
     }
 
     fn control_block_internal_key(
@@ -1695,12 +1548,6 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         Ok(ScriptBuf::new_p2tr_tweaked(
             TweakedPublicKey::dangerous_assume_tweaked(output_key),
         ))
-    }
-
-    fn internal_pubkey(&self) -> XOnlyPublicKey {
-        // For augmented contracts, we need to return the naked key
-        // Note: This may not be correct for all use cases, but it's what we have
-        self.naked_internal_pubkey
     }
 
     fn control_block_internal_key(

@@ -99,8 +99,7 @@ fn test_merkle_proof_type_arg_consumes_2n_plus_1() {
     let mut stack = tree.prove_leaf(2).to_wit_stack();
     stack.push([9u8; 32].to_vec()); // a trailing argument
 
-    let (_value, consumed) = mpt.decode_from_witness(&stack).unwrap();
-    assert_eq!(consumed, 5);
+    assert_eq!(mpt.consume(&stack).unwrap(), 5);
 }
 
 #[test]
