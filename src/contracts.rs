@@ -758,8 +758,8 @@ impl TapTree {
         }
     }
 
-    /// Get the merkle proof for a specific leaf.
-    /// Returns the sibling hashes from bottom to top.
+    /// Get the merkle proof for a specific leaf: the sibling hashes ordered
+    /// leaf-to-root (deepest sibling first), as a BIP341 control block expects.
     pub fn merkle_proof(&self, target_leaf: &TapLeaf) -> Option<Vec<[u8; 32]>> {
         match self {
             TapTree::Leaf(leaf) => {
@@ -771,10 +771,10 @@ impl TapTree {
             }
             TapTree::Branch { left, right } => {
                 if let Some(mut proof) = left.merkle_proof(target_leaf) {
-                    proof.insert(0, right.root_hash());
+                    proof.push(right.root_hash());
                     Some(proof)
                 } else if let Some(mut proof) = right.merkle_proof(target_leaf) {
-                    proof.insert(0, left.root_hash());
+                    proof.push(left.root_hash());
                     Some(proof)
                 } else {
                     None

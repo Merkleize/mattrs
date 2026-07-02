@@ -140,6 +140,22 @@ fn test_taptree_operations() {
 }
 
 #[test]
+fn test_taptree_merkle_proof_is_leaf_to_root() {
+    // tree = branch(a, branch(b, c)): the proof for b must list its siblings
+    // deepest-first (c's leaf hash, then a's subtree hash), which is the order
+    // a BIP341 control block expects. A root-to-leaf ordering only shows up
+    // on-chain for leaves at depth >= 2, so pin it here.
+    let a = TapTree::leaf("a", ScriptBuf::from_hex("51").unwrap());
+    let b = TapTree::leaf("b", ScriptBuf::from_hex("52").unwrap());
+    let c = TapTree::leaf("c", ScriptBuf::from_hex("53").unwrap());
+    let a_hash = a.root_hash();
+    let c_hash = c.root_hash();
+    let tree = TapTree::branch(a, TapTree::branch(b, c));
+    let b_leaf = tree.find_leaf("b").unwrap().clone();
+    assert_eq!(tree.merkle_proof(&b_leaf), Some(vec![c_hash, a_hash]));
+}
+
+#[test]
 fn test_clause_witness_encoding() {
     let args = TriggerArgs {
         withdraw_amount: 50000,
