@@ -54,6 +54,11 @@ fn test_merkle_proof_matches_reference() {
     assert_eq!(proof.to_wit_stack().len(), 2 * proof.hashes.len() + 1);
 }
 
+// Regenerate the pinned root with pymatt (from the repo root):
+//   pymatt/venv/bin/python -c "
+//   import sys; sys.path[:0] = ['pymatt/src', 'pymatt/examples/ram']
+//   from ram_contracts import RAM
+//   print(RAM(4).get_tr_info(b'\x00'*32).merkle_root.hex())"
 #[test]
 fn test_ram_taptree_matches_reference() {
     // Byte-compatibility proof for the withdraw/write tapscripts: the taptree root
@@ -157,4 +162,56 @@ fn test_merkle_helpers_match_reference() {
     assert_eq!(get_directions(4, 2), vec![1, 0]);
     assert_eq!(floor_lg(8), 3);
     assert_eq!(ceil_lg(5), 3);
+}
+
+// ----------------------------------------------------------------------------
+// End-to-end (regtest): write then withdraw, validated by a real node.
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore = "requires a running regtest bitcoind"]
+fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin::Amount;
+    use mattrs::manager::ContractManager;
+    use support::testkit::regtest_client;
+
+    let client = regtest_client("testwallet");
+    let mut manager = ContractManager::new(&client);
+
+    let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
+    let ram = Ram::fund(
+        &mut manager,
+        Amount::from_sat(100_000),
+        RamParams { size: 4 },
+        RamState {
+            leaves: leaves.clone(),
+        },
+    )?;
+
+    // Write cell 2, proving its current value; the node validates the tapscript's
+    // in-script Merkle-root recomputation of both the old and the new root.
+    let tree = MerkleTree::new(leaves.clone());
+    let proof: WitProof<2> = tree.prove_leaf(2).to_wit_proof();
+    let new_value = [0xaa; 32];
+    let child: RamHandle = ram
+        .write(proof, new_value, tree.root())
+        .exec_one(&mut manager)?
+        .try_into()?;
+
+    // Withdraw from the updated RAM, proving the freshly written value.
+    let mut updated = leaves.clone();
+    updated[2] = new_value;
+    let new_tree = MerkleTree::new(updated);
+    let proof: WitProof<2> = new_tree.prove_leaf(2).to_wit_proof();
+
+    use bitcoincore_rpc::RpcApi;
+    let dest = manager.rpc().get_new_address(None, None)?.assume_checked();
+    child
+        .withdraw(proof, new_tree.root())
+        .outputs(vec![bitcoin::TxOut {
+            script_pubkey: dest.script_pubkey(),
+            value: Amount::from_sat(100_000),
+        }])
+        .exec_none(&mut manager)?;
+    Ok(())
 }

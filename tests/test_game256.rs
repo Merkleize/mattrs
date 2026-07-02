@@ -5,8 +5,6 @@
 
 mod support;
 
-use std::str::FromStr;
-
 use bitcoin::XOnlyPublicKey;
 
 use support::game256::{
@@ -14,16 +12,23 @@ use support::game256::{
 };
 use mattrs::script_helpers::{dup, merkle_root};
 
+// Regenerate the pinned roots with pymatt (from the repo root):
+//   pymatt/venv/bin/python -c "
+//   import sys; sys.path[:0] = ['pymatt/src', 'pymatt/examples/game256']
+//   from game256_contracts import G256_S0, G256_S1, G256_S2, Compute2x
+//   from matt.hub.fraud import Bisect_1, Bisect_2, Leaf
+//   a = bytes.fromhex('67c20aa213479676398b79d7cbc7a6b888ccb5944f6d5bb6b1c33b1ab9bdeb4b')
+//   b = bytes.fromhex('5f6929a36535c7e95cf99e56a49a745cc548d2147427a62f5b8d015cbd70b122')
+//   d = b'\x00' * 32
+//   lf = lambda i: Leaf(a, b, Compute2x)
+//   print('Leaf         ', Leaf(a, b, Compute2x).get_tr_info(d).merkle_root.hex())
+//   print('Bisect_1(0,7)', Bisect_1(a, b, 0, 7, lf, 10).get_tr_info(d).merkle_root.hex())
+//   print('G256_S0      ', G256_S0(a, b).get_tr_info().merkle_root.hex())"
+// (Bisect_1/Bisect_2 over other ranges follow the same pattern.)
 fn keys() -> (XOnlyPublicKey, XOnlyPublicKey) {
     (
-        XOnlyPublicKey::from_str(
-            "67c20aa213479676398b79d7cbc7a6b888ccb5944f6d5bb6b1c33b1ab9bdeb4b",
-        )
-        .unwrap(),
-        XOnlyPublicKey::from_str(
-            "5f6929a36535c7e95cf99e56a49a745cc548d2147427a62f5b8d015cbd70b122",
-        )
-        .unwrap(),
+        support::testkit::alice_pk(),
+        support::testkit::bob_pk(),
     )
 }
 
@@ -109,7 +114,6 @@ fn test_merkle_root_and_dup_script_bytes() {
 // Spend flow (build-level, no node): each state transition drives its child.
 // ----------------------------------------------------------------------------
 
-use bitcoin::bip32::Xpriv;
 use mattrs::contracts::{ContractState, ErasedContract};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
@@ -118,20 +122,7 @@ use support::game256::{
     Bisect1Handle, Bisect1State, Bisect2Handle, Bisect2State, G256S0Handle, G256S1Handle,
     G256S1State, G256S2Handle, G256S2State, LeafState,
 };
-use support::testkit::{fund_fake, offline_client};
-
-fn alice_xpriv() -> Xpriv {
-    Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )
-    .unwrap()
-}
-fn bob_xpriv() -> Xpriv {
-    Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )
-    .unwrap()
-}
+use support::testkit::{alice_xpriv, bob_xpriv, fund_fake, offline_client};
 
 /// The committed address of `contract` with committed `state`.
 fn addr<S: ContractState + 'static>(contract: Arc<dyn ErasedContract>, state: &S) -> bitcoin::ScriptBuf {

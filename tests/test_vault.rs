@@ -1,12 +1,11 @@
 //! End-to-end vault contract tests
 
-mod common;
 mod support;
 
 use std::str::FromStr;
 
 use bitcoin::{
-    Address, Amount, KnownHrp, TapNodeHash, XOnlyPublicKey, bip32::Xpriv, hashes::Hash,
+    Address, Amount, KnownHrp, TapNodeHash, XOnlyPublicKey, hashes::Hash,
     hex::DisplayHex, key::Secp256k1,
 };
 
@@ -16,28 +15,26 @@ use mattrs::{
     manager::ContractManager,
     signer::HotSigner,
 };
+use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client};
 use support::vault::{UnvaultingHandle, UnvaultingState, Vault, VaultParams};
 
+// Regenerate the pinned address with pymatt (from the repo root):
+//   pymatt/venv/bin/python -c "
+//   import sys; sys.path[:0] = ['pymatt/src', 'pymatt/examples/vault']
+//   from vault_contracts import Vault
+//   a = bytes.fromhex('67c20aa213479676398b79d7cbc7a6b888ccb5944f6d5bb6b1c33b1ab9bdeb4b')
+//   b = bytes.fromhex('5f6929a36535c7e95cf99e56a49a745cc548d2147427a62f5b8d015cbd70b122')
+//   print(Vault(None, 10, b, a).get_address())"
 #[test]
 fn test_vault_address_matches_reference() {
     // Test that our vault address matches the Python reference implementation
     let secp = Secp256k1::new();
 
-    let unvault_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    ).unwrap();
-    let unvault_pubkey: XOnlyPublicKey = unvault_privkey.to_priv().public_key(&secp).into();
-
-    let recover_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    ).unwrap();
-    let recover_pubkey: XOnlyPublicKey = recover_privkey.to_priv().public_key(&secp).into();
-
     let vault = Vault::new(VaultParams {
         alternate_pk: None,
         spend_delay: 10,
-        recover_pk: recover_pubkey,
-        unvault_pk: unvault_pubkey,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
     });
 
     let internal_key = vault.contract.internal_pubkey();
@@ -212,19 +209,14 @@ fn test_batch_merges_and_deducts_outputs() {
     use support::testkit::{fund_fake, offline_client};
     use support::vault::VaultHandle;
 
-    let secp = Secp256k1::new();
-    let unvault_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )
-    .unwrap();
-    let unvault_pubkey: XOnlyPublicKey = unvault_privkey.to_priv().public_key(&secp).into();
+    let unvault_privkey = alice_xpriv();
     let recover_pubkey = XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap();
 
     let params = VaultParams {
         alternate_pk: None,
         spend_delay: 10,
         recover_pk: recover_pubkey,
-        unvault_pk: unvault_pubkey,
+        unvault_pk: alice_pk(),
     };
     let vault = Vault::new(params);
 
@@ -268,23 +260,15 @@ fn test_batch_merges_and_deducts_outputs() {
 fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let secp = Secp256k1::new();
     // Initialize the RPC client
-    let client = common::get_rpc_client("testwallet");
+    let client = regtest_client("testwallet");
 
-    let unvault_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )?;
-    let unvault_pubkey: XOnlyPublicKey = unvault_privkey.to_priv().public_key(&secp).into();
-
-    let recover_privkey = Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )?;
-    let recover_pubkey: XOnlyPublicKey = recover_privkey.to_priv().public_key(&secp).into();
+    let unvault_privkey = alice_xpriv();
 
     let params = VaultParams {
         alternate_pk: None,
         spend_delay: 10,
-        recover_pk: recover_pubkey,
-        unvault_pk: unvault_pubkey,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
     };
 
     let vault_contract = Vault::new(params.clone());

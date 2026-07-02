@@ -17,7 +17,6 @@
 //!   - withdraw(ctv_hash), after spend_delay  => the CTV template    (terminal)
 //!   - recover(out_i)                         => recover_pk          (terminal)
 //! ```
-#![allow(dead_code)]
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};

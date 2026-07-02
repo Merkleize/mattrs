@@ -10,7 +10,6 @@
 //! (see `ErasedState`) and `write`'s `next_outputs` reads it to compute the update.
 //!
 //! Fixed to a depth-2 tree (`size = 4`) via the const `WitProof<2>` proof arg.
-#![allow(dead_code)]
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};

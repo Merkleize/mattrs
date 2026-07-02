@@ -12,7 +12,6 @@
 //! machine (choose -> S1 -> S2 -> Bisect_1(0,7) -> Bisect_2 -> Leaf/sub-Bisect_1),
 //! so a spend produces the correct child contract and committed state (see
 //! `test_game256_state_transitions`).
-#![allow(dead_code)]
 
 use std::sync::Arc;
 

@@ -7,7 +7,6 @@
 //! - `RpsGameS1` (augmented): Alice reveals `m_a`/`r_a`; one of three clauses
 //!   (`alice_wins` / `bob_wins` / `tie`) checks the outcome and pays out via a CTV
 //!   template. This exercises clause-owned CTV templates and CCV `check_in/out`.
-#![allow(dead_code)]
 
 use bitcoin::{
     key::Secp256k1,

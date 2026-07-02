@@ -7,21 +7,21 @@
 
 mod support;
 
-use std::str::FromStr;
-
-use bitcoin::XOnlyPublicKey;
-
 use support::rps::{move_commitment, RpsGameS0, RpsGameS1, RpsParams, DEFAULT_STAKE};
+use support::testkit::{alice_pk, bob_pk};
 
+// Regenerate the pinned roots with pymatt (from the repo root):
+//   pymatt/venv/bin/python -c "
+//   import sys; sys.path[:0] = ['pymatt/src', 'pymatt/examples/rps']
+//   from rps_contracts import RPSGameS0, RPSGameS1
+//   a = bytes.fromhex('67c20aa213479676398b79d7cbc7a6b888ccb5944f6d5bb6b1c33b1ab9bdeb4b')
+//   b = bytes.fromhex('5f6929a36535c7e95cf99e56a49a745cc548d2147427a62f5b8d015cbd70b122')
+//   c_a = bytes.fromhex('66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925')
+//   print(RPSGameS0(a, b, c_a, 1000).get_tr_info().merkle_root.hex())
+//   print(RPSGameS1(a, b, c_a, 1000).get_tr_info(b'\x00'*32).merkle_root.hex())"
 fn reference_params() -> RpsParams {
-    let alice_pk = XOnlyPublicKey::from_str(
-        "67c20aa213479676398b79d7cbc7a6b888ccb5944f6d5bb6b1c33b1ab9bdeb4b",
-    )
-    .unwrap();
-    let bob_pk = XOnlyPublicKey::from_str(
-        "5f6929a36535c7e95cf99e56a49a745cc548d2147427a62f5b8d015cbd70b122",
-    )
-    .unwrap();
+    let alice_pk = alice_pk();
+    let bob_pk = bob_pk();
     // c_a = sha256(bn(0) || 0^32) = sha256(0x00 * 32)
     let c_a: [u8; 32] = hex::decode(
         "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
@@ -74,21 +74,12 @@ fn test_move_commitment_values() {
 // Spend flow (build-level, no node): bob_move -> RpsGameS1 -> CTV payout.
 // ----------------------------------------------------------------------------
 
-use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use support::rps::{RpsGameS0Handle, RpsGameS1Handle, RpsGameS1State};
-use support::testkit::{fund_fake, offline_client};
-
-fn bob_xpriv() -> Xpriv {
-    // The private key whose x-only pubkey is the reference bob_pk (5f6929..).
-    Xpriv::from_str(
-        "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ",
-    )
-    .unwrap()
-}
+use support::testkit::{bob_xpriv, fund_fake, offline_client};
 
 #[test]
 fn test_rps_bob_move_commits_s1_state() {
@@ -154,3 +145,46 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
     );
     assert_eq!(tx.input[0].sequence, Sequence::ZERO);
 }
+
+// ----------------------------------------------------------------------------
+// End-to-end (regtest): the full game, adjudicated by a validating node.
+// ----------------------------------------------------------------------------
+
+#[test]
+#[ignore = "requires a running regtest bitcoind"]
+fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
+    use support::testkit::regtest_client;
+
+    // Alice has committed to rock (m_a = 0) with an all-zeros nonce:
+    // c_a = sha256(bn(0) || r_a), where bn(0) is empty.
+    let params = reference_params();
+    let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
+
+    let client = regtest_client("testwallet");
+    let mut manager = ContractManager::new(&client);
+
+    // Fund the game with both players' stakes.
+    let s0 = RpsGameS0::fund(&mut manager, pot, params)?;
+
+    // Bob reveals paper (m_b = 1), signed; the S1 child commits sha256(bn(1)).
+    let s1: RpsGameS1Handle = s0
+        .bob_move(1)
+        .sign(HotSigner::new(bob_xpriv()))
+        .exec_one(&mut manager)?
+        .try_into()?;
+    let state = s1.handle().state::<RpsGameS1State>().expect("S1 state");
+    assert_eq!(state.commitment, move_commitment(1));
+
+    // Rock vs paper: Bob wins. A cheating alice_wins spend must be rejected by
+    // the node's script interpreter (the adjudication is consensus-enforced).
+    let cheat = s1.alice_wins(1, 0, [0u8; 32]).exec_none(&mut manager);
+    assert!(
+        cheat.is_err(),
+        "alice_wins must not validate for rock vs paper"
+    );
+
+    // The honest outcome pays the whole pot to Bob via the clause's CTV template.
+    s1.bob_wins(1, 0, [0u8; 32]).exec_none(&mut manager)?;
+    Ok(())
+}
+
