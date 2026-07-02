@@ -10,7 +10,7 @@ use std::str::FromStr;
 use bitcoin::XOnlyPublicKey;
 
 use support::game256::{
-    Bisect1, Bisect2, BisectParams, G256Params, G256S0, G256S1, G256S2, Leaf, LeafParams,
+    bisect1, bisect2, leaf, BisectParams, G256Params, G256S0, G256S1, G256S2,
 };
 use mattrs::script_helpers::{dup, merkle_root};
 
@@ -30,7 +30,7 @@ fn keys() -> (XOnlyPublicKey, XOnlyPublicKey) {
 #[test]
 fn test_leaf_taptree_matches_reference() {
     let (alice_pk, bob_pk) = keys();
-    let leaf = Leaf::new(LeafParams { alice_pk, bob_pk });
+    let leaf = leaf(alice_pk, bob_pk);
     assert_eq!(
         hex::encode(leaf.contract.taptree().root_hash()),
         "82dda0e32408a73bf19265805bcba563421e853fa22870bfd5887a402cf34916"
@@ -53,25 +53,25 @@ fn test_bisect_taptrees_match_reference() {
 
     // base range: both children are Leaves
     assert_eq!(
-        root(&Bisect2::new(bp(0, 1)).contract.taptree().root_hash()),
+        root(&bisect2(bp(0, 1)).contract.taptree().root_hash()),
         "051002010223fec1898647323c278a6f9aebdae955ba66b2c1989875204bbe60"
     );
     assert_eq!(
-        root(&Bisect1::new(bp(0, 1)).contract.taptree().root_hash()),
+        root(&bisect1(bp(0, 1)).contract.taptree().root_hash()),
         "646593ebe11ebd3b03663c56b502d0cc910678aafabac268bb33381b7dedbc52"
     );
     // size 4: children are sub-Bisect_1s
     assert_eq!(
-        root(&Bisect2::new(bp(0, 3)).contract.taptree().root_hash()),
+        root(&bisect2(bp(0, 3)).contract.taptree().root_hash()),
         "6eebc0a155c3b98c6b812f44e75242a39187c2e4a8f0f145ee4de83347e7b942"
     );
     assert_eq!(
-        root(&Bisect1::new(bp(0, 3)).contract.taptree().root_hash()),
+        root(&bisect1(bp(0, 3)).contract.taptree().root_hash()),
         "0b82edb494d12798f767348922edeed15ba45f13771bee50133d23561a1af263"
     );
     // the full 8-step game bisect nests the entire recursion
     assert_eq!(
-        root(&Bisect1::new(bp(0, 7)).contract.taptree().root_hash()),
+        root(&bisect1(bp(0, 7)).contract.taptree().root_hash()),
         "3f9b156e3ccf21e59c79c6de2b4cb8f018a1f11e9a6c133af4906e7e6b9cfc2f"
     );
 }
@@ -179,7 +179,7 @@ fn test_game256_state_transitions() {
     assert_eq!(
         tx.output[0].script_pubkey,
         addr(
-            Bisect1::new(bp(0, 7)).as_erased(),
+            bisect1(bp(0, 7)).as_erased(),
             &Bisect1State {
                 h_start: commit(5),
                 h_end_a: commit(10),
@@ -192,7 +192,7 @@ fn test_game256_state_transitions() {
 
     // 3. Bisect_2(0,7).bob_reveal_left -> a *sub-Bisect_1(0,3)* (children not leaves).
     let b2 = Bisect2Handle(fund_fake(
-        Bisect2::new(bp(0, 7)).as_erased(),
+        bisect2(bp(0, 7)).as_erased(),
         Some(Box::new(Bisect2State {
             h_start: [1; 32],
             h_end_a: [2; 32],
@@ -217,7 +217,7 @@ fn test_game256_state_transitions() {
     assert_eq!(
         tx.output[0].script_pubkey,
         addr(
-            Bisect1::new(bp(0, 3)).as_erased(),
+            bisect1(bp(0, 3)).as_erased(),
             &Bisect1State {
                 h_start: [1; 32],   // h_start
                 h_end_a: [6; 32],   // h_mid_a
@@ -230,7 +230,7 @@ fn test_game256_state_transitions() {
 
     // 4. Bisect_2(0,1).bob_reveal_left -> a *Leaf* (children ARE leaves).
     let b2_leaf = Bisect2Handle(fund_fake(
-        Bisect2::new(bp(0, 1)).as_erased(),
+        bisect2(bp(0, 1)).as_erased(),
         Some(Box::new(Bisect2State {
             h_start: [1; 32],
             h_end_a: [2; 32],
@@ -255,7 +255,7 @@ fn test_game256_state_transitions() {
     assert_eq!(
         tx.output[0].script_pubkey,
         addr(
-            Leaf::new(LeafParams { alice_pk, bob_pk }).as_erased(),
+            leaf(alice_pk, bob_pk).as_erased(),
             &LeafState { h_start: [1; 32], h_end_alice: [6; 32], h_end_bob: [9; 32] }
         )
     );
@@ -282,7 +282,7 @@ fn test_game256_state_transitions() {
 
     // 6. Bisect_1.alice_reveal -> Bisect_2 (same range), state passthrough.
     let b1 = Bisect1Handle(fund_fake(
-        Bisect1::new(bp(0, 7)).as_erased(),
+        bisect1(bp(0, 7)).as_erased(),
         Some(Box::new(Bisect1State {
             h_start: [1; 32],
             h_end_a: [2; 32],
@@ -303,7 +303,7 @@ fn test_game256_state_transitions() {
     assert_eq!(
         tx.output[0].script_pubkey,
         addr(
-            Bisect2::new(bp(0, 7)).as_erased(),
+            bisect2(bp(0, 7)).as_erased(),
             &Bisect2State {
                 h_start: [1; 32],
                 h_end_a: [2; 32],

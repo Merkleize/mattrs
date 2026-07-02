@@ -44,6 +44,7 @@ pub use contracts::Signature;
 pub mod argtypes;
 pub mod contracts;
 pub mod ctv;
+pub mod fraud;
 #[macro_use]
 pub mod macros;
 pub mod manager;

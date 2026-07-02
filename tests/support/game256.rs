@@ -2,477 +2,79 @@
 //!
 //! A fraud-proof game: Alice claims `f^n(x) = y` for a step function `f`; if Bob
 //! disagrees they bisect the computation trace down to a single disputed step,
-//! which the `Leaf` contract adjudicates by re-running that one step on-chain.
+//! which is adjudicated by re-running that one step on-chain.
 //!
-//! This ports the whole example: the `Leaf` base case, the recursive `Bisect_1`/
-//! `Bisect_2` (over any [i, j] range), and the `G256S0`/`S1`/`S2` game stages — the
-//! taptrees are byte-verified against the pymatt references, and each clause's
-//! `next_outputs` drives the game state machine (choose -> S1 -> S2 ->
-//! Bisect_1(0,7) -> Bisect_2 -> Leaf/sub-Bisect_1), so a spend produces the correct
-//! child contract and committed state (see `test_game256_state_transitions`).
-//!
-//! The step function is game256's `Compute2x`: `y = 2*x`, values committed as
-//! `sha256(x)` (encoder `OP_SHA256`, func `OP_DUP OP_ADD`).
+//! The whole bisection machinery is the generic [`mattrs::fraud`] module; the
+//! only computation-specific code here is [`compute2x`] (the step function
+//! `f(x) = 2x` with values committed as `sha256(x)`) plus the three top-level
+//! game stages `G256S0`/`S1`/`S2`. The taptrees are byte-verified against the
+//! pymatt references, and each clause's `next_outputs` drives the game state
+//! machine (choose -> S1 -> S2 -> Bisect_1(0,7) -> Bisect_2 -> Leaf/sub-Bisect_1),
+//! so a spend produces the correct child contract and committed state (see
+//! `test_game256_state_transitions`).
 #![allow(dead_code)]
 
-use bitcoin::ScriptBuf;
-use bitcoin::XOnlyPublicKey;
+use std::sync::Arc;
+
+use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
+use mattrs::argtypes::IntType;
 use mattrs::contracts::{
-    ClauseArgs, ClauseOutput, ContractParams, ContractState, WitnessEncodable, WitnessError,
+    ArgSpec, ClauseArgs, ClauseOutput, ContractParams, ContractState, WitnessEncodable,
+    WitnessError,
 };
 use mattrs::{contract, Signature};
 use mattrs_derive::{ContractParams, ContractState};
 
-use mattrs::script_helpers::{check_input_contract, dup, merkle_root, timeout_sig_script};
+// Re-exported so tests can import the whole game through this module; each test
+// binary uses a subset, so per-binary "unused import" warnings are structural.
+#[allow(unused_imports)]
+pub use mattrs::fraud::{
+    Bisect1, Bisect1Handle, Bisect1State, Bisect2, Bisect2Handle, Bisect2State, BisectParams,
+    Computer, Leaf, LeafFactory, LeafHandle, LeafParams, LeafState,
+};
+use mattrs::script_helpers::{
+    check_input_contract, check_output_contract, dup, merkle_root, timeout_sig_script,
+};
 
 define_pushable!();
 
-#[derive(Debug, Clone, ContractParams)]
-pub struct LeafParams {
-    pub alice_pk: bitcoin::XOnlyPublicKey,
-    pub bob_pk: bitcoin::XOnlyPublicKey,
-}
+/// The challenge timeout (blocks) for the bisection's forfait clauses.
+pub const FORFAIT_TIMEOUT: u32 = 10;
 
-/// The disputed step's commitment: the starting hash and each party's claimed
-/// ending hash. Committed on-chain as the Merkle root of the three.
-#[derive(Debug, Clone, ContractState)]
-#[commit(merkle)]
-pub struct LeafState {
-    pub h_start: [u8; 32],
-    pub h_end_alice: [u8; 32],
-    pub h_end_bob: [u8; 32],
-}
-
-contract! {
-    contract Leaf {
-        params LeafParams;
-        state LeafState;
-
-        // Alice re-runs the disputed step: <alice_sig> <x> <h_y_b>
-        clause alice_reveal {
-            args {
-                #[signer(p.alice_pk)]
-                alice_sig: Signature,
-                x: i64,
-                h_y_b: [u8; 32],
-            }
-            script Leaf::alice_reveal_script;
-        }
-
-        // Bob re-runs the disputed step: <bob_sig> <x> <h_y_a>
-        clause bob_reveal {
-            args {
-                #[signer(p.bob_pk)]
-                bob_sig: Signature,
-                x: i64,
-                h_y_a: [u8; 32],
-            }
-            script Leaf::bob_reveal_script;
-        }
-
-        tree [alice_reveal, bob_reveal];
+/// game256's step function: `f(x) = 2x`, values committed as `sha256(x)`.
+pub fn compute2x() -> Computer {
+    Computer {
+        encoder: script! { OP_SHA256 },
+        func: script! { OP_DUP OP_ADD },
+        specs: vec![ArgSpec {
+            name: "x".to_string(),
+            arg_type: Arc::new(IntType),
+        }],
     }
 }
 
-impl Leaf {
-    fn alice_reveal_script(p: &LeafParams) -> ScriptBuf {
-        script! {
-            OP_TOALTSTACK
-            { dup(1) }          // dup(len(specs)); Compute2x has one spec
-            OP_SHA256            // computer.encoder -> h_x
-            OP_TOALTSTACK
-            OP_DUP OP_ADD        // computer.func -> y = 2x
-            OP_SHA256            // computer.encoder -> h_y
-            OP_FROMALTSTACK OP_SWAP OP_FROMALTSTACK
-            { merkle_root(3) }
-            { check_input_contract(-1, None) }
-            { p.alice_pk }
-            OP_CHECKSIG
-        }
-    }
-
-    fn bob_reveal_script(p: &LeafParams) -> ScriptBuf {
-        script! {
-            OP_TOALTSTACK
-            { dup(1) }
-            OP_SHA256
-            OP_TOALTSTACK
-            OP_DUP OP_ADD
-            OP_SHA256
-            OP_FROMALTSTACK OP_SWAP OP_FROMALTSTACK OP_SWAP
-            { merkle_root(3) }
-            { check_input_contract(-1, None) }
-            { p.bob_pk }
-            OP_CHECKSIG
-        }
-    }
+/// The per-step [`Leaf`] contract: every step re-runs [`compute2x`], so the step
+/// index is ignored.
+pub fn leaf_factory(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> LeafFactory {
+    Arc::new(move |_i| Leaf::new(LeafParams { alice_pk, bob_pk }, &compute2x()))
 }
 
-// ============================================================================
-// Bisect contracts (recursive core), over any range [i, j]. The two children are
-// Leaves when the sub-range is a single step, otherwise sub-Bisect_1s; the
-// bob_reveal scripts and next_outputs branch on this. next_outputs produces the
-// disputed child (Leaf or Bisect_1) with its committed state.
-// ============================================================================
-
-use mattrs::script_helpers::{check_output_contract, drop as script_drop};
-
-#[derive(Debug, Clone, ContractParams)]
-pub struct BisectParams {
-    pub alice_pk: bitcoin::XOnlyPublicKey,
-    pub bob_pk: bitcoin::XOnlyPublicKey,
-    /// The disputed step range [i, j] (inclusive), `n = j - i + 1` a power of two.
-    pub i: i64,
-    pub j: i64,
+/// A game256 [`Leaf`] (the single disputed step).
+pub fn leaf(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> Leaf {
+    Leaf::new(LeafParams { alice_pk, bob_pk }, &compute2x())
 }
 
-impl BisectParams {
-    /// Half the range size, `m = n/2`. The children cover [i, i+m-1] and [i+m, j].
-    fn m(&self) -> i64 {
-        (self.j - self.i + 1) / 2
-    }
-
-    /// Whether the two children are single steps (Leaves) rather than sub-Bisects.
-    fn children_are_leaves(&self) -> bool {
-        self.m() == 1
-    }
-
-    fn leaf(&self) -> Leaf {
-        Leaf::new(LeafParams {
-            alice_pk: self.alice_pk,
-            bob_pk: self.bob_pk,
-        })
-    }
-
-    fn leaf_root(&self) -> [u8; 32] {
-        self.leaf().contract.taptree().root_hash()
-    }
-
-    fn child(&self, i: i64, j: i64) -> BisectParams {
-        BisectParams {
-            alice_pk: self.alice_pk,
-            bob_pk: self.bob_pk,
-            i,
-            j,
-        }
-    }
-
-    /// The taptree root of the left child (a Leaf, or Bisect_1 on [i, i+m-1]).
-    fn left_child_root(&self) -> [u8; 32] {
-        if self.children_are_leaves() {
-            self.leaf_root()
-        } else {
-            let m = self.m();
-            Bisect1::new(self.child(self.i, self.i + m - 1))
-                .contract
-                .taptree()
-                .root_hash()
-        }
-    }
-
-    /// The taptree root of the right child (a Leaf, or Bisect_1 on [i+m, j]).
-    fn right_child_root(&self) -> [u8; 32] {
-        if self.children_are_leaves() {
-            self.leaf_root()
-        } else {
-            let m = self.m();
-            Bisect1::new(self.child(self.i + m, self.j))
-                .contract
-                .taptree()
-                .root_hash()
-        }
-    }
+/// A game256 [`Bisect1`] over the given step range.
+pub fn bisect1(params: BisectParams) -> Bisect1 {
+    let lf = leaf_factory(params.alice_pk, params.bob_pk);
+    Bisect1::new(params, &lf, FORFAIT_TIMEOUT)
 }
 
-/// Bisect_1 state: {h_start, h_end_a, h_end_b, trace_a, trace_b} (commit = Merkle root).
-#[derive(Debug, Clone, ContractState)]
-#[commit(merkle)]
-pub struct Bisect1State {
-    pub h_start: [u8; 32],
-    pub h_end_a: [u8; 32],
-    pub h_end_b: [u8; 32],
-    pub trace_a: [u8; 32],
-    pub trace_b: [u8; 32],
-}
-
-/// Bisect_2 state: the Bisect_1 fields plus Alice's revealed midstate/traces.
-#[derive(Debug, Clone, ContractState)]
-#[commit(merkle)]
-pub struct Bisect2State {
-    pub h_start: [u8; 32],
-    pub h_end_a: [u8; 32],
-    pub h_end_b: [u8; 32],
-    pub trace_a: [u8; 32],
-    pub trace_b: [u8; 32],
-    pub h_mid_a: [u8; 32],
-    pub trace_left_a: [u8; 32],
-    pub trace_right_a: [u8; 32],
-}
-
-contract! {
-    contract Bisect2 {
-        params BisectParams;
-        state Bisect2State;
-
-        // Bob disputes the LEFT child: <bob_sig> <h_start> <h_end_a> <h_end_b>
-        // <trace_a> <trace_b> <h_mid_a> <trace_left_a> <trace_right_a>
-        // <h_mid_b> <trace_left_b> <trace_right_b>
-        clause bob_reveal_left {
-            args {
-                #[signer(p.bob_pk)]
-                bob_sig: Signature,
-                h_start: [u8; 32],
-                h_end_a: [u8; 32],
-                h_end_b: [u8; 32],
-                trace_a: [u8; 32],
-                trace_b: [u8; 32],
-                h_mid_a: [u8; 32],
-                trace_left_a: [u8; 32],
-                trace_right_a: [u8; 32],
-                h_mid_b: [u8; 32],
-                trace_left_b: [u8; 32],
-                trace_right_b: [u8; 32],
-            }
-            script Bisect2::bob_reveal_left_script;
-            next(p, a) {
-                if p.children_are_leaves() {
-                    Ok(vec![ClauseOutput::at_same_index()
-                        .to(p.leaf().as_erased())
-                        .with_state(&LeafState {
-                            h_start: a.h_start,
-                            h_end_alice: a.h_mid_a,
-                            h_end_bob: a.h_mid_b,
-                        })
-                        .preserve_amount()
-                        .build()])
-                } else {
-                    let m = p.m();
-                    Ok(vec![ClauseOutput::at_same_index()
-                        .to(Bisect1::new(p.child(p.i, p.i + m - 1)).as_erased())
-                        .with_state(&Bisect1State {
-                            h_start: a.h_start,
-                            h_end_a: a.h_mid_a,
-                            h_end_b: a.h_mid_b,
-                            trace_a: a.trace_left_a,
-                            trace_b: a.trace_left_b,
-                        })
-                        .preserve_amount()
-                        .build()])
-                }
-            }
-        }
-        // Bob disputes the RIGHT child (same witness layout).
-        clause bob_reveal_right {
-            args {
-                #[signer(p.bob_pk)]
-                bob_sig: Signature,
-                h_start: [u8; 32],
-                h_end_a: [u8; 32],
-                h_end_b: [u8; 32],
-                trace_a: [u8; 32],
-                trace_b: [u8; 32],
-                h_mid_a: [u8; 32],
-                trace_left_a: [u8; 32],
-                trace_right_a: [u8; 32],
-                h_mid_b: [u8; 32],
-                trace_left_b: [u8; 32],
-                trace_right_b: [u8; 32],
-            }
-            script Bisect2::bob_reveal_right_script;
-            next(p, a) {
-                if p.children_are_leaves() {
-                    Ok(vec![ClauseOutput::at_same_index()
-                        .to(p.leaf().as_erased())
-                        .with_state(&LeafState {
-                            h_start: a.h_mid_a,
-                            h_end_alice: a.h_end_a,
-                            h_end_bob: a.h_end_b,
-                        })
-                        .preserve_amount()
-                        .build()])
-                } else {
-                    let m = p.m();
-                    Ok(vec![ClauseOutput::at_same_index()
-                        .to(Bisect1::new(p.child(p.i + m, p.j)).as_erased())
-                        .with_state(&Bisect1State {
-                            h_start: a.h_mid_a,
-                            h_end_a: a.h_end_a,
-                            h_end_b: a.h_end_b,
-                            trace_a: a.trace_right_a,
-                            trace_b: a.trace_right_b,
-                        })
-                        .preserve_amount()
-                        .build()])
-                }
-            }
-        }
-        // Alice can claim the pot if Bob abandons the challenge.
-        clause forfait {
-            args {
-                #[signer(p.alice_pk)]
-                alice_sig: Signature,
-            }
-            script Bisect2::forfait_script;
-        }
-
-        tree [[bob_reveal_left, bob_reveal_right], forfait];
-    }
-}
-
-impl Bisect2 {
-    fn bob_reveal_left_script(p: &BisectParams) -> ScriptBuf {
-        // The output construction differs when the child is a Leaf vs a sub-Bisect_1:
-        // it pushes its state fields (3 vs 5) then commits to the child's root.
-        let (picks, encoder, child_root) = if p.children_are_leaves() {
-            (
-                script! { 10 OP_PICK 6 OP_PICK 4 OP_PICK },
-                merkle_root(3),
-                p.leaf_root(),
-            )
-        } else {
-            (
-                script! { 10 OP_PICK 6 OP_PICK 4 OP_PICK 7 OP_PICK 5 OP_PICK },
-                merkle_root(5),
-                p.left_child_root(),
-            )
-        };
-        script! {
-            OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
-            { dup(8) }
-            { merkle_root(8) }
-            { check_input_contract(-1, None) }
-            OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
-            // t_{i,j;b} = H(h_i || h_{j+1;b} || t_left_b || t_right_b)
-            10 OP_PICK 9 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
-            7 OP_PICK OP_EQUALVERIFY
-            // h_mid_a != h_mid_b (Bob iterates on the LEFT child)
-            5 OP_PICK 3 OP_PICK OP_EQUAL OP_NOT OP_VERIFY
-            { picks }
-            { encoder }
-            { check_output_contract(child_root, -1, None) }
-            { script_drop(11) }
-            { p.bob_pk }
-            OP_CHECKSIG
-        }
-    }
-
-    fn bob_reveal_right_script(p: &BisectParams) -> ScriptBuf {
-        let (picks, encoder, child_root) = if p.children_are_leaves() {
-            (
-                script! { 5 OP_PICK 10 OP_PICK 10 OP_PICK },
-                merkle_root(3),
-                p.leaf_root(),
-            )
-        } else {
-            (
-                script! { 5 OP_PICK 10 OP_PICK 10 OP_PICK 6 OP_PICK 4 OP_PICK },
-                merkle_root(5),
-                p.right_child_root(),
-            )
-        };
-        script! {
-            OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
-            { dup(8) }
-            { merkle_root(8) }
-            { check_input_contract(-1, None) }
-            OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
-            10 OP_PICK 9 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
-            7 OP_PICK OP_EQUALVERIFY
-            // h_mid_a == h_mid_b (Bob iterates on the RIGHT child)
-            5 OP_PICK 3 OP_PICK OP_EQUALVERIFY
-            { picks }
-            { encoder }
-            { check_output_contract(child_root, -1, None) }
-            { script_drop(11) }
-            { p.bob_pk }
-            OP_CHECKSIG
-        }
-    }
-
-    fn forfait_script(p: &BisectParams) -> ScriptBuf {
-        timeout_sig_script(10, p.alice_pk)
-    }
-}
-
-contract! {
-    contract Bisect1 {
-        params BisectParams;
-        state Bisect1State;
-
-        // Alice reveals the midstate and child traces: <alice_sig> <h_start>
-        // <h_end_a> <h_end_b> <trace_a> <trace_b> <h_mid_a> <trace_left_a>
-        // <trace_right_a>
-        clause alice_reveal {
-            args {
-                #[signer(p.alice_pk)]
-                alice_sig: Signature,
-                h_start: [u8; 32],
-                h_end_a: [u8; 32],
-                h_end_b: [u8; 32],
-                trace_a: [u8; 32],
-                trace_b: [u8; 32],
-                h_mid_a: [u8; 32],
-                trace_left_a: [u8; 32],
-                trace_right_a: [u8; 32],
-            }
-            script Bisect1::alice_reveal_script;
-            next(p, a) {
-                Ok(vec![ClauseOutput::at_same_index()
-                    .to(Bisect2::new(p.clone()).as_erased())
-                    .with_state(&Bisect2State {
-                        h_start: a.h_start,
-                        h_end_a: a.h_end_a,
-                        h_end_b: a.h_end_b,
-                        trace_a: a.trace_a,
-                        trace_b: a.trace_b,
-                        h_mid_a: a.h_mid_a,
-                        trace_left_a: a.trace_left_a,
-                        trace_right_a: a.trace_right_a,
-                    })
-                    .preserve_amount()
-                    .build()])
-            }
-        }
-        // Bob can claim the pot if Alice abandons the challenge.
-        clause forfait {
-            args {
-                #[signer(p.bob_pk)]
-                bob_sig: Signature,
-            }
-            script Bisect1::forfait_script;
-        }
-
-        tree [alice_reveal, forfait];
-    }
-}
-
-impl Bisect1 {
-    fn bisect2_root(p: &BisectParams) -> [u8; 32] {
-        Bisect2::new(p.clone()).contract.taptree().root_hash()
-    }
-
-    fn alice_reveal_script(p: &BisectParams) -> ScriptBuf {
-        script! {
-            OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
-            { dup(5) }
-            { merkle_root(5) }
-            { check_input_contract(-1, None) }
-            OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
-            // t_{i,j;a} = H(h_i || h_{j+1;a} || t_left_a || t_right_a)
-            7 OP_PICK 7 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
-            5 OP_PICK OP_EQUALVERIFY
-            // output: the top 8 elements -> Bisect_2
-            { merkle_root(8) }
-            { check_output_contract(Self::bisect2_root(p), -1, None) }
-            { p.alice_pk }
-            OP_CHECKSIG
-        }
-    }
-
-    fn forfait_script(p: &BisectParams) -> ScriptBuf {
-        timeout_sig_script(10, p.bob_pk)
-    }
+/// A game256 [`Bisect2`] over the given step range.
+pub fn bisect2(params: BisectParams) -> Bisect2 {
+    let lf = leaf_factory(params.alice_pk, params.bob_pk);
+    Bisect2::new(params, &lf, FORFAIT_TIMEOUT)
 }
 
 // ============================================================================
@@ -481,11 +83,7 @@ impl Bisect1 {
 // G256S0: Bob picks the input x, committing to G256S1.
 // G256S1: Alice reveals y = f^n(x), committing to G256S2.
 // G256S2: Alice can withdraw after a timeout, or Bob starts a challenge, which
-//         hands off to Bisect_1(0, 7) — the 8-step fraud proof ported above.
-//
-// As with the Bisect contracts this ports the byte-exact taptrees; clauses are
-// terminal with signer-carrying args, and next_outputs / spendability are
-// follow-ups.
+//         hands off to Bisect_1(0, 7) — the 8-step fraud proof.
 // ============================================================================
 
 #[derive(Debug, Clone, ContractParams)]
@@ -645,7 +243,7 @@ contract! {
             next(p, a) {
                 let commit = mattrs::script_utils::commit_int;
                 Ok(vec![ClauseOutput::at_same_index()
-                    .to(Bisect1::new(p.bisect()).as_erased())
+                    .to(bisect1(p.bisect()).as_erased())
                     .with_state(&Bisect1State {
                         h_start: commit(a.x),
                         h_end_a: commit(a.y),
@@ -664,11 +262,11 @@ contract! {
 
 impl G256S2 {
     fn withdraw_script(p: &G256Params) -> ScriptBuf {
-        timeout_sig_script(10, p.alice_pk)
+        timeout_sig_script(FORFAIT_TIMEOUT, p.alice_pk)
     }
 
     fn start_challenge_script(p: &G256Params) -> ScriptBuf {
-        let bisect_root = Bisect1::new(p.bisect()).contract.taptree().root_hash();
+        let bisect_root = bisect1(p.bisect()).contract.taptree().root_hash();
         script! {
             OP_TOALTSTACK
             // y != z

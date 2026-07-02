@@ -397,6 +397,25 @@ pub trait ClauseArgs: Debug + Clone + Send + Sync {
         Self: Sized;
 }
 
+/// Raw, untyped clause arguments: the witness stack itself.
+///
+/// For clauses whose argument layout is only known at runtime — e.g. the generic
+/// fraud-proof [`Leaf`](crate::fraud::Leaf), whose arguments depend on a
+/// [`Computer`](crate::fraud::Computer)'s specs. The clause's `arg_specs` still
+/// describe the layout, so the manager can locate signature slots.
+#[derive(Debug, Clone)]
+pub struct RawArgs(pub Vec<Vec<u8>>);
+
+impl ClauseArgs for RawArgs {
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        self.0.clone()
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
+        Ok(RawArgs(witness.to_vec()))
+    }
+}
+
 // Implement ContractParams/ContractState for () to support stateless, paramless
 // contracts (e.g. terminal clauses that never compute next outputs).
 impl ContractParams for () {
