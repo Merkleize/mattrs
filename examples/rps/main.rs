@@ -31,13 +31,12 @@ mod contracts;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::str::FromStr;
 
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
-use bitcoincore_rpc::{Auth, Client};
+use bitcoincore_rpc::Client;
 use mattrs::contracts::ClauseArgs;
 use mattrs::manager::{ContractManager, InstanceHandle, ManagerError};
 use mattrs::signer::HotSigner;
@@ -93,29 +92,9 @@ fn wait_for_spend_forever(
     }
 }
 
-/// RPC client for the local regtest node (cookie auth by default; the
-/// `BITCOIN_RPC_URL` / `BITCOIN_RPC_USER` / `BITCOIN_RPC_PASSWORD` /
-/// `BITCOIN_RPC_COOKIE` environment variables override).
+/// RPC client for the local regtest node (see `mattrs::manager::regtest_rpc_client`).
 fn rpc_client(wallet_name: &str) -> Client {
-    let rpc_url =
-        std::env::var("BITCOIN_RPC_URL").unwrap_or_else(|_| "http://localhost:18443".to_string());
-    let rpc_url_full = format!("{}/wallet/{}", rpc_url, wallet_name);
-    let auth = match (
-        std::env::var("BITCOIN_RPC_USER"),
-        std::env::var("BITCOIN_RPC_PASSWORD"),
-    ) {
-        (Ok(user), Ok(password)) => Auth::UserPass(user, password),
-        _ => {
-            let cookie = std::env::var("BITCOIN_RPC_COOKIE")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").expect("HOME not set");
-                    PathBuf::from(home).join(".bitcoin/regtest/.cookie")
-                });
-            Auth::CookieFile(cookie)
-        }
-    };
-    Client::new(&rpc_url_full, auth).expect("Failed to create RPC client")
+    mattrs::manager::regtest_rpc_client(wallet_name)
 }
 
 fn xonly(xpriv: &Xpriv) -> XOnlyPublicKey {

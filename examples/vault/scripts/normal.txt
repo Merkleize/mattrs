@@ -1,0 +1,9 @@
+# Fund a vault, unvault it towards two destinations, withdraw after the delay.
+fund 100000
+list
+trigger 0 bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437:60000 bcrt1qpnpjyzkfe7n5eppp2ktwpvuxfw5qfn2zjdum83:40000
+list
+# let the spend_delay expire
+mine 10
+withdraw 1
+printall

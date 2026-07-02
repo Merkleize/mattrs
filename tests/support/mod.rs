@@ -17,5 +17,8 @@ pub mod ram;
 pub mod rps;
 #[allow(dead_code)]
 pub mod testkit;
+// The vault contract lives with its REPL demo (examples/vault/); the tests
+// compile the same single source.
 #[allow(dead_code)]
+#[path = "../../examples/vault/contracts.rs"]
 pub mod vault;

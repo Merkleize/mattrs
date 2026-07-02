@@ -1,0 +1,6 @@
+# Trigger a vault, then sweep the unvaulting to the recovery key
+# (e.g. after noticing a trigger you did not authorize).
+fund 100000
+trigger 0 bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437:100000
+recover 1
+printall

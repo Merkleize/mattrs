@@ -894,6 +894,40 @@ impl<'a> ContractManager<'a> {
     }
 }
 
+/// An RPC client for a local regtest node, for tests, examples and demos. The
+/// `wallet_name` wallet must be already loaded and funded.
+///
+/// # Environment variables
+///
+/// - `BITCOIN_RPC_URL`: the node's URL (default `http://localhost:18443`).
+/// - `BITCOIN_RPC_USER` / `BITCOIN_RPC_PASSWORD`: RPC credentials. When unset,
+///   falls back to cookie authentication with `BITCOIN_RPC_COOKIE` (default
+///   `~/.bitcoin/regtest/.cookie`) — a stock regtest `bitcoind` works with no
+///   configuration at all.
+pub fn regtest_rpc_client(wallet_name: &str) -> Client {
+    let rpc_url =
+        std::env::var("BITCOIN_RPC_URL").unwrap_or_else(|_| "http://localhost:18443".to_string());
+    let rpc_url_full = format!("{}/wallet/{}", rpc_url, wallet_name);
+
+    let auth = match (
+        std::env::var("BITCOIN_RPC_USER"),
+        std::env::var("BITCOIN_RPC_PASSWORD"),
+    ) {
+        (Ok(user), Ok(password)) => bitcoincore_rpc::Auth::UserPass(user, password),
+        _ => {
+            let cookie = std::env::var("BITCOIN_RPC_COOKIE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| {
+                    let home = std::env::var("HOME").expect("HOME not set");
+                    std::path::PathBuf::from(home).join(".bitcoin/regtest/.cookie")
+                });
+            bitcoincore_rpc::Auth::CookieFile(cookie)
+        }
+    };
+
+    Client::new(&rpc_url_full, auth).expect("Failed to create RPC client")
+}
+
 /// Split a taproot script-path witness into its clause arguments and the leaf
 /// script, dropping the annex (if present) and the control block.
 fn parse_script_path_witness(
@@ -963,6 +997,11 @@ impl InstanceHandle {
         self.instance.borrow().outpoint()
     }
 
+    /// The UTXO this instance controls (its funding output), once funded.
+    pub fn prevout(&self) -> Option<TxOut> {
+        self.instance.borrow().prevout()
+    }
+
     /// The `TypeId` of the underlying contract (for typed-handle conversions).
     pub fn contract_type_id(&self) -> std::any::TypeId {
         self.instance.borrow().contract().contract_type_id()
@@ -971,6 +1010,11 @@ impl InstanceHandle {
     /// The name of the clause that spent this instance (None until spent).
     pub fn clause_name(&self) -> Option<String> {
         self.instance.borrow().clause_name().map(str::to_string)
+    }
+
+    /// Transaction ID that spent this instance (None until spent).
+    pub fn spent_in_tx(&self) -> Option<Txid> {
+        self.instance.borrow().spent_in_tx()
     }
 
     /// The witness arguments of the spend, in witness order (None until spent).

@@ -1,0 +1,10 @@
+# Unvault three vaults at once, withdrawing 250k of the 300k total;
+# the remaining 50k is revaulted into a fresh vault in the same transaction.
+fund 100000
+fund 100000
+fund 100000
+trigger 0,1,2 bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437:250000
+list
+mine 10
+withdraw 4
+printall

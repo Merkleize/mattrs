@@ -119,7 +119,7 @@ Signatures are never hand-built: a `#[signer]` field stays in the `*Args` struct
 `.sign(..)` fills it by matching the clause's required pubkey — or the spend fails
 with `MissingSigner`.
 
-A complete worked example (a two-stage vault) lives in `tests/support/vault.rs`.
+A complete worked example (a two-stage vault) lives in `examples/vault/contracts.rs`.
 
 ## Fraud proofs: `mattrs::fraud`
 
@@ -152,7 +152,7 @@ The examples from the Python reference framework (`pymatt`) are ported under
 
 | Example | Demonstrates | Status |
 | --- | --- | --- |
-| **vault** (`vault.rs`) | two-stage vault; CCV + CTV; augmented state; multi-input trigger-with-revault | address matches; spendable (regtest e2e) |
+| **vault** (`examples/vault/contracts.rs`) | two-stage vault; CCV + CTV; augmented state; multi-input trigger-with-revault | address matches; regtest e2e; interactive REPL |
 | **rps** (`examples/rps/contracts.rs`) | hashed state; clause-owned **CTV templates** for payouts; `check_in/out_contract` | roots match; regtest e2e; two-player demo |
 | **ram** (`ram.rs`) | a Merkle-committed cell vector; the `WitProof<N>` witness arg; **expanded state** | root matches; `write` spends |
 | **game256** (`game256.rs`) | the **bisection fraud proof** (`mattrs::fraud`) driven by the `G256S0/1/2` game stages | all taptrees match; the full state machine spends |
@@ -164,13 +164,16 @@ generic fraud-proof contracts (`mattrs::fraud`), a data `MerkleTree` /
 `check_output_contract` / `older` / `timeout_sig_script` script fragments
 (`mattrs::script_helpers`), plus `commit_int` (`mattrs::script_utils`).
 
-## Two-player demo
+## Demos
 
-`examples/rps/` plays a Rock-Paper-Scissors game between two *separate
-processes*, negotiated over a TCP socket and played entirely on-chain: Alice
-funds the game behind a hiding move commitment, Bob reveals his move with a
-typed spend, and each side follows the other's turn with chain observation.
-Against a regtest node with a funded `testwallet`, in two terminals:
+Both demos run against a regtest node with a funded `testwallet` (cookie auth
+or `BITCOIN_RPC_*` env vars).
+
+**Two-player RPS** (`examples/rps/`) plays a Rock-Paper-Scissors game between
+two *separate processes*, negotiated over a TCP socket and played entirely
+on-chain: Alice funds the game behind a hiding move commitment, Bob reveals his
+move with a typed spend, and each side follows the other's turn with chain
+observation. In two terminals:
 
 ```sh
 cargo run --example rps -- --alice --rock
@@ -179,6 +182,17 @@ cargo run --example rps -- --bob --paper
 
 Omit the move flag to play a random move; `--addr host:port` and
 `--wallet name` override the defaults.
+
+**Vault REPL** (`examples/vault/`) drives the two-stage vault interactively:
+fund vaults, trigger several at once towards a CTV withdrawal template (with
+the leftover revaulted in the same transaction), then `withdraw` after the
+timelock — or `recover` to sweep to the recovery key at any time. Sample
+scripts live in `examples/vault/scripts/`:
+
+```sh
+cargo run --example vault                                    # interactive
+cargo run --example vault -- --script examples/vault/scripts/revault.txt
+```
 
 ## Spend-API features
 

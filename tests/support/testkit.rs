@@ -6,7 +6,6 @@
 //! `regtest_client` against a real regtest `bitcoind` instead.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -56,38 +55,10 @@ pub fn offline_client() -> Client {
     Client::new("http://127.0.0.1:1", Auth::None).unwrap()
 }
 
-/// An RPC client for the local regtest node, used by the `#[ignore]`d e2e tests.
-/// The `wallet_name` wallet must be already loaded and funded.
-///
-/// # Environment variables
-///
-/// - `BITCOIN_RPC_URL`: the node's URL (default `http://localhost:18443`).
-/// - `BITCOIN_RPC_USER` / `BITCOIN_RPC_PASSWORD`: RPC credentials. When unset,
-///   falls back to cookie authentication with `BITCOIN_RPC_COOKIE` (default
-///   `~/.bitcoin/regtest/.cookie`) — a stock regtest `bitcoind` works with no
-///   configuration at all.
+/// An RPC client for the local regtest node, used by the `#[ignore]`d e2e
+/// tests (see [`mattrs::manager::regtest_rpc_client`] for the auth rules).
 pub fn regtest_client(wallet_name: &str) -> Client {
-    let rpc_url =
-        std::env::var("BITCOIN_RPC_URL").unwrap_or_else(|_| "http://localhost:18443".to_string());
-    let rpc_url_full = format!("{}/wallet/{}", rpc_url, wallet_name);
-
-    let auth = match (
-        std::env::var("BITCOIN_RPC_USER"),
-        std::env::var("BITCOIN_RPC_PASSWORD"),
-    ) {
-        (Ok(user), Ok(password)) => Auth::UserPass(user, password),
-        _ => {
-            let cookie = std::env::var("BITCOIN_RPC_COOKIE")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").expect("HOME not set");
-                    PathBuf::from(home).join(".bitcoin/regtest/.cookie")
-                });
-            Auth::CookieFile(cookie)
-        }
-    };
-
-    Client::new(&rpc_url_full, auth).expect("Failed to create RPC client")
+    mattrs::manager::regtest_rpc_client(wallet_name)
 }
 
 /// Fake a funded instance of `contract` (optionally carrying `expanded` logical
