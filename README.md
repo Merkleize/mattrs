@@ -172,6 +172,12 @@ generic fraud-proof contracts (`mattrs::fraud`), a data `MerkleTree` /
   instances' outputs by index (pymatt's `get_spend_tx` semantics).
 - **Expanded state** — an instance can carry logical state richer than its on-chain
   commitment (e.g. RAM's cells vs their Merkle root), recovered by `next_outputs`.
+- **Chain observation** — follow a covenant driven by someone else:
+  `track_instance(..)` registers an externally funded instance, and
+  `wait_for_spend(..)` (mempool + block scan; or the RPC-free
+  `observe_spend(..)`) decodes the spending witness back into the clause and its
+  typed arguments and materializes the child instances
+  (see `tests/test_observe.rs`).
 
 ## Testing
 

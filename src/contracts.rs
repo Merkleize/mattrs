@@ -1612,8 +1612,17 @@ pub struct ContractInstance {
     /// Transaction ID that spent this instance (None until spent).
     spent_in_tx: Option<Txid>,
 
+    /// The input index of the spending transaction that consumed this instance
+    /// (None until spent).
+    spending_vin: Option<usize>,
+
     /// Name of the clause used to spend this instance (None until spent).
     clause_name: Option<String>,
+
+    /// The clause's witness arguments used by the spend (the witness stack minus
+    /// the tapscript/control block), in witness order (None until spent). Decode
+    /// them with the clause's typed `*Args` struct.
+    spending_args: Option<Vec<Vec<u8>>>,
 
     /// Child instances created when this instance was spent.
     outputs: Vec<Rc<RefCell<ContractInstance>>>,
@@ -1630,7 +1639,9 @@ impl ContractInstance {
             funding_tx: None,
             status: InstanceStatus::Unfunded,
             spent_in_tx: None,
+            spending_vin: None,
             clause_name: None,
+            spending_args: None,
             outputs: Vec::new(),
         }
     }
@@ -1681,9 +1692,22 @@ impl ContractInstance {
         self.spent_in_tx
     }
 
+    /// The input index of the spending transaction that consumed this instance
+    /// (None until spent).
+    pub fn spending_vin(&self) -> Option<usize> {
+        self.spending_vin
+    }
+
     /// Name of the clause used to spend this instance (None until spent).
     pub fn clause_name(&self) -> Option<&str> {
         self.clause_name.as_deref()
+    }
+
+    /// The clause's witness arguments used by the spend, in witness order (None
+    /// until spent). Decode them with the clause's typed `*Args` struct
+    /// ([`ClauseArgs::decode_from_witness`]).
+    pub fn spending_args(&self) -> Option<&[Vec<u8>]> {
+        self.spending_args.as_deref()
     }
 
     /// Child instances created when this instance was spent.
@@ -1698,10 +1722,19 @@ impl ContractInstance {
         self.status = InstanceStatus::Funded;
     }
 
-    /// Mark the instance as spent with the given transaction and clause.
-    pub fn mark_spent(&mut self, txid: Txid, clause_name: String) {
+    /// Mark the instance as spent: by which transaction (and input index within
+    /// it), through which clause, and with which witness arguments.
+    pub fn mark_spent(
+        &mut self,
+        txid: Txid,
+        vin: usize,
+        clause_name: String,
+        spending_args: Vec<Vec<u8>>,
+    ) {
         self.spent_in_tx = Some(txid);
+        self.spending_vin = Some(vin);
         self.clause_name = Some(clause_name);
+        self.spending_args = Some(spending_args);
         self.status = InstanceStatus::Spent;
     }
 

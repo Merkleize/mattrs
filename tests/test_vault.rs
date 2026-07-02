@@ -366,3 +366,69 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+#[test]
+fn test_observe_spend_decodes_clause_and_children() {
+    // An observer with its own view of the same funded instance decodes a
+    // spending transaction it did not build: clause identified from the
+    // tapscript, witness args recorded (and typed-decodable), and the child
+    // instance materialized with its logical state. No node involved.
+    use mattrs::contracts::ClauseArgs;
+    use mattrs::signer::HotSigner;
+    use support::testkit::{alice_xpriv, fund_fake, offline_client};
+    use support::vault::VaultTriggerArgs;
+
+    let params = VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    };
+    let vault = Vault::new(params.clone());
+    let ctv_hash = [0xabu8; 32];
+
+    // The actor builds (but does not broadcast) a trigger spend.
+    let actor_client = offline_client();
+    let actor_manager = ContractManager::new(&actor_client);
+    let actor_handle = support::vault::VaultHandle(fund_fake(vault.as_erased(), None, 100_000, 7));
+    let tx = actor_handle
+        .trigger(ctv_hash, 0)
+        .sign(HotSigner::new(alice_xpriv()))
+        .build_tx(&actor_manager)
+        .unwrap();
+
+    // The observer holds its own instance of the same (deterministic) funding.
+    let observer_client = offline_client();
+    let mut observer = ContractManager::new(&observer_client);
+    let observed = fund_fake(vault.as_erased(), None, 100_000, 7);
+
+    let children = observer.observe_spend(&observed, &tx).unwrap();
+
+    // The spend is decoded: clause, typed args, and status.
+    assert_eq!(observed.status(), InstanceStatus::Spent);
+    assert_eq!(observed.clause_name().as_deref(), Some("trigger"));
+    let args =
+        VaultTriggerArgs::decode_from_witness(&observed.spending_args().unwrap()).unwrap();
+    assert_eq!(args.ctv_hash, ctv_hash);
+    assert_eq!(args.out_i, 0);
+    assert!(!args.sig.is_empty());
+
+    // The child is the Unvaulting instance, carrying the ctv_hash as its state.
+    assert_eq!(children.len(), 1);
+    let unvaulting: UnvaultingHandle = children[0].clone().try_into().unwrap();
+    assert_eq!(
+        unvaulting.handle().state::<UnvaultingState>().unwrap().ctv_hash,
+        ctv_hash
+    );
+    assert_eq!(observed.outputs().len(), 1);
+
+    // Re-observing the same transaction is idempotent.
+    let again = observer.observe_spend(&observed, &tx).unwrap();
+    assert_eq!(again.len(), 1);
+    assert_eq!(observer_instances_count(&observed), 1);
+}
+
+/// The parent's recorded children (used to check no duplicates were created).
+fn observer_instances_count(handle: &mattrs::manager::InstanceHandle) -> usize {
+    handle.outputs().len()
+}

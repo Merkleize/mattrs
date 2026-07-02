@@ -7,6 +7,13 @@
 //! typed arguments (already encoded to a witness stack), signers are registered by
 //! public key, and `exec`/`exec_one`/`exec_none` build, sign, broadcast and
 //! materialize the resulting child instances.
+//!
+//! Covenants driven by *someone else* are followed with chain observation:
+//! [`ContractManager::track_instance`] registers an externally funded instance,
+//! and [`ContractManager::wait_for_spend`] (or the RPC-free
+//! [`ContractManager::observe_spend`]) detects its spend, decodes the witness
+//! back into the clause and its arguments, and materializes the child instances
+//! — so both parties of a protocol hold the same view of the contract's state.
 
 use std::{
     cell::RefCell,
@@ -30,6 +37,10 @@ use crate::{
 /// Type alias for a map of signers keyed by public key.
 pub type SignerMap = HashMap<XOnlyPublicKey, Box<dyn Signer>>;
 
+/// How many 100ms polls [`ContractManager::wait_for_spend`] performs before
+/// giving up (30 seconds).
+const POLL_ATTEMPTS: usize = 300;
+
 /// Error type for manager operations.
 #[derive(Debug)]
 pub enum ManagerError {
@@ -49,6 +60,11 @@ pub enum ManagerError {
     NonContiguousOutputs { missing_index: u32 },
     /// Deducted output amounts exceed the input amount.
     DeductExceedsInput,
+    /// An observed spending transaction could not be decoded back into a clause
+    /// (key-path spend, unknown tapscript, or a witness/spec mismatch).
+    UnrecognizedSpend(String),
+    /// No transaction spending this outpoint was found within the polling window.
+    SpendNotFound(OutPoint),
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
@@ -81,6 +97,12 @@ impl std::fmt::Display for ManagerError {
             ),
             ManagerError::DeductExceedsInput => {
                 write!(f, "Deducted output amounts exceed the input amount")
+            }
+            ManagerError::UnrecognizedSpend(msg) => {
+                write!(f, "Cannot decode the observed spend: {}", msg)
+            }
+            ManagerError::SpendNotFound(outpoint) => {
+                write!(f, "No transaction spending {} found while polling", outpoint)
             }
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
@@ -217,21 +239,20 @@ impl<'a> ContractManager<'a> {
         let txid = self.rpc.send_raw_transaction(&tx)?;
 
         // Mark the spent instance
-        builder
-            .instance
-            .borrow_mut()
-            .mark_spent(txid, builder.clause_name.to_string());
+        builder.instance.borrow_mut().mark_spent(
+            txid,
+            0,
+            builder.clause_name.to_string(),
+            builder.witness_args.clone(),
+        );
 
         // Materialize children (a CTV template spend is terminal).
-        let child_instances = match next {
+        let child_instances = match &next {
             NextOutputs::Contracts(outputs) => {
-                self.create_output_instances(&builder.instance, outputs)?
+                self.materialize_outputs(&builder.instance, outputs, &tx, 0)?
             }
             NextOutputs::Template(_) => Vec::new(),
         };
-        for child in &child_instances {
-            builder.instance.borrow_mut().add_output(child.clone());
-        }
 
         Ok(child_instances
             .into_iter()
@@ -261,40 +282,30 @@ impl<'a> ContractManager<'a> {
         let (tx, nexts) = self.assemble(&builders)?;
 
         let txid = self.rpc.send_raw_transaction(&tx)?;
-        for builder in &builders {
-            builder
-                .instance
-                .borrow_mut()
-                .mark_spent(txid, builder.clause_name.to_string());
+        for (vin, builder) in builders.iter().enumerate() {
+            builder.instance.borrow_mut().mark_spent(
+                txid,
+                vin,
+                builder.clause_name.to_string(),
+                builder.witness_args.clone(),
+            );
         }
 
-        let spending_tx = self.wait_for_transaction(txid)?;
-
-        // One child instance per unique merged output index that carries a contract.
-        let mut by_index: BTreeMap<u32, ClauseOutput> = BTreeMap::new();
-        for (input_index, next) in nexts.iter().enumerate() {
-            if let NextOutputs::Contracts(clause_outputs) = next {
-                for clause_output in clause_outputs {
-                    let idx = match clause_output.index {
-                        OutputIndex::Same => input_index as u32,
-                        OutputIndex::Explicit(n) => n,
-                    };
-                    by_index.entry(idx).or_insert_with(|| clause_output.clone());
+        // Materialize the children; outputs merged across inputs (a shared
+        // `PreserveOutput` index) yield one child instance, linked to each parent.
+        let mut handles = Vec::new();
+        for (vin, (builder, next)) in builders.iter().zip(&nexts).enumerate() {
+            if let NextOutputs::Contracts(outputs) = next {
+                let children = self.materialize_outputs(&builder.instance, outputs, &tx, vin)?;
+                for child in children {
+                    if !handles
+                        .iter()
+                        .any(|h: &InstanceHandle| Rc::ptr_eq(&h.instance, &child))
+                    {
+                        handles.push(InstanceHandle { instance: child });
+                    }
                 }
             }
-        }
-
-        let mut handles = Vec::new();
-        for (idx, clause_output) in by_index {
-            let instance = Rc::new(RefCell::new(ContractInstance::new(
-                clause_output.next_contract.clone(),
-                clause_output.next_state.clone(),
-            )));
-            instance
-                .borrow_mut()
-                .mark_funded(OutPoint { txid, vout: idx }, spending_tx.clone());
-            self.instances.push(instance.clone());
-            handles.push(InstanceHandle { instance });
         }
 
         Ok(handles)
@@ -587,54 +598,322 @@ impl<'a> ContractManager<'a> {
         Ok(bitcoin::Witness::from_slice(&witness_stack))
     }
 
-    fn create_output_instances(
+    /// A managed instance funded at `outpoint`, if any. Used to deduplicate
+    /// children when several parents' clause outputs merge into one transaction
+    /// output (each parent then links to the same child instance).
+    fn find_instance_by_outpoint(&self, outpoint: OutPoint) -> Option<Rc<RefCell<ContractInstance>>> {
+        self.instances
+            .iter()
+            .find(|inst| inst.borrow().outpoint() == Some(outpoint))
+            .cloned()
+    }
+
+    /// Materialize (and register) the child instances a spent parent's clause
+    /// outputs define, linking them to the parent. `vin` is the parent's input
+    /// index within `spending_tx` (which resolves [`OutputIndex::Same`]). A child
+    /// already materialized at the same outpoint — e.g. a batch output merged
+    /// across inputs — is reused, not duplicated.
+    fn materialize_outputs(
         &mut self,
         parent: &Rc<RefCell<ContractInstance>>,
-        outputs: Vec<ClauseOutput>,
+        outputs: &[ClauseOutput],
+        spending_tx: &Transaction,
+        vin: usize,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, ManagerError> {
-        let mut instances = Vec::new();
+        let txid = spending_tx.compute_txid();
+        let mut children = Vec::new();
 
-        // Get parent's transaction info
-        let parent_ref = parent.borrow();
-        let parent_txid = parent_ref
-            .spent_in_tx()
-            .ok_or_else(|| ManagerError::InvalidInstance("Parent not spent yet".to_string()))?;
-        drop(parent_ref);
-
-        // Wait for the spending transaction
-        let spending_tx = self.wait_for_transaction(parent_txid)?;
-
-        // Create instances for each output
-        for clause_out in outputs.iter() {
+        for clause_out in outputs {
             let vout = match clause_out.index {
-                // `Same` means "same as the spending input's index"; this path is
-                // only reached from single-input spends, whose input index is 0
-                // (matching how the transaction's outputs were derived).
-                OutputIndex::Same => 0,
+                OutputIndex::Same => vin as u32,
                 OutputIndex::Explicit(n) => n,
             };
+            let outpoint = OutPoint { txid, vout };
 
-            // The child contract is self-describing, so its params come from it;
-            // it also carries the logical state for its own future spends.
-            let instance = Rc::new(RefCell::new(ContractInstance::new(
-                clause_out.next_contract.clone(),
-                clause_out.next_state.clone(),
-            )));
-
-            let outpoint = OutPoint {
-                txid: parent_txid,
-                vout,
+            let child = match self.find_instance_by_outpoint(outpoint) {
+                Some(existing) => existing,
+                None => {
+                    // The child contract is self-describing, so its params come
+                    // from it; it also carries the logical state for its own
+                    // future spends.
+                    let instance = Rc::new(RefCell::new(ContractInstance::new(
+                        clause_out.next_contract.clone(),
+                        clause_out.next_state.clone(),
+                    )));
+                    instance
+                        .borrow_mut()
+                        .mark_funded(outpoint, spending_tx.clone());
+                    self.instances.push(instance.clone());
+                    instance
+                }
             };
-            instance
-                .borrow_mut()
-                .mark_funded(outpoint, spending_tx.clone());
 
-            self.instances.push(instance.clone());
-            instances.push(instance);
+            parent.borrow_mut().add_output(child.clone());
+            children.push(child);
         }
 
-        Ok(instances)
+        Ok(children)
     }
+
+    // ------------------------------------------------------------------
+    // Chain observation: following spends made by others
+    // ------------------------------------------------------------------
+
+    /// Start tracking a contract instance that was funded externally (e.g. by a
+    /// counterparty): fetch the funding transaction, verify that `outpoint` pays
+    /// the contract's address (for the given state), and register the funded
+    /// instance.
+    ///
+    /// This is the observer-side entry point of a multi-party protocol: the
+    /// funder shares the outpoint, both sides construct the same contract, and
+    /// the observer then follows it with [`wait_for_spend`](Self::wait_for_spend).
+    pub fn track_instance(
+        &mut self,
+        contract: std::sync::Arc<dyn ErasedContract>,
+        state: Option<Box<dyn ErasedState>>,
+        outpoint: OutPoint,
+    ) -> Result<InstanceHandle, ManagerError> {
+        let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state)));
+
+        let expected_spk = self.get_instance_script_pubkey(&instance)?;
+        let funding_tx = self.rpc.get_raw_transaction(&outpoint.txid, None)?;
+        let paid = funding_tx
+            .output
+            .get(outpoint.vout as usize)
+            .ok_or(ManagerError::OutputNotFound)?;
+        if paid.script_pubkey != expected_spk {
+            return Err(ManagerError::OutputNotFound);
+        }
+
+        instance.borrow_mut().mark_funded(outpoint, funding_tx);
+        self.instances.push(instance.clone());
+        Ok(InstanceHandle { instance })
+    }
+
+    /// Decode an already-known transaction that spends `handle`'s instance:
+    /// identify the clause from the tapscript in the witness, record the spend
+    /// (clause name + witness arguments) on the instance, execute the clause's
+    /// `next_outputs` against the decoded arguments, and materialize the child
+    /// instances. Performs no RPC.
+    ///
+    /// Returns the child handles (empty for terminal and CTV-template clauses).
+    /// If the instance is already marked spent by this same transaction, the
+    /// previously materialized children are returned.
+    pub fn observe_spend(
+        &mut self,
+        handle: &InstanceHandle,
+        spending_tx: &Transaction,
+    ) -> Result<Vec<InstanceHandle>, ManagerError> {
+        let txid = spending_tx.compute_txid();
+
+        {
+            let inst = handle.instance.borrow();
+            if inst.status() == InstanceStatus::Spent {
+                if inst.spent_in_tx() == Some(txid) {
+                    return Ok(handle.outputs());
+                }
+                return Err(ManagerError::InvalidInstance(
+                    "Instance already spent by a different transaction".to_string(),
+                ));
+            }
+            if inst.status() != InstanceStatus::Funded {
+                return Err(ManagerError::NotFunded);
+            }
+        }
+        let outpoint = handle
+            .instance
+            .borrow()
+            .outpoint()
+            .ok_or(ManagerError::NotFunded)?;
+
+        // Which input of `spending_tx` consumes this instance?
+        let vin = spending_tx
+            .input
+            .iter()
+            .position(|input| input.previous_output == outpoint)
+            .ok_or_else(|| {
+                ManagerError::UnrecognizedSpend(format!(
+                    "transaction {} does not spend {}",
+                    txid, outpoint
+                ))
+            })?;
+
+        // Split the script-path witness and identify the clause by its tapscript.
+        let (witness_args, leaf_script) =
+            parse_script_path_witness(&spending_tx.input[vin].witness)?;
+        let (clause_name, next) = {
+            let inst = handle.instance.borrow();
+            let clause = inst
+                .contract()
+                .clauses()
+                .iter()
+                .find(|c| c.script().as_bytes() == leaf_script.as_slice())
+                .cloned()
+                .ok_or_else(|| {
+                    ManagerError::UnrecognizedSpend(
+                        "the spending tapscript matches no clause of this contract".to_string(),
+                    )
+                })?;
+
+            // The witness must match the clause's declared layout exactly.
+            let mut offset = 0usize;
+            for spec in clause.arg_specs() {
+                offset += spec
+                    .arg_type
+                    .consume(&witness_args[offset..])
+                    .map_err(|e| ManagerError::UnrecognizedSpend(e.to_string()))?;
+            }
+            if offset != witness_args.len() {
+                return Err(ManagerError::UnrecognizedSpend(format!(
+                    "clause '{}' expects {} witness argument elements, the spend has {}",
+                    clause.name(),
+                    offset,
+                    witness_args.len()
+                )));
+            }
+
+            let next = inst.contract().execute_clause_from_witness(
+                clause.name(),
+                &witness_args,
+                inst.state(),
+            )?;
+            (clause.name().to_string(), next)
+        };
+
+        handle
+            .instance
+            .borrow_mut()
+            .mark_spent(txid, vin, clause_name, witness_args);
+
+        let children = match &next {
+            NextOutputs::Contracts(outputs) => {
+                self.materialize_outputs(&handle.instance, outputs, spending_tx, vin)?
+            }
+            NextOutputs::Template(_) => Vec::new(),
+        };
+
+        Ok(children
+            .into_iter()
+            .map(|instance| InstanceHandle { instance })
+            .collect())
+    }
+
+    /// Wait until `handle`'s instance is spent on-chain (watching the mempool and
+    /// new blocks), then decode the spend and materialize the child instances via
+    /// [`observe_spend`](Self::observe_spend).
+    ///
+    /// This is how a party follows a covenant driven by someone else: the
+    /// returned children carry their contracts and logical state, ready for
+    /// further spends or waits. The clause and its witness arguments are recorded
+    /// on the instance ([`InstanceHandle::clause_name`] /
+    /// [`InstanceHandle::spending_args`]).
+    pub fn wait_for_spend(
+        &mut self,
+        handle: &InstanceHandle,
+    ) -> Result<Vec<InstanceHandle>, ManagerError> {
+        if handle.status() == InstanceStatus::Spent {
+            return Ok(handle.outputs());
+        }
+        let outpoint = handle.outpoint().ok_or(ManagerError::NotFunded)?;
+        let spending_tx = self.wait_for_spending_tx(outpoint)?;
+        self.observe_spend(handle, &spending_tx)
+    }
+
+    /// [`wait_for_spend`](Self::wait_for_spend) for several instances (possibly
+    /// spent by one batch transaction). Children merged across inputs are
+    /// materialized once and returned once.
+    pub fn wait_for_spends(
+        &mut self,
+        handles: &[InstanceHandle],
+    ) -> Result<Vec<InstanceHandle>, ManagerError> {
+        let mut result: Vec<InstanceHandle> = Vec::new();
+        for handle in handles {
+            for child in self.wait_for_spend(handle)? {
+                if !result
+                    .iter()
+                    .any(|h| Rc::ptr_eq(&h.instance, &child.instance))
+                {
+                    result.push(child);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Poll until a transaction spending `outpoint` appears, in the mempool
+    /// (`gettxspendingprevout`) or in a block (scanned from the funding
+    /// transaction's height onward).
+    fn wait_for_spending_tx(&self, outpoint: OutPoint) -> Result<Transaction, ManagerError> {
+        // Scan blocks starting where the funding transaction confirmed (or the
+        // next block, if it is still unconfirmed).
+        let mut next_height = {
+            let info = self.rpc.get_raw_transaction_info(&outpoint.txid, None)?;
+            match info.blockhash {
+                Some(hash) => self.rpc.get_block_header_info(&hash)?.height as u64,
+                None => self.rpc.get_block_count()? + 1,
+            }
+        };
+
+        for _ in 0..POLL_ATTEMPTS {
+            // 1. The mempool.
+            let query = serde_json::json!([{
+                "txid": outpoint.txid.to_string(),
+                "vout": outpoint.vout,
+            }]);
+            let res: serde_json::Value = self.rpc.call("gettxspendingprevout", &[query])?;
+            if let Some(txid_str) = res
+                .get(0)
+                .and_then(|entry| entry.get("spendingtxid"))
+                .and_then(|v| v.as_str())
+            {
+                let txid: Txid = txid_str
+                    .parse()
+                    .map_err(|e| ManagerError::Other(format!("bad spendingtxid: {}", e)))?;
+                return Ok(self.rpc.get_raw_transaction(&txid, None)?);
+            }
+
+            // 2. Blocks mined since the last look.
+            let tip = self.rpc.get_block_count()?;
+            while next_height <= tip {
+                let hash = self.rpc.get_block_hash(next_height)?;
+                let block = self.rpc.get_block(&hash)?;
+                if let Some(tx) = block
+                    .txdata
+                    .iter()
+                    .find(|tx| tx.input.iter().any(|i| i.previous_output == outpoint))
+                {
+                    return Ok(tx.clone());
+                }
+                next_height += 1;
+            }
+
+            sleep(Duration::from_millis(100));
+        }
+
+        Err(ManagerError::SpendNotFound(outpoint))
+    }
+}
+
+/// Split a taproot script-path witness into its clause arguments and the leaf
+/// script, dropping the annex (if present) and the control block.
+fn parse_script_path_witness(
+    witness: &bitcoin::Witness,
+) -> Result<(Vec<Vec<u8>>, Vec<u8>), ManagerError> {
+    let elements: Vec<Vec<u8>> = witness.iter().map(|e| e.to_vec()).collect();
+    let mut n = elements.len();
+    // BIP341: with at least two elements, a last element starting with 0x50 is
+    // the annex.
+    if n >= 2 && elements[n - 1].first() == Some(&0x50) {
+        n -= 1;
+    }
+    if n < 2 {
+        return Err(ManagerError::UnrecognizedSpend(
+            "key-path spend (no tapscript in the witness)".to_string(),
+        ));
+    }
+    let leaf_script = elements[n - 2].clone();
+    let args = elements[..n - 2].to_vec();
+    Ok((args, leaf_script))
 }
 
 /// Error returned when converting an [`InstanceHandle`] into a typed per-contract
@@ -687,6 +966,21 @@ impl InstanceHandle {
     /// The `TypeId` of the underlying contract (for typed-handle conversions).
     pub fn contract_type_id(&self) -> std::any::TypeId {
         self.instance.borrow().contract().contract_type_id()
+    }
+
+    /// The name of the clause that spent this instance (None until spent).
+    pub fn clause_name(&self) -> Option<String> {
+        self.instance.borrow().clause_name().map(str::to_string)
+    }
+
+    /// The witness arguments of the spend, in witness order (None until spent).
+    /// Decode them with the clause's typed `*Args` struct
+    /// ([`ClauseArgs::decode_from_witness`](crate::contracts::ClauseArgs::decode_from_witness)).
+    pub fn spending_args(&self) -> Option<Vec<Vec<u8>>> {
+        self.instance
+            .borrow()
+            .spending_args()
+            .map(|args| args.to_vec())
     }
 
     /// This instance's state as `S`, if it has any: the logical state when it is
