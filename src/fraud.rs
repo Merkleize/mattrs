@@ -81,6 +81,36 @@ pub struct Computer {
 /// the same leaf for every step and ignore the index.
 pub type LeafFactory = Arc<dyn Fn(i64) -> Leaf + Send + Sync>;
 
+/// The trace commitment `t[i,j]` over the hashed step states `hs`, where
+/// `hs[k]` commits the value before step `k` (so `hs` has `n + 1` entries for
+/// an `n`-step computation):
+///
+/// ```text
+/// t[i,j] = sha256(h_i || h_{j+1})                             if i == j
+/// t[i,j] = sha256(h_i || h_{j+1} || t[i,i+m-1] || t[i+m,j])   otherwise
+/// ```
+///
+/// with `m = (j - i + 1) / 2`. This is the off-chain half of the equation the
+/// `Bisect` reveal clauses re-check on-chain; each party derives the reveal
+/// arguments for range `[i, j]` from its own claimed `hs`.
+pub fn trace(hs: &[[u8; 32]], i: usize, j: usize) -> [u8; 32] {
+    assert!(i <= j && j + 1 < hs.len(), "trace range out of bounds");
+    let size = j - i + 1;
+    assert!(size & (size - 1) == 0, "trace range must be a power of two");
+
+    let mut preimage = Vec::with_capacity(128);
+    preimage.extend_from_slice(&hs[i]);
+    preimage.extend_from_slice(&hs[j + 1]);
+    if i != j {
+        let m = size / 2;
+        preimage.extend_from_slice(&trace(hs, i, i + m - 1));
+        preimage.extend_from_slice(&trace(hs, i + m, j));
+    }
+    bitcoin::hashes::Hash::to_byte_array(
+        <bitcoin::hashes::sha256::Hash as bitcoin::hashes::Hash>::hash(&preimage),
+    )
+}
+
 // ============================================================================
 // Leaf — the disputed single step, re-run on-chain
 // ============================================================================
