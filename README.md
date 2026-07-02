@@ -153,7 +153,7 @@ The examples from the Python reference framework (`pymatt`) are ported under
 | Example | Demonstrates | Status |
 | --- | --- | --- |
 | **vault** (`vault.rs`) | two-stage vault; CCV + CTV; augmented state; multi-input trigger-with-revault | address matches; spendable (regtest e2e) |
-| **rps** (`rps.rs`) | hashed state; clause-owned **CTV templates** for payouts; `check_in/out_contract` | roots match; spends build |
+| **rps** (`examples/rps/contracts.rs`) | hashed state; clause-owned **CTV templates** for payouts; `check_in/out_contract` | roots match; regtest e2e; two-player demo |
 | **ram** (`ram.rs`) | a Merkle-committed cell vector; the `WitProof<N>` witness arg; **expanded state** | root matches; `write` spends |
 | **game256** (`game256.rs`) | the **bisection fraud proof** (`mattrs::fraud`) driven by the `G256S0/1/2` game stages | all taptrees match; the full state machine spends |
 
@@ -163,6 +163,22 @@ generic fraud-proof contracts (`mattrs::fraud`), a data `MerkleTree` /
 `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
 `check_output_contract` / `older` / `timeout_sig_script` script fragments
 (`mattrs::script_helpers`), plus `commit_int` (`mattrs::script_utils`).
+
+## Two-player demo
+
+`examples/rps/` plays a Rock-Paper-Scissors game between two *separate
+processes*, negotiated over a TCP socket and played entirely on-chain: Alice
+funds the game behind a hiding move commitment, Bob reveals his move with a
+typed spend, and each side follows the other's turn with chain observation.
+Against a regtest node with a funded `testwallet`, in two terminals:
+
+```sh
+cargo run --example rps -- --alice --rock
+cargo run --example rps -- --bob --paper
+```
+
+Omit the move flag to play a random move; `--addr host:port` and
+`--wallet name` override the defaults.
 
 ## Spend-API features
 

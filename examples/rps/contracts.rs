@@ -47,6 +47,16 @@ pub fn move_commitment(mv: i64) -> [u8; 32] {
     commit_int(mv)
 }
 
+/// Alice's hiding move commitment `c_a = sha256(bn(m_a) || r_a)`: the move
+/// blinded with a 32-byte nonce, revealed (and script-verified) only when she
+/// adjudicates the game.
+pub fn alice_move_commitment(m_a: i64, r_a: &[u8; 32]) -> [u8; 32] {
+    use bitcoin::hashes::{sha256, Hash};
+    let mut preimage = mattrs::script_utils::bn2vch(m_a);
+    preimage.extend_from_slice(r_a);
+    sha256::Hash::hash(&preimage).to_byte_array()
+}
+
 fn p2tr_spk(pubkey: XOnlyPublicKey) -> ScriptBuf {
     let secp = Secp256k1::new();
     ScriptBuf::new_p2tr(&secp, pubkey, None)
