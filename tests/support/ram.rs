@@ -18,10 +18,10 @@ use mattrs::contracts::{
     ClauseArgs, ClauseError, ClauseOutput, ContractParams, ContractState, WitnessEncodable,
     WitnessError,
 };
-use mattrs::{contract, nums_key};
-use mattrs_derive::ContractParams;
+use mattrs::contract;
+use mattrs_derive::{ContractParams, ContractState};
 
-use mattrs::merkle::{floor_lg, MerkleProofType, MerkleTree, WitProof};
+use mattrs::merkle::{floor_lg, WitProof};
 use mattrs::script_helpers::check_input_contract;
 
 define_pushable!();
@@ -34,33 +34,21 @@ pub struct RamParams {
 
 /// The RAM cells. Committed on-chain only as their Merkle root, so instances carry
 /// this as expanded state and recover it by downcast (never by decoding the root).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractState)]
+#[commit(merkle)]
 pub struct RamState {
+    #[leaf(each)]
     pub leaves: Vec<[u8; 32]>,
-}
-
-impl ContractState for RamState {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(self.leaves.clone()).root().to_vec()
-    }
-
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::InvalidData(
-            "RAM cells cannot be recovered from their Merkle-root commitment".to_string(),
-        ))
-    }
 }
 
 contract! {
     contract Ram {
         params RamParams;
         state RamState;
-        internal_key |_p| nums_key();
 
         // witness: <h_1> <d_1> <h_2> <d_2> <x> <root>
         clause withdraw {
             args {
-                #[arg_type(MerkleProofType::new(2))]
                 proof: WitProof<2>,
                 merkle_root: [u8; 32],
             }
@@ -70,7 +58,6 @@ contract! {
         // witness: <h_1> <d_1> <h_2> <d_2> <x_old> <x_new> <root>
         clause write {
             args {
-                #[arg_type(MerkleProofType::new(2))]
                 proof: WitProof<2>,
                 new_value: [u8; 32],
                 merkle_root: [u8; 32],

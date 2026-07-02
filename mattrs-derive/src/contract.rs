@@ -19,8 +19,8 @@ struct ContractDef {
     name: Ident,
     params_ty: Type,
     state_ty: Option<Type>,
-    ikey_param: Ident,
-    ikey_body: Expr,
+    /// The `internal_key |p| ..` closure; `None` defaults to the NUMS key.
+    ikey: Option<(Ident, Expr)>,
     clauses: Vec<ClauseDef>,
     tree_tokens: TokenStream2,
 }
@@ -99,21 +99,79 @@ impl Parse for ContractDef {
             }
         }
 
-        let (ikey_param, ikey_body) = ikey
-            .ok_or_else(|| syn::Error::new(name_span, "missing `internal_key |p| ..;`"))?;
+        let tree_tokens =
+            tree_tokens.ok_or_else(|| syn::Error::new(name_span, "missing `tree [ .. ];`"))?;
+        validate_tree_names(&tree_tokens, &clauses)?;
 
         Ok(ContractDef {
             name,
             params_ty: params_ty
                 .ok_or_else(|| syn::Error::new(name_span, "missing `params <Type>;`"))?,
             state_ty,
-            ikey_param,
-            ikey_body,
+            ikey,
             clauses,
-            tree_tokens: tree_tokens
-                .ok_or_else(|| syn::Error::new(name_span, "missing `tree [ .. ];`"))?,
+            tree_tokens,
         })
     }
+}
+
+/// Check that every name in `tree [ .. ]` is a declared clause, with a spanned
+/// error on the offending identifier (instead of a "cannot find value" error
+/// deep inside the generated code).
+fn validate_tree_names(tree_tokens: &TokenStream2, clauses: &[ClauseDef]) -> syn::Result<()> {
+    use syn::parse::Parser;
+
+    let names: std::collections::HashSet<String> =
+        clauses.iter().map(|c| c.name.to_string()).collect();
+
+    fn check_level(
+        input: ParseStream,
+        names: &std::collections::HashSet<String>,
+    ) -> syn::Result<()> {
+        while !input.is_empty() {
+            if input.peek(syn::token::Bracket) {
+                let inner;
+                bracketed!(inner in input);
+                check_level(&inner, names)?;
+            } else {
+                let ident: Ident = input.parse()?;
+                if !names.contains(&ident.to_string()) {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("unknown clause `{}` in `tree [..]`", ident),
+                    ));
+                }
+            }
+            if !input.is_empty() {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        Ok(())
+    }
+
+    let parser = |input: ParseStream| check_level(input, &names);
+    parser.parse2(tree_tokens.clone())
+}
+
+/// Rewrite the `#[signer(p.field)]` shorthand into the full closure form
+/// `#[signer(|p| p.field.serialize())]` (the params binding is taken from the
+/// user's own expression). Closures and other expressions pass through untouched.
+fn expand_signer_shorthand(attr: &Attribute) -> syn::Result<Attribute> {
+    if !attr.path().is_ident("signer") {
+        return Ok(attr.clone());
+    }
+    let expr: Expr = attr.parse_args()?;
+    if let Expr::Field(field_access) = &expr {
+        if let Expr::Path(base) = &*field_access.base {
+            if let Some(param) = base.path.get_ident() {
+                let rewritten: Expr = syn::parse_quote!(|#param| #expr.serialize());
+                let mut attr = attr.clone();
+                attr.meta = syn::parse_quote!(signer(#rewritten));
+                return Ok(attr);
+            }
+        }
+    }
+    Ok(attr.clone())
 }
 
 fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
@@ -139,8 +197,13 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                         .ident
                         .clone()
                         .ok_or_else(|| syn::Error::new_spanned(&field, "clause args need names"))?;
+                    let attrs = field
+                        .attrs
+                        .iter()
+                        .map(expand_signer_shorthand)
+                        .collect::<syn::Result<Vec<_>>>()?;
                     fields.push(ClauseField {
-                        attrs: field.attrs.clone(),
+                        attrs,
                         is_signer,
                         name: ident,
                         ty: field.ty.clone(),
@@ -235,8 +298,18 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         quote! { ::mattrs::contracts::StandardP2TR<#params_ty> }
     };
 
-    let ikey_param = &def.ikey_param;
-    let ikey_body = &def.ikey_body;
+    // The taproot internal key: the user's closure, or the NUMS key by default.
+    let ikey_init: TokenStream2 = match &def.ikey {
+        Some((param, body)) => quote! {
+            let internal_key: ::bitcoin::XOnlyPublicKey = {
+                let #param = &params;
+                #body
+            };
+        },
+        None => quote! {
+            let internal_key: ::bitcoin::XOnlyPublicKey = ::mattrs::nums_key();
+        },
+    };
     let tree_tokens = &def.tree_tokens;
 
     let mut args_structs: Vec<TokenStream2> = Vec::new();
@@ -381,10 +454,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         impl #name {
             /// Build the contract from its params.
             pub fn new(params: #params_ty) -> Self {
-                let internal_key: ::bitcoin::XOnlyPublicKey = {
-                    let #ikey_param = &params;
-                    #ikey_body
-                };
+                #ikey_init
                 #(#clause_locals)*
                 let tree = ::mattrs::clause_tree![ #tree_tokens ];
                 let contract = <#contract_ty>::new(internal_key, &params, tree);

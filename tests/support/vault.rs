@@ -57,7 +57,7 @@ contract! {
         // witness: <sig> <ctv-hash> <out_i>
         clause trigger {
             args {
-                #[signer(|p| p.unvault_pk.serialize())]
+                #[signer(p.unvault_pk)]
                 sig: Signature,
                 ctv_hash: [u8; 32],
                 out_i: i64,
@@ -71,7 +71,7 @@ contract! {
         // witness: <sig> <ctv-hash> <out_i> <revault_out_i>
         clause trigger_and_revault {
             args {
-                #[signer(|p| p.unvault_pk.serialize())]
+                #[signer(p.unvault_pk)]
                 sig: Signature,
                 ctv_hash: [u8; 32],
                 out_i: i64,

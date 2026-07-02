@@ -21,7 +21,7 @@ use bitcoincore_rpc::{Auth, Client};
 use mattrs::contracts::{ClauseArgs, ContractInstance, ContractParams, WitnessEncodable, WitnessError};
 use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::signer::HotSigner;
-use mattrs::{contract, nums_key, ContractParams as DeriveContractParams, Signature};
+use mattrs::{contract, ContractParams as DeriveContractParams, Signature};
 
 define_pushable!();
 
@@ -39,12 +39,11 @@ pub struct TimeLockParams {
 contract! {
     contract TimeLock {
         params TimeLockParams;
-        internal_key |_p| nums_key();
 
         // witness: <sig> — owner withdraws after the CSV delay
         clause withdraw {
             args {
-                #[signer(|p| p.owner_pk.serialize())]
+                #[signer(p.owner_pk)]
                 sig: Signature,
             }
             script TimeLock::withdraw_script;

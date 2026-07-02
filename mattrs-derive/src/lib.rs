@@ -1,6 +1,8 @@
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Meta, Type};
+use syn::punctuated::Punctuated;
+use syn::{parse_macro_input, Data, DeriveInput, Fields, GenericArgument, PathArguments, Type};
 
 mod contract;
 
@@ -17,16 +19,21 @@ mod contract;
 /// contract! {
 ///     contract Vault {
 ///         params VaultParams;
+///         // Optional; defaults to the NUMS key (no key-spend path).
 ///         internal_key |p| internal_key_or_nums(p.alternate_pk);
 ///
 ///         clause trigger {
 ///             args {
-///                 #[signer(|p| p.unvault_pk.serialize())] sig: Signature,
+///                 // shorthand for `#[signer(|p| p.unvault_pk.serialize())]`
+///                 #[signer(p.unvault_pk)] sig: Signature,
 ///                 ctv_hash: [u8; 32],
 ///                 out_i: i64,
 ///             }
 ///             script Vault::trigger_script;         // fn(&VaultParams) -> ScriptBuf
-///             next(p, a) { /* -> Result<Vec<ClauseOutput>, ClauseError> */ }
+///             // The body yields a Result whose Ok value may be a
+///             // Vec<ClauseOutput>, a CtvTemplate, or a NextOutputs —
+///             // anything Into<NextOutputs> — with error type ClauseError.
+///             next(p, a) { /* ... */ }
 ///         }
 ///         // ... more clauses ...
 ///         tree [trigger, [trigger_and_revault, recover]];
@@ -38,40 +45,61 @@ pub fn contract(input: TokenStream) -> TokenStream {
     contract::expand(input)
 }
 
+/// The named fields of a derive input, or a spanned error naming the derive.
+fn named_fields<'a>(
+    input: &'a DeriveInput,
+    derive_name: &str,
+) -> syn::Result<&'a Punctuated<syn::Field, syn::Token![,]>> {
+    match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => Ok(&fields.named),
+            other => Err(syn::Error::new_spanned(
+                other,
+                format!("{} only supports structs with named fields", derive_name),
+            )),
+        },
+        _ => Err(syn::Error::new_spanned(
+            &input.ident,
+            format!("{} can only be derived for structs", derive_name),
+        )),
+    }
+}
+
 /// Derive macro for ClauseArgs trait.
 /// Automatically implements encoding/decoding to witness stack and generates arg_specs().
-/// 
+///
 /// # Attributes
-/// 
+///
 /// ## Struct-level attributes
 /// - `#[clause_args(params = ParamsType)]` - Specifies the params type for param-dependent arg_specs.
 ///   When specified, generates `arg_specs_for_params(params: &ParamsType)` in addition to `arg_specs()`.
-/// 
+///
 /// ## Field-level attributes
 /// - `#[signer(expr)]` - Creates a SignerType with the given pubkey expression.
-///   If `expr` is a closure like `|p| p.unvault_pk`, it will be used in `arg_specs_for_params`.
+///   If `expr` is a closure like `|p| p.unvault_pk.serialize()`, it will be used in `arg_specs_for_params`.
 /// - `#[arg_type(expr)]` - Uses a custom ArgType expression
-/// 
+///
 /// # Default type mappings (when no attribute is specified)
 /// - `Vec<u8>` -> `BytesType`
 /// - `[u8; N]` -> `BytesType`
 /// - `i32`, `i64` -> `IntType`
-/// 
+/// - `WitProof<N>` -> `MerkleProofType::new(N)`
+///
 /// # Examples
-/// 
+///
 /// ```ignore
 /// // Simple args without params dependency
 /// #[derive(ClauseArgs)]
 /// pub struct RecoverArgs {
 ///     pub out_i: i64,
 /// }
-/// 
+///
 /// // Args with param-dependent signer
 /// #[derive(ClauseArgs)]
 /// #[clause_args(params = VaultParams)]
 /// pub struct TriggerArgs {
 ///     #[signer(|p| p.unvault_pk.serialize())]
-///     pub sig: Vec<u8>,
+///     pub sig: Signature,
 ///     pub ctv_hash: [u8; 32],
 ///     pub out_i: i64,
 /// }
@@ -79,18 +107,18 @@ pub fn contract(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(ClauseArgs, attributes(signer, arg_type, clause_args))]
 pub fn derive_clause_args(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    expand_clause_args(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
 
     // Check for #[clause_args(params = ParamsType)] attribute
-    let params_type = extract_params_type(&input.attrs);
+    let params_type = extract_params_type(&input.attrs)?;
 
-    let fields = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => &fields.named,
-            _ => panic!("ClauseArgs only supports structs with named fields"),
-        },
-        _ => panic!("ClauseArgs can only be derived for structs"),
-    };
+    let fields = named_fields(input, "ClauseArgs")?;
 
     let encode_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
@@ -112,16 +140,23 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
 
     // Does any field use a closure-based `#[signer(|p| ..)]`? Such fields need the
     // params to build their SignerType, so only `arg_specs_for_params()` is valid.
-    let has_closure_signer = fields
-        .iter()
-        .any(|f| matches!(extract_signer_attr(&f.attrs), Some(SignerAttrInfo::Closure(_))));
+    let mut has_closure_signer = false;
+    for f in fields {
+        if matches!(
+            extract_signer_attr(&f.attrs)?,
+            Some(SignerAttrInfo::Closure(_))
+        ) {
+            has_closure_signer = true;
+        }
+    }
 
     // A closure signer is meaningless without a params type to feed it.
     if has_closure_signer && params_type.is_none() {
-        panic!(
+        return Err(syn::Error::new_spanned(
+            name,
             "#[derive(ClauseArgs)]: a `#[signer(|p| ..)]` field requires \
-             `#[clause_args(params = ParamsType)]` on the struct"
-        );
+             `#[clause_args(params = ParamsType)]` on the struct",
+        ));
     }
 
     // The static `arg_specs()` is only generated when no field depends on params
@@ -130,29 +165,10 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
     let static_arg_specs_impl = if has_closure_signer {
         quote! {}
     } else {
-        let arg_spec_items = fields.iter().map(|f| {
-            let field_name = &f.ident;
-            let field_name_str = field_name.as_ref().unwrap().to_string();
-            let field_type = &f.ty;
-
-            let signer_info = extract_signer_attr(&f.attrs);
-            let custom_arg_type = extract_arg_type_attr(&f.attrs);
-
-            let arg_type_expr = if let Some(expr) = custom_arg_type {
-                quote! { ::std::sync::Arc::new(#expr) }
-            } else if let Some(SignerAttrInfo::Static(expr)) = &signer_info {
-                quote! { ::std::sync::Arc::new(::mattrs::argtypes::SignerType::new(#expr)) }
-            } else {
-                infer_arg_type(field_type)
-            };
-
-            quote! {
-                ::mattrs::contracts::ArgSpec {
-                    name: #field_name_str.to_string(),
-                    arg_type: #arg_type_expr,
-                }
-            }
-        });
+        let arg_spec_items = fields
+            .iter()
+            .map(|f| arg_spec_item(f, None))
+            .collect::<syn::Result<Vec<_>>>()?;
 
         quote! {
             /// Get the argument specifications for this clause.
@@ -166,43 +182,16 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
 
     // Generate arg_specs_for_params if params type is specified
     let arg_specs_for_params_impl = if let Some(ref params_ty) = params_type {
-        let arg_spec_items_for_params = fields.iter().map(|f| {
-            let field_name = &f.ident;
-            let field_name_str = field_name.as_ref().unwrap().to_string();
-            let field_type = &f.ty;
-
-            let signer_info = extract_signer_attr(&f.attrs);
-            let custom_arg_type = extract_arg_type_attr(&f.attrs);
-
-            let arg_type_expr = if let Some(expr) = custom_arg_type {
-                quote! { ::std::sync::Arc::new(#expr) }
-            } else if let Some(SignerAttrInfo::Closure(closure)) = &signer_info {
-                // Use closure to get pubkey from params
-                quote! { 
-                    ::std::sync::Arc::new(::mattrs::argtypes::SignerType::new({
-                        let f: fn(&#params_ty) -> _ = #closure;
-                        f(params)
-                    }))
-                }
-            } else if let Some(SignerAttrInfo::Static(expr)) = &signer_info {
-                quote! { ::std::sync::Arc::new(::mattrs::argtypes::SignerType::new(#expr)) }
-            } else {
-                infer_arg_type(field_type)
-            };
-
-            quote! {
-                ::mattrs::contracts::ArgSpec {
-                    name: #field_name_str.to_string(),
-                    arg_type: #arg_type_expr,
-                }
-            }
-        });
+        let arg_spec_items = fields
+            .iter()
+            .map(|f| arg_spec_item(f, Some(params_ty)))
+            .collect::<syn::Result<Vec<_>>>()?;
 
         quote! {
             /// Get the argument specifications for this clause with params.
             pub fn arg_specs_for_params(params: &#params_ty) -> Vec<::mattrs::contracts::ArgSpec> {
                 vec![
-                    #(#arg_spec_items_for_params),*
+                    #(#arg_spec_items),*
                 ]
             }
         }
@@ -213,22 +202,18 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
     // Generate `new(...)` taking only the non-signer fields. Signature fields are
     // left to `Default` (empty) and filled by the manager at spend time, so callers
     // never construct a placeholder signature.
-    let ctor_params = fields
-        .iter()
-        .filter(|f| extract_signer_attr(&f.attrs).is_none())
-        .map(|f| {
-            let ident = &f.ident;
-            let ty = &f.ty;
-            quote! { #ident: #ty }
-        });
-    let ctor_field_inits = fields.iter().map(|f| {
+    let mut ctor_params = Vec::new();
+    let mut ctor_field_inits = Vec::new();
+    for f in fields {
         let ident = &f.ident;
-        if extract_signer_attr(&f.attrs).is_some() {
-            quote! { #ident: ::core::default::Default::default() }
+        if extract_signer_attr(&f.attrs)?.is_some() {
+            ctor_field_inits.push(quote! { #ident: ::core::default::Default::default() });
         } else {
-            quote! { #ident }
+            let ty = &f.ty;
+            ctor_params.push(quote! { #ident: #ty });
+            ctor_field_inits.push(quote! { #ident });
         }
-    });
+    }
     let new_impl = quote! {
         /// Construct the clause arguments. Signature fields are left empty and are
         /// filled in by the manager at spend time.
@@ -240,7 +225,7 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
         }
     };
 
-    let expanded = quote! {
+    Ok(quote! {
         impl WitnessEncodable for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut stack = Vec::new();
@@ -279,95 +264,180 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
             #static_arg_specs_impl
             #arg_specs_for_params_impl
         }
+    })
+}
+
+/// One `ArgSpec { name, arg_type }` item for a field. `params_ty` is `Some` when
+/// generating `arg_specs_for_params` (where closure signers are usable) and `None`
+/// for the static `arg_specs()`.
+fn arg_spec_item(field: &syn::Field, params_ty: Option<&Type>) -> syn::Result<TokenStream2> {
+    let field_name_str = field.ident.as_ref().unwrap().to_string();
+
+    let signer_info = extract_signer_attr(&field.attrs)?;
+    let custom_arg_type = extract_arg_type_attr(&field.attrs)?;
+
+    if signer_info.is_some() && custom_arg_type.is_some() {
+        return Err(syn::Error::new_spanned(
+            field,
+            "#[signer(..)] and #[arg_type(..)] cannot both be applied to one field",
+        ));
+    }
+
+    let arg_type_expr = if let Some(expr) = custom_arg_type {
+        quote! { ::std::sync::Arc::new(#expr) }
+    } else {
+        match (signer_info, params_ty) {
+            (Some(SignerAttrInfo::Closure(closure)), Some(params_ty)) => quote! {
+                ::std::sync::Arc::new(::mattrs::argtypes::SignerType::new({
+                    let f: fn(&#params_ty) -> _ = #closure;
+                    f(params)
+                }))
+            },
+            (Some(SignerAttrInfo::Closure(_)), None) => {
+                // Unreachable from the derive (closure signers suppress the static
+                // arg_specs()), but keep a real error rather than a panic.
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "a `#[signer(|p| ..)]` field cannot appear in a static arg_specs()",
+                ));
+            }
+            (Some(SignerAttrInfo::Static(expr)), _) => {
+                quote! { ::std::sync::Arc::new(::mattrs::argtypes::SignerType::new(#expr)) }
+            }
+            (None, _) => infer_arg_type(&field.ty),
+        }
     };
 
-    TokenStream::from(expanded)
+    Ok(quote! {
+        ::mattrs::contracts::ArgSpec {
+            name: #field_name_str.to_string(),
+            arg_type: #arg_type_expr,
+        }
+    })
 }
 
 /// Information about a #[signer(...)] attribute
 enum SignerAttrInfo {
     /// Static expression: #[signer(pubkey_bytes)]
-    Static(proc_macro2::TokenStream),
-    /// Closure expression: #[signer(|p| p.field)]
-    Closure(proc_macro2::TokenStream),
+    Static(TokenStream2),
+    /// Closure expression: #[signer(|p| p.field.serialize())]
+    Closure(TokenStream2),
 }
 
-/// Extract #[clause_args(params = Type)] from struct attributes
-fn extract_params_type(attrs: &[syn::Attribute]) -> Option<syn::Type> {
+/// Extract `#[clause_args(params = Type)]` from struct attributes.
+fn extract_params_type(attrs: &[syn::Attribute]) -> syn::Result<Option<Type>> {
+    struct ParamsArg(Type);
+    impl syn::parse::Parse for ParamsArg {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            let ident: syn::Ident = input.parse()?;
+            if ident != "params" {
+                return Err(syn::Error::new(ident.span(), "expected `params = <Type>`"));
+            }
+            input.parse::<syn::Token![=]>()?;
+            Ok(ParamsArg(input.parse()?))
+        }
+    }
+
     for attr in attrs {
         if attr.path().is_ident("clause_args") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let tokens_str = meta_list.tokens.to_string();
-                // Parse "params = Type"
-                if let Some(type_str) = tokens_str.strip_prefix("params").map(|s| s.trim().strip_prefix('=').map(|s| s.trim())) {
-                    if let Some(type_str) = type_str {
-                        if let Ok(ty) = syn::parse_str::<syn::Type>(type_str) {
-                            return Some(ty);
+            let ParamsArg(ty) = attr.parse_args()?;
+            return Ok(Some(ty));
+        }
+    }
+    Ok(None)
+}
+
+/// Extract #[signer(...)] attribute info.
+fn extract_signer_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<SignerAttrInfo>> {
+    for attr in attrs {
+        if attr.path().is_ident("signer") {
+            let expr: syn::Expr = attr.parse_args()?;
+            return Ok(Some(match expr {
+                syn::Expr::Closure(_) => SignerAttrInfo::Closure(quote! { #expr }),
+                _ => SignerAttrInfo::Static(quote! { #expr }),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Extract #[arg_type(...)] attribute.
+fn extract_arg_type_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<TokenStream2>> {
+    for attr in attrs {
+        if attr.path().is_ident("arg_type") {
+            let expr: syn::Expr = attr.parse_args()?;
+            return Ok(Some(quote! { #expr }));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether a type is a path of exactly one segment named `ident` with no generics
+/// (`u8`, `i64`, ...).
+fn is_plain_ident(ty: &Type, ident: &str) -> bool {
+    matches!(ty, Type::Path(tp) if tp.qself.is_none()
+        && tp.path.segments.len() == 1
+        && tp.path.segments[0].ident == ident
+        && tp.path.segments[0].arguments.is_none())
+}
+
+/// Infer the ArgType from a Rust type.
+fn infer_arg_type(ty: &Type) -> TokenStream2 {
+    // [u8; N] — one Bytes element.
+    if let Type::Array(arr) = ty {
+        if is_plain_ident(&arr.elem, "u8") {
+            return quote! { ::std::sync::Arc::new(::mattrs::argtypes::BytesType) };
+        }
+    }
+
+    // i32 / i64 — one script-number element.
+    if is_plain_ident(ty, "i32") || is_plain_ident(ty, "i64") {
+        return quote! { ::std::sync::Arc::new(::mattrs::argtypes::IntType) };
+    }
+
+    if let Type::Path(tp) = ty {
+        if let Some(last) = tp.path.segments.last() {
+            // Vec<u8> (any path prefix) — one Bytes element.
+            if last.ident == "Vec" {
+                if let PathArguments::AngleBracketed(args) = &last.arguments {
+                    if args.args.len() == 1 {
+                        if let GenericArgument::Type(elem) = &args.args[0] {
+                            if is_plain_ident(elem, "u8") {
+                                return quote! {
+                                    ::std::sync::Arc::new(::mattrs::argtypes::BytesType)
+                                };
+                            }
                         }
+                    }
+                }
+            }
+
+            // WitProof<N> — a depth-N Merkle proof occupying 2N+1 elements.
+            if last.ident == "WitProof" {
+                if let PathArguments::AngleBracketed(args) = &last.arguments {
+                    if args.args.len() == 1 {
+                        let depth = &args.args[0];
+                        return quote! {
+                            ::std::sync::Arc::new(::mattrs::merkle::MerkleProofType::new(#depth))
+                        };
                     }
                 }
             }
         }
     }
-    None
-}
 
-/// Extract #[signer(...)] attribute info
-fn extract_signer_attr(attrs: &[syn::Attribute]) -> Option<SignerAttrInfo> {
-    for attr in attrs {
-        if attr.path().is_ident("signer") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let tokens = &meta_list.tokens;
-                let tokens_str = tokens.to_string();
-                
-                // Check if it's a closure (starts with |)
-                if tokens_str.trim_start().starts_with('|') {
-                    return Some(SignerAttrInfo::Closure(quote! { #tokens }));
-                } else {
-                    return Some(SignerAttrInfo::Static(quote! { #tokens }));
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Extract #[arg_type(...)] attribute
-fn extract_arg_type_attr(attrs: &[syn::Attribute]) -> Option<proc_macro2::TokenStream> {
-    for attr in attrs {
-        if attr.path().is_ident("arg_type") {
-            if let Meta::List(meta_list) = &attr.meta {
-                let tokens = &meta_list.tokens;
-                return Some(quote! { #tokens });
-            }
-        }
-    }
-    None
-}
-
-/// Infer the ArgType from a Rust type.
-fn infer_arg_type(ty: &Type) -> proc_macro2::TokenStream {
-    let type_str = quote!(#ty).to_string();
-    
-    // Check for common patterns
-    if type_str == "Vec < u8 >" || type_str.contains("[u8") {
-        quote! { ::std::sync::Arc::new(::mattrs::argtypes::BytesType) }
-    } else if type_str == "i32" || type_str == "i64" {
-        quote! { ::std::sync::Arc::new(::mattrs::argtypes::IntType) }
-    } else {
-        // Refuse to guess: an unrecognized field type is a compile error rather than
-        // a silently-wrong BytesType. The user can add #[arg_type(..)]/#[signer(..)].
-        let msg = format!(
-            "#[derive(ClauseArgs)]: cannot infer an ArgType for field type `{}`; \
-             annotate the field with #[arg_type(..)] or #[signer(..)] \
-             (auto-inferred types: Vec<u8>, [u8; N], i32, i64)",
-            type_str
-        );
-        quote! {
-            {
-                compile_error!(#msg);
-                ::std::sync::Arc::new(::mattrs::argtypes::BytesType)
-            }
+    // Refuse to guess: an unrecognized field type is a compile error rather than
+    // a silently-wrong BytesType. The user can add #[arg_type(..)]/#[signer(..)].
+    let msg = format!(
+        "#[derive(ClauseArgs)]: cannot infer an ArgType for field type `{}`; \
+         annotate the field with #[arg_type(..)] or #[signer(..)] \
+         (auto-inferred types: Vec<u8>, [u8; N], i32, i64, WitProof<N>)",
+        quote!(#ty)
+    );
+    quote! {
+        {
+            compile_error!(#msg);
+            ::std::sync::Arc::new(::mattrs::argtypes::BytesType)
         }
     }
 }
@@ -379,15 +449,14 @@ fn infer_arg_type(ty: &Type) -> proc_macro2::TokenStream {
 #[proc_macro_derive(ContractParams)]
 pub fn derive_contract_params(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
+    expand_contract_params(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
 
-    let fields = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => &fields.named,
-            _ => panic!("ContractParams only supports structs with named fields"),
-        },
-        _ => panic!("ContractParams can only be derived for structs"),
-    };
+fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let name = &input.ident;
+    let fields = named_fields(input, "ContractParams")?;
 
     let encode_to_witness_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
@@ -433,7 +502,7 @@ pub fn derive_contract_params(input: TokenStream) -> TokenStream {
                 count_bytes.copy_from_slice(&bytes[byte_offset..byte_offset+4]);
                 let element_count = u32::from_le_bytes(count_bytes) as usize;
                 let mut local_offset = byte_offset + 4;
-                
+
                 // Read witness elements
                 let mut temp_witness = Vec::new();
                 for _ in 0..element_count {
@@ -444,14 +513,14 @@ pub fn derive_contract_params(input: TokenStream) -> TokenStream {
                     len_bytes.copy_from_slice(&bytes[local_offset..local_offset+4]);
                     let elem_len = u32::from_le_bytes(len_bytes) as usize;
                     local_offset += 4;
-                    
+
                     if local_offset + elem_len > bytes.len() {
                         return Err(WitnessError::InsufficientData);
                     }
                     temp_witness.push(bytes[local_offset..local_offset+elem_len].to_vec());
                     local_offset += elem_len;
                 }
-                
+
                 let (value, _) = <#field_type as WitnessEncodable>::decode_from_witness(&temp_witness)?;
                 (value, local_offset - byte_offset)
             };
@@ -462,7 +531,7 @@ pub fn derive_contract_params(input: TokenStream) -> TokenStream {
     let field_names = fields.iter().map(|f| &f.ident);
     let field_names_for_bytes = fields.iter().map(|f| &f.ident);
 
-    let expanded = quote! {
+    Ok(quote! {
         impl WitnessEncodable for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
@@ -489,50 +558,130 @@ pub fn derive_contract_params(input: TokenStream) -> TokenStream {
             fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
                 let mut byte_offset = 0;
                 #(#decode_from_bytes_fields)*
-                
+
                 Ok(Self {
                     #(#field_names_for_bytes),*
                 })
             }
         }
-    };
+    })
+}
 
-    TokenStream::from(expanded)
+/// How a `#[commit(merkle)]` state field contributes Merkle leaves.
+enum LeafKind {
+    /// The field is a `[u8; 32]`, used directly as one leaf.
+    Raw,
+    /// One leaf: the sha256 of the field's witness encoding (e.g. for an `i64`,
+    /// `sha256(bn2vch(v))`).
+    Sha256,
+    /// The field iterates over `[u8; 32]` leaves (e.g. `Vec<[u8; 32]>`).
+    Each,
+}
+
+/// Extract `#[leaf(sha256)]` / `#[leaf(each)]` from a state field.
+fn extract_leaf_kind(field: &syn::Field) -> syn::Result<LeafKind> {
+    for attr in &field.attrs {
+        if attr.path().is_ident("leaf") {
+            let ident: syn::Ident = attr.parse_args()?;
+            return match ident.to_string().as_str() {
+                "sha256" => Ok(LeafKind::Sha256),
+                "each" => Ok(LeafKind::Each),
+                other => Err(syn::Error::new(
+                    ident.span(),
+                    format!("unknown leaf kind `{}` (expected `sha256` or `each`)", other),
+                )),
+            };
+        }
+    }
+    Ok(LeafKind::Raw)
 }
 
 /// Derive macro for ContractState trait.
 ///
-/// Automatically implements encoding/decoding for contract state.
+/// # Default: single-field identity encoding
 ///
-/// # Limitation: single field only
+/// Without attributes, `encode()` is the field's raw witness bytes and `decode()`
+/// reconstructs it from them. That round-trip is only invertible when the struct
+/// has exactly one field, so the attribute-less derive rejects multi-field state
+/// at compile time.
 ///
-/// `decode()` reconstructs the state from a flat byte blob by treating it as a
-/// single witness element. That is only invertible when the struct has exactly
-/// one field, so the derive rejects multi-field state at compile time. Multi-field
-/// state needs a deliberate commitment encoding (e.g. a hash over the fields) and
-/// should implement [`ContractState`] by hand.
-#[proc_macro_derive(ContractState)]
+/// # `#[commit(merkle)]`: hash-committed (lossy) state
+///
+/// With `#[commit(merkle)]` on the struct, `encode()` is the Merkle root (see
+/// `mattrs::merkle::MerkleTree`) of the fields' leaves, in declaration order, and
+/// `decode()` fails — the state cannot be recovered from its commitment and rides
+/// along as the instance's expanded state instead. Per-field leaf forms:
+///
+/// - default: the field is a `[u8; 32]`, used directly as one leaf;
+/// - `#[leaf(sha256)]`: one leaf, the sha256 of the field's witness encoding
+///   (for an `i64`, `sha256(bn2vch(v))`);
+/// - `#[leaf(each)]`: the field iterates over `[u8; 32]` leaves (e.g.
+///   `Vec<[u8; 32]>`).
+///
+/// ```ignore
+/// #[derive(Debug, Clone, ContractState)]
+/// #[commit(merkle)]
+/// pub struct G256S2State {
+///     pub t_a: [u8; 32],
+///     #[leaf(sha256)]
+///     pub y: i64,
+///     #[leaf(sha256)]
+///     pub x: i64,
+/// }
+/// ```
+#[proc_macro_derive(ContractState, attributes(commit, leaf))]
 pub fn derive_contract_state(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    expand_contract_state(&input)
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
+    let fields = named_fields(input, "ContractState")?;
 
-    let fields = match &input.data {
-        Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => &fields.named,
-            _ => panic!("ContractState only supports structs with named fields"),
-        },
-        _ => panic!("ContractState can only be derived for structs"),
-    };
+    // #[commit(merkle)] on the struct selects the hash-committed form.
+    let mut merkle_commit = false;
+    for attr in &input.attrs {
+        if attr.path().is_ident("commit") {
+            let ident: syn::Ident = attr.parse_args()?;
+            if ident != "merkle" {
+                return Err(syn::Error::new(
+                    ident.span(),
+                    format!("unknown commitment `{}` (expected `merkle`)", ident),
+                ));
+            }
+            merkle_commit = true;
+        }
+    }
 
-    // See the doc comment: the byte-blob round-trip is only invertible for a
+    if merkle_commit {
+        return expand_merkle_state(name, fields);
+    }
+
+    // A #[leaf(..)] attribute only makes sense under #[commit(merkle)].
+    for f in fields {
+        if f.attrs.iter().any(|a| a.path().is_ident("leaf")) {
+            return Err(syn::Error::new_spanned(
+                f,
+                "#[leaf(..)] requires #[commit(merkle)] on the struct",
+            ));
+        }
+    }
+
+    // Identity encoding: the byte-blob round-trip is only invertible for a
     // single field. Reject the rest at compile time instead of decoding wrongly.
     if fields.len() != 1 {
-        panic!(
-            "#[derive(ContractState)] supports exactly one field (got {}); \
-             multi-field state needs a manual ContractState impl with a deliberate \
-             commitment encoding",
-            fields.len()
-        );
+        return Err(syn::Error::new_spanned(
+            name,
+            format!(
+                "#[derive(ContractState)] without #[commit(merkle)] supports exactly \
+                 one field (got {}); commit multi-field state with #[commit(merkle)] \
+                 or implement ContractState by hand",
+                fields.len()
+            ),
+        ));
     }
 
     let encode_fields = fields.iter().map(|f| {
@@ -553,7 +702,7 @@ pub fn derive_contract_state(input: TokenStream) -> TokenStream {
 
     let field_names = fields.iter().map(|f| &f.ident);
 
-    let expanded = quote! {
+    Ok(quote! {
         impl WitnessEncodable for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
@@ -582,7 +731,55 @@ pub fn derive_contract_state(input: TokenStream) -> TokenStream {
                 Ok(state)
             }
         }
-    };
+    })
+}
 
-    TokenStream::from(expanded)
+/// The `#[commit(merkle)]` expansion: encode = Merkle root of the fields' leaves,
+/// decode = error (the commitment is lossy; the logical state rides along as the
+/// instance's expanded state).
+fn expand_merkle_state(
+    name: &syn::Ident,
+    fields: &Punctuated<syn::Field, syn::Token![,]>,
+) -> syn::Result<TokenStream2> {
+    let mut leaf_pushes = Vec::new();
+    for f in fields {
+        let field_name = &f.ident;
+        leaf_pushes.push(match extract_leaf_kind(f)? {
+            LeafKind::Raw => quote! {
+                leaves.push(self.#field_name);
+            },
+            LeafKind::Sha256 => quote! {
+                leaves.push(::bitcoin::hashes::Hash::to_byte_array(
+                    <::bitcoin::hashes::sha256::Hash as ::bitcoin::hashes::Hash>::hash(
+                        &::mattrs::contracts::WitnessEncodable::encode_to_witness(
+                            &self.#field_name,
+                        )
+                        .concat(),
+                    ),
+                ));
+            },
+            LeafKind::Each => quote! {
+                leaves.extend(self.#field_name.iter().copied());
+            },
+        });
+    }
+
+    let decode_msg = format!(
+        "{} cannot be recovered from its Merkle-root commitment",
+        name
+    );
+
+    Ok(quote! {
+        impl ContractState for #name {
+            fn encode(&self) -> Vec<u8> {
+                let mut leaves: Vec<[u8; 32]> = Vec::new();
+                #(#leaf_pushes)*
+                ::mattrs::merkle::MerkleTree::new(leaves).root().to_vec()
+            }
+
+            fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
+                Err(WitnessError::InvalidData(#decode_msg.to_string()))
+            }
+        }
+    })
 }

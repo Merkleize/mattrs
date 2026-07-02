@@ -19,7 +19,7 @@ use mattrs::contracts::{
     ClauseArgs, ClauseOutput, ContractParams, ContractState, CtvTemplate, WitnessEncodable,
     WitnessError,
 };
-use mattrs::{contract, nums_key, script_utils::bn2vch, Signature};
+use mattrs::{contract, script_utils::bn2vch, Signature};
 use mattrs_derive::{ContractParams, ContractState};
 
 use mattrs::script_helpers::{check_input_contract, check_output_contract};
@@ -61,13 +61,12 @@ fn p2tr_spk(pubkey: XOnlyPublicKey) -> ScriptBuf {
 contract! {
     contract RpsGameS0 {
         params RpsParams;
-        internal_key |_p| nums_key();
 
         // witness: <m_b> <bob_sig>
         clause bob_move {
             args {
                 m_b: i64,
-                #[signer(|p| p.bob_pk.serialize())]
+                #[signer(p.bob_pk)]
                 sig: Signature,
             }
             script RpsGameS0::bob_move_script;
@@ -114,7 +113,6 @@ contract! {
     contract RpsGameS1 {
         params RpsParams;
         state RpsGameS1State;
-        internal_key |_p| nums_key();
 
         // witness: <m_b> <m_a> <r_a>
         clause alice_wins {

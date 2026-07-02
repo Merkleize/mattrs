@@ -23,10 +23,9 @@ use mattrs::contracts::{
     ClauseArgs, ClauseOutput, ContractParams, ContractState, WitnessEncodable, WitnessError,
 };
 use mattrs::script_utils::bn2vch;
-use mattrs::{contract, nums_key, Signature};
-use mattrs_derive::ContractParams;
+use mattrs::{contract, Signature};
+use mattrs_derive::{ContractParams, ContractState};
 
-use mattrs::merkle::MerkleTree;
 use mattrs::script_helpers::{check_input_contract, dup, merkle_root, older};
 
 define_pushable!();
@@ -39,37 +38,23 @@ pub struct LeafParams {
 
 /// The disputed step's commitment: the starting hash and each party's claimed
 /// ending hash. Committed on-chain as the Merkle root of the three.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractState)]
+#[commit(merkle)]
 pub struct LeafState {
     pub h_start: [u8; 32],
     pub h_end_alice: [u8; 32],
     pub h_end_bob: [u8; 32],
 }
 
-impl ContractState for LeafState {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(vec![self.h_start, self.h_end_alice, self.h_end_bob])
-            .root()
-            .to_vec()
-    }
-
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::InvalidData(
-            "Leaf state cannot be recovered from its Merkle-root commitment".to_string(),
-        ))
-    }
-}
-
 contract! {
     contract Leaf {
         params LeafParams;
         state LeafState;
-        internal_key |_p| nums_key();
 
         // Alice re-runs the disputed step: <alice_sig> <x> <h_y_b>
         clause alice_reveal {
             args {
-                #[signer(|p| p.alice_pk.serialize())]
+                #[signer(p.alice_pk)]
                 alice_sig: Signature,
                 x: i64,
                 h_y_b: [u8; 32],
@@ -80,7 +65,7 @@ contract! {
         // Bob re-runs the disputed step: <bob_sig> <x> <h_y_a>
         clause bob_reveal {
             args {
-                #[signer(|p| p.bob_pk.serialize())]
+                #[signer(p.bob_pk)]
                 bob_sig: Signature,
                 x: i64,
                 h_y_a: [u8; 32],
@@ -203,7 +188,8 @@ impl BisectParams {
 }
 
 /// Bisect_1 state: {h_start, h_end_a, h_end_b, trace_a, trace_b} (commit = Merkle root).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractState)]
+#[commit(merkle)]
 pub struct Bisect1State {
     pub h_start: [u8; 32],
     pub h_end_a: [u8; 32],
@@ -211,27 +197,10 @@ pub struct Bisect1State {
     pub trace_a: [u8; 32],
     pub trace_b: [u8; 32],
 }
-impl ContractState for Bisect1State {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(vec![
-            self.h_start,
-            self.h_end_a,
-            self.h_end_b,
-            self.trace_a,
-            self.trace_b,
-        ])
-        .root()
-        .to_vec()
-    }
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::InvalidData(
-            "Bisect1 state cannot be recovered from its commitment".to_string(),
-        ))
-    }
-}
 
 /// Bisect_2 state: the Bisect_1 fields plus Alice's revealed midstate/traces.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractState)]
+#[commit(merkle)]
 pub struct Bisect2State {
     pub h_start: [u8; 32],
     pub h_end_a: [u8; 32],
@@ -242,40 +211,18 @@ pub struct Bisect2State {
     pub trace_left_a: [u8; 32],
     pub trace_right_a: [u8; 32],
 }
-impl ContractState for Bisect2State {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(vec![
-            self.h_start,
-            self.h_end_a,
-            self.h_end_b,
-            self.trace_a,
-            self.trace_b,
-            self.h_mid_a,
-            self.trace_left_a,
-            self.trace_right_a,
-        ])
-        .root()
-        .to_vec()
-    }
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::InvalidData(
-            "Bisect2 state cannot be recovered from its commitment".to_string(),
-        ))
-    }
-}
 
 contract! {
     contract Bisect2 {
         params BisectParams;
         state Bisect2State;
-        internal_key |_p| nums_key();
 
         // Bob disputes the LEFT child: <bob_sig> <h_start> <h_end_a> <h_end_b>
         // <trace_a> <trace_b> <h_mid_a> <trace_left_a> <trace_right_a>
         // <h_mid_b> <trace_left_b> <trace_right_b>
         clause bob_reveal_left {
             args {
-                #[signer(|p| p.bob_pk.serialize())]
+                #[signer(p.bob_pk)]
                 bob_sig: Signature,
                 h_start: [u8; 32],
                 h_end_a: [u8; 32],
@@ -320,7 +267,7 @@ contract! {
         // Bob disputes the RIGHT child (same witness layout).
         clause bob_reveal_right {
             args {
-                #[signer(|p| p.bob_pk.serialize())]
+                #[signer(p.bob_pk)]
                 bob_sig: Signature,
                 h_start: [u8; 32],
                 h_end_a: [u8; 32],
@@ -365,7 +312,7 @@ contract! {
         // Alice can claim the pot if Bob abandons the challenge.
         clause forfait {
             args {
-                #[signer(|p| p.alice_pk.serialize())]
+                #[signer(p.alice_pk)]
                 alice_sig: Signature,
             }
             script Bisect2::forfait_script;
@@ -458,14 +405,13 @@ contract! {
     contract Bisect1 {
         params BisectParams;
         state Bisect1State;
-        internal_key |_p| nums_key();
 
         // Alice reveals the midstate and child traces: <alice_sig> <h_start>
         // <h_end_a> <h_end_b> <trace_a> <trace_b> <h_mid_a> <trace_left_a>
         // <trace_right_a>
         clause alice_reveal {
             args {
-                #[signer(|p| p.alice_pk.serialize())]
+                #[signer(p.alice_pk)]
                 alice_sig: Signature,
                 h_start: [u8; 32],
                 h_end_a: [u8; 32],
@@ -497,7 +443,7 @@ contract! {
         // Bob can claim the pot if Alice abandons the challenge.
         clause forfait {
             args {
-                #[signer(|p| p.bob_pk.serialize())]
+                #[signer(p.bob_pk)]
                 bob_sig: Signature,
             }
             script Bisect1::forfait_script;
@@ -570,39 +516,22 @@ impl G256Params {
 }
 
 /// G256S1 state: the input x, committed as sha256(x).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractState)]
+#[commit(merkle)]
 pub struct G256S1State {
+    #[leaf(sha256)]
     pub x: i64,
-}
-impl ContractState for G256S1State {
-    fn encode(&self) -> Vec<u8> {
-        sha256::Hash::hash(&bn2vch(self.x)).to_byte_array().to_vec()
-    }
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::InvalidData("G256S1 state is a commitment".to_string()))
-    }
 }
 
 /// G256S2 state: {t_a, y, x}, committed as merkle_root([t_a, sha256(y), sha256(x)]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ContractState)]
+#[commit(merkle)]
 pub struct G256S2State {
     pub t_a: [u8; 32],
+    #[leaf(sha256)]
     pub y: i64,
+    #[leaf(sha256)]
     pub x: i64,
-}
-impl ContractState for G256S2State {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(vec![
-            self.t_a,
-            sha256::Hash::hash(&bn2vch(self.y)).to_byte_array(),
-            sha256::Hash::hash(&bn2vch(self.x)).to_byte_array(),
-        ])
-        .root()
-        .to_vec()
-    }
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::InvalidData("G256S2 state is a commitment".to_string()))
-    }
 }
 
 /// The on-chain encoder for G256S2 state: given <t_a> <y> <x>, compute its
@@ -617,12 +546,11 @@ fn g256_s2_state_encoder() -> ScriptBuf {
 contract! {
     contract G256S0 {
         params G256Params;
-        internal_key |_p| nums_key();
 
         // <bob_sig> <x>
         clause choose {
             args {
-                #[signer(|p| p.bob_pk.serialize())]
+                #[signer(p.bob_pk)]
                 bob_sig: Signature,
                 x: i64,
             }
@@ -656,12 +584,11 @@ contract! {
     contract G256S1 {
         params G256Params;
         state G256S1State;
-        internal_key |_p| nums_key();
 
         // <alice_sig> <t_a> <y> <sha256(x)>
         clause reveal {
             args {
-                #[signer(|p| p.alice_pk.serialize())]
+                #[signer(p.alice_pk)]
                 alice_sig: Signature,
                 t_a: [u8; 32],
                 y: i64,
@@ -704,11 +631,10 @@ contract! {
     contract G256S2 {
         params G256Params;
         state G256S2State;
-        internal_key |_p| nums_key();
 
         clause withdraw {
             args {
-                #[signer(|p| p.alice_pk.serialize())]
+                #[signer(p.alice_pk)]
                 alice_sig: Signature,
             }
             script G256S2::withdraw_script;
@@ -717,7 +643,7 @@ contract! {
         // <bob_sig> <t_a> <y> <x> <z> <t_b>
         clause start_challenge {
             args {
-                #[signer(|p| p.bob_pk.serialize())]
+                #[signer(p.bob_pk)]
                 bob_sig: Signature,
                 t_a: [u8; 32],
                 y: i64,
