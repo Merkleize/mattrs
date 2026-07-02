@@ -161,35 +161,27 @@ pub trait WitnessEncodable {
 // WitnessEncodable implementations for common types
 // ============================================================================
 
-impl WitnessEncodable for i32 {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![crate::script_utils::bn2vch(*self as i64)]
-    }
+/// Signed integers use Bitcoin Script's number format (`bn2vch`), one element.
+macro_rules! impl_scriptnum_witness {
+    ($($t:ty),+ $(,)?) => {$(
+        impl WitnessEncodable for $t {
+            fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+                vec![crate::script_utils::bn2vch(*self as i64)]
+            }
 
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+                if witness.is_empty() {
+                    return Err(WitnessError::StackUnderflow);
+                }
+                let val = crate::script_utils::vch2bn(&witness[0])
+                    .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+                Ok((val as $t, 1))
+            }
         }
-        let val = crate::script_utils::vch2bn(&witness[0])
-            .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
-        Ok((val as i32, 1))
-    }
+    )+};
 }
 
-impl WitnessEncodable for i64 {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![crate::script_utils::bn2vch(*self)]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
-        }
-        let val = crate::script_utils::vch2bn(&witness[0])
-            .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
-        Ok((val, 1))
-    }
-}
+impl_scriptnum_witness!(i32, i64);
 
 impl<const N: usize> WitnessEncodable for [u8; N] {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -226,87 +218,32 @@ impl WitnessEncodable for Vec<u8> {
     }
 }
 
-impl WitnessEncodable for u8 {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![vec![*self]]
-    }
+/// Unsigned integers encode as their fixed-width little-endian bytes, one element.
+macro_rules! impl_le_witness {
+    ($($t:ty),+ $(,)?) => {$(
+        impl WitnessEncodable for $t {
+            fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+                vec![self.to_le_bytes().to_vec()]
+            }
 
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+                let first = witness.first().ok_or(WitnessError::StackUnderflow)?;
+                let bytes: [u8; std::mem::size_of::<$t>()] =
+                    first.as_slice().try_into().map_err(|_| {
+                        WitnessError::InvalidValue(format!(
+                            "Expected {} bytes for {}, got {}",
+                            std::mem::size_of::<$t>(),
+                            stringify!($t),
+                            first.len()
+                        ))
+                    })?;
+                Ok((<$t>::from_le_bytes(bytes), 1))
+            }
         }
-        if witness[0].len() != 1 {
-            return Err(WitnessError::InvalidValue(format!(
-                "Expected 1 byte for u8, got {}",
-                witness[0].len()
-            )));
-        }
-        Ok((witness[0][0], 1))
-    }
+    )+};
 }
 
-impl WitnessEncodable for u16 {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![self.to_le_bytes().to_vec()]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
-        }
-        if witness[0].len() != 2 {
-            return Err(WitnessError::InvalidValue(format!(
-                "Expected 2 bytes for u16, got {}",
-                witness[0].len()
-            )));
-        }
-        let mut bytes = [0u8; 2];
-        bytes.copy_from_slice(&witness[0]);
-        Ok((u16::from_le_bytes(bytes), 1))
-    }
-}
-
-impl WitnessEncodable for u32 {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![self.to_le_bytes().to_vec()]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
-        }
-        if witness[0].len() != 4 {
-            return Err(WitnessError::InvalidValue(format!(
-                "Expected 4 bytes for u32, got {}",
-                witness[0].len()
-            )));
-        }
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(&witness[0]);
-        Ok((u32::from_le_bytes(bytes), 1))
-    }
-}
-
-impl WitnessEncodable for u64 {
-    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![self.to_le_bytes().to_vec()]
-    }
-
-    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
-        }
-        if witness[0].len() != 8 {
-            return Err(WitnessError::InvalidValue(format!(
-                "Expected 8 bytes for u64, got {}",
-                witness[0].len()
-            )));
-        }
-        let mut bytes = [0u8; 8];
-        bytes.copy_from_slice(&witness[0]);
-        Ok((u64::from_le_bytes(bytes), 1))
-    }
-}
+impl_le_witness!(u8, u16, u32, u64);
 
 impl WitnessEncodable for bool {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -568,11 +505,9 @@ pub struct ClauseOutput {
     pub index: OutputIndex,
     /// The contract of this output.
     pub next_contract: Arc<dyn ErasedContract>,
-    /// The committed state bytes for the next instance (its taproot commitment).
-    pub next_state: Option<Vec<u8>>,
-    /// The next instance's logical state, when richer than its committed bytes, so
-    /// the child can later read it in its own `next_outputs` (see [`ErasedState`]).
-    pub next_state_expanded: Option<Box<dyn ErasedState>>,
+    /// The next instance's logical state; its committed bytes (the taproot state
+    /// commitment used for addressing) derive from it (see [`ErasedState`]).
+    pub next_state: Option<Box<dyn ErasedState>>,
     /// Determines the semantic of the output amount.
     pub next_amount: ClauseOutputAmountBehaviour,
 }
@@ -588,13 +523,13 @@ impl ClauseOutput {
     ///     .preserve_amount()
     ///     .build();
     /// ```
-    pub fn at(index: u32) -> ClauseOutputBuilder {
-        ClauseOutputBuilder::new(OutputIndex::Explicit(index))
+    pub fn at(index: u32) -> ClauseOutputTo {
+        ClauseOutputTo(OutputIndex::Explicit(index))
     }
 
     /// Start building a clause output whose index matches the spending input.
-    pub fn at_same_index() -> ClauseOutputBuilder {
-        ClauseOutputBuilder::new(OutputIndex::Same)
+    pub fn at_same_index() -> ClauseOutputTo {
+        ClauseOutputTo(OutputIndex::Same)
     }
 
     /// Create a terminal output set (no next contract).
@@ -602,39 +537,43 @@ impl ClauseOutput {
     pub fn terminal() -> Vec<ClauseOutput> {
         Vec::new()
     }
+
+    /// The committed state bytes of the next instance (its taproot commitment).
+    pub fn committed_state_bytes(&self) -> Option<Vec<u8>> {
+        self.next_state.as_ref().map(|s| s.committed_bytes())
+    }
+}
+
+/// First stage of the [`ClauseOutput`] builder: the output's contract must be set
+/// (with [`to`](Self::to)) before anything else, so a finished builder can never
+/// lack one.
+pub struct ClauseOutputTo(OutputIndex);
+
+impl ClauseOutputTo {
+    /// Set the next contract for this output.
+    pub fn to(self, contract: Arc<dyn ErasedContract>) -> ClauseOutputBuilder {
+        ClauseOutputBuilder {
+            index: self.0,
+            next_contract: contract,
+            next_state: None,
+            next_amount: ClauseOutputAmountBehaviour::PreserveOutput,
+        }
+    }
 }
 
 /// Builder for [`ClauseOutput`] with a fluent API.
 pub struct ClauseOutputBuilder {
     index: OutputIndex,
-    next_contract: Option<Arc<dyn ErasedContract>>,
-    next_state: Option<Vec<u8>>,
-    next_state_expanded: Option<Box<dyn ErasedState>>,
+    next_contract: Arc<dyn ErasedContract>,
+    next_state: Option<Box<dyn ErasedState>>,
     next_amount: ClauseOutputAmountBehaviour,
 }
 
 impl ClauseOutputBuilder {
-    fn new(index: OutputIndex) -> Self {
-        Self {
-            index,
-            next_contract: None,
-            next_state: None,
-            next_state_expanded: None,
-            next_amount: ClauseOutputAmountBehaviour::PreserveOutput,
-        }
-    }
-
-    /// Set the next contract for this output.
-    pub fn to(mut self, contract: Arc<dyn ErasedContract>) -> Self {
-        self.next_contract = Some(contract);
-        self
-    }
-
-    /// Set the state for the next contract. Records both the committed bytes (for
-    /// addressing) and the full logical state (so the child can read it later).
+    /// Set the state for the next contract. The committed bytes (for addressing)
+    /// derive from it, and the child instance carries it for its own future spends.
     pub fn with_state<S: ContractState + 'static>(mut self, state: &S) -> Self {
-        self.next_state = Some(state.encode());
-        self.next_state_expanded = Some(Box::new(state.clone()));
+        self.next_state = Some(Box::new(state.clone()));
         self
     }
 
@@ -656,15 +595,12 @@ impl ClauseOutputBuilder {
         self
     }
 
-    /// Build the [`ClauseOutput`]. Panics if no next contract was set via `to`.
+    /// Build the [`ClauseOutput`].
     pub fn build(self) -> ClauseOutput {
         ClauseOutput {
             index: self.index,
-            next_contract: self
-                .next_contract
-                .expect("ClauseOutput requires a next_contract; set one with .to()"),
+            next_contract: self.next_contract,
             next_state: self.next_state,
-            next_state_expanded: self.next_state_expanded,
             next_amount: self.next_amount,
         }
     }
@@ -1244,11 +1180,10 @@ pub trait ErasedContract: Debug + Send + Sync {
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
 
     /// Execute a clause (selected by name) against a spend's witness stack and
-    /// return the next outputs.
+    /// return the next outputs. The contract's own (encoded) params are used.
     fn execute_clause_from_witness(
         &self,
         clause_name: &str,
-        params_bytes: &[u8],
         witness: &[Vec<u8>],
         state: Option<&dyn ErasedState>,
     ) -> Result<NextOutputs, ClauseError>;
@@ -1281,17 +1216,57 @@ impl Clone for Box<dyn ErasedContract> {
 }
 
 // ============================================================================
-// Standard P2TR Contract
+// Standard P2TR Contracts
 // ============================================================================
+
+/// The clause/taptree/params core shared by [`StandardP2TR`] and
+/// [`StandardAugmentedP2TR`]. The two wrappers differ only in how the taproot
+/// internal key is derived (plain vs. state-tweaked).
+#[derive(Clone)]
+struct P2trContractCore {
+    taptree: Arc<TapTree>,
+    clauses: Vec<Arc<dyn ErasedClause>>,
+    /// Encoded params, so the contract is self-describing and child instances can
+    /// recover their params without a separate `next_params` carrier.
+    params_bytes: Vec<u8>,
+}
+
+impl P2trContractCore {
+    /// Derive the script taptree and the clause list from one `clause_tree`, so
+    /// they cannot drift apart.
+    fn new<P: ContractParams>(params: &P, clause_tree: ClauseTree) -> Self {
+        let taptree = Arc::new(clause_tree.to_script_tree());
+        let clauses = clause_tree.clauses();
+        debug_assert_no_duplicate_clauses(&clauses);
+        Self {
+            taptree,
+            clauses,
+            params_bytes: params.encode(),
+        }
+    }
+
+    fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
+        self.clauses.iter().find(|c| c.name() == name)
+    }
+
+    fn execute_clause_from_witness(
+        &self,
+        clause_name: &str,
+        witness: &[Vec<u8>],
+        state: Option<&dyn ErasedState>,
+    ) -> Result<NextOutputs, ClauseError> {
+        let clause = self
+            .get_clause(clause_name)
+            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
+
+        clause.next_outputs_from_witness(&self.params_bytes, witness, state)
+    }
+}
 
 /// Standard P2TR contract with clauses.
 pub struct StandardP2TR<P: ContractParams> {
-    pub internal_pubkey: XOnlyPublicKey,
-    pub taptree: Arc<TapTree>,
-    pub clauses: Vec<Arc<dyn ErasedClause>>,
-    /// Encoded params, so the contract is self-describing and child instances can
-    /// recover their params without a separate `next_params` carrier.
-    pub params_bytes: Vec<u8>,
+    internal_pubkey: XOnlyPublicKey,
+    core: P2trContractCore,
     _phantom: PhantomData<P>,
 }
 
@@ -1300,21 +1275,26 @@ impl<P: ContractParams> StandardP2TR<P> {
     /// the clause list are both derived from `clause_tree`, so they cannot drift
     /// apart; the encoded params are stored so the contract is self-describing.
     pub fn new(internal_pubkey: XOnlyPublicKey, params: &P, clause_tree: ClauseTree) -> Self {
-        let taptree = Arc::new(clause_tree.to_script_tree());
-        let clauses = clause_tree.clauses();
-        debug_assert_no_duplicate_clauses(&clauses);
         Self {
             internal_pubkey,
-            taptree,
-            clauses,
-            params_bytes: params.encode(),
+            core: P2trContractCore::new(params, clause_tree),
             _phantom: PhantomData,
         }
     }
 
+    /// The taproot internal key.
+    pub fn internal_pubkey(&self) -> XOnlyPublicKey {
+        self.internal_pubkey
+    }
+
+    /// The contract's script taptree.
+    pub fn taptree(&self) -> &Arc<TapTree> {
+        &self.core.taptree
+    }
+
     /// Get the taproot output key for this contract.
     pub fn output_key(&self) -> XOnlyPublicKey {
-        compute_taproot_output_key(&self.internal_pubkey, Some(&self.taptree))
+        compute_taproot_output_key(&self.internal_pubkey, Some(&self.core.taptree))
     }
 
     /// Get the scriptPubKey for this contract (OP_1 <output_key>).
@@ -1330,7 +1310,7 @@ impl<P: ContractParams> Debug for StandardP2TR<P> {
         f.debug_struct("StandardP2TR")
             .field("internal_pubkey", &self.internal_pubkey)
             .field("taptree", &"<TapTree>")
-            .field("clauses", &self.clauses.len())
+            .field("clauses", &self.core.clauses.len())
             .finish()
     }
 }
@@ -1339,9 +1319,7 @@ impl<P: ContractParams> Clone for StandardP2TR<P> {
     fn clone(&self) -> Self {
         Self {
             internal_pubkey: self.internal_pubkey,
-            taptree: self.taptree.clone(),
-            clauses: self.clauses.clone(),
-            params_bytes: self.params_bytes.clone(),
+            core: self.core.clone(),
             _phantom: PhantomData,
         }
     }
@@ -1349,29 +1327,25 @@ impl<P: ContractParams> Clone for StandardP2TR<P> {
 
 impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     fn clauses(&self) -> &[Arc<dyn ErasedClause>] {
-        &self.clauses
+        &self.core.clauses
     }
 
     fn params_bytes(&self) -> &[u8] {
-        &self.params_bytes
+        &self.core.params_bytes
     }
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
-        self.clauses.iter().find(|c| c.name() == name)
+        self.core.get_clause(name)
     }
 
     fn execute_clause_from_witness(
         &self,
         clause_name: &str,
-        params_bytes: &[u8],
         witness: &[Vec<u8>],
         state: Option<&dyn ErasedState>,
     ) -> Result<NextOutputs, ClauseError> {
-        let clause = self
-            .get_clause(clause_name)
-            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
-
-        clause.next_outputs_from_witness(params_bytes, witness, state)
+        self.core
+            .execute_clause_from_witness(clause_name, witness, state)
     }
 
     fn contract_type_id(&self) -> std::any::TypeId {
@@ -1379,9 +1353,7 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     }
 
     fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
-        Ok(ScriptBuf::new_p2tr_tweaked(
-            TweakedPublicKey::dangerous_assume_tweaked(self.output_key()),
-        ))
+        Ok(self.script_pubkey())
     }
 
     fn control_block_internal_key(
@@ -1392,7 +1364,7 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     }
 
     fn taptree(&self) -> &Arc<TapTree> {
-        &self.taptree
+        &self.core.taptree
     }
 
     fn clone_boxed(&self) -> Box<dyn ErasedContract> {
@@ -1400,17 +1372,19 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     }
 }
 
-// ============================================================================
-// Standard Augmented P2TR Contract
-// ============================================================================
+/// The 32-byte value an augmented internal key is tweaked with: the committed
+/// state bytes themselves when exactly 32 bytes, else their sha256.
+fn state_hash(committed: &[u8]) -> [u8; 32] {
+    match committed.try_into() {
+        Ok(arr) => arr,
+        Err(_) => *sha256::Hash::hash(committed).as_byte_array(),
+    }
+}
 
 /// Standard Augmented P2TR contract with state.
 pub struct StandardAugmentedP2TR<P: ContractParams, S: ContractState> {
-    pub naked_internal_pubkey: XOnlyPublicKey,
-    pub taptree: Arc<TapTree>,
-    pub clauses: Vec<Arc<dyn ErasedClause>>,
-    /// Encoded params, so the contract is self-describing (see [`StandardP2TR`]).
-    pub params_bytes: Vec<u8>,
+    naked_internal_pubkey: XOnlyPublicKey,
+    core: P2trContractCore,
     _phantom: PhantomData<(P, S)>,
 }
 
@@ -1419,53 +1393,36 @@ impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
     /// taptree and the clause list are both derived from `clause_tree`, so they
     /// cannot drift apart; the encoded params are stored to be self-describing.
     pub fn new(naked_internal_pubkey: XOnlyPublicKey, params: &P, clause_tree: ClauseTree) -> Self {
-        let taptree = Arc::new(clause_tree.to_script_tree());
-        let clauses = clause_tree.clauses();
-        debug_assert_no_duplicate_clauses(&clauses);
         Self {
             naked_internal_pubkey,
-            taptree,
-            clauses,
-            params_bytes: params.encode(),
+            core: P2trContractCore::new(params, clause_tree),
             _phantom: PhantomData,
         }
     }
 
+    /// The taproot internal key before the state tweak.
+    pub fn naked_internal_pubkey(&self) -> XOnlyPublicKey {
+        self.naked_internal_pubkey
+    }
+
+    /// The contract's script taptree.
+    pub fn taptree(&self) -> &Arc<TapTree> {
+        &self.core.taptree
+    }
+
     /// Compute the internal pubkey tweaked with the state.
     pub fn compute_internal_key(&self, state: &S) -> Result<XOnlyPublicKey, ContractError> {
-        let state_bytes = state.encode();
-
-        // For state commitment, we typically hash the state to get a 32-byte value
-        let state_hash = if state_bytes.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&state_bytes);
-            arr
-        } else {
-            // Hash the state if it's not exactly 32 bytes
-            let hash = sha256::Hash::hash(&state_bytes);
-            *hash.as_byte_array()
-        };
-
-        apply_state_tweak(&self.naked_internal_pubkey, &state_hash)
+        self.internal_key_from_committed(&state.encode())
     }
 
     /// The state-tweaked internal key from the *committed* state bytes directly,
-    /// without decoding to `S`. Mirrors [`compute_internal_key`], which tweaks with
-    /// `state.encode()` — i.e. exactly these bytes — so results are identical for
-    /// round-tripping states, and this also works when the logical state is not
+    /// without decoding to `S`. This also works when the logical state is not
     /// recoverable from its commitment (e.g. a Merkle root).
     fn internal_key_from_committed(
         &self,
         committed: &[u8],
     ) -> Result<XOnlyPublicKey, ContractError> {
-        let state_hash = if committed.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(committed);
-            arr
-        } else {
-            *sha256::Hash::hash(committed).as_byte_array()
-        };
-        apply_state_tweak(&self.naked_internal_pubkey, &state_hash)
+        apply_state_tweak(&self.naked_internal_pubkey, &state_hash(committed))
     }
 
     /// Get the taproot output key for this contract with the given state.
@@ -1473,7 +1430,7 @@ impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
         let internal_key = self.compute_internal_key(state)?;
         Ok(compute_taproot_output_key(
             &internal_key,
-            Some(&self.taptree),
+            Some(&self.core.taptree),
         ))
     }
 
@@ -1491,7 +1448,7 @@ impl<P: ContractParams, S: ContractState> Debug for StandardAugmentedP2TR<P, S> 
         f.debug_struct("StandardAugmentedP2TR")
             .field("naked_internal_pubkey", &self.naked_internal_pubkey)
             .field("taptree", &"<TapTree>")
-            .field("clauses", &self.clauses.len())
+            .field("clauses", &self.core.clauses.len())
             .finish()
     }
 }
@@ -1500,9 +1457,7 @@ impl<P: ContractParams, S: ContractState> Clone for StandardAugmentedP2TR<P, S> 
     fn clone(&self) -> Self {
         Self {
             naked_internal_pubkey: self.naked_internal_pubkey,
-            taptree: self.taptree.clone(),
-            clauses: self.clauses.clone(),
-            params_bytes: self.params_bytes.clone(),
+            core: self.core.clone(),
             _phantom: PhantomData,
         }
     }
@@ -1512,29 +1467,25 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
     for StandardAugmentedP2TR<P, S>
 {
     fn clauses(&self) -> &[Arc<dyn ErasedClause>] {
-        &self.clauses
+        &self.core.clauses
     }
 
     fn params_bytes(&self) -> &[u8] {
-        &self.params_bytes
+        &self.core.params_bytes
     }
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
-        self.clauses.iter().find(|c| c.name() == name)
+        self.core.get_clause(name)
     }
 
     fn execute_clause_from_witness(
         &self,
         clause_name: &str,
-        params_bytes: &[u8],
         witness: &[Vec<u8>],
         state: Option<&dyn ErasedState>,
     ) -> Result<NextOutputs, ClauseError> {
-        let clause = self
-            .get_clause(clause_name)
-            .ok_or_else(|| ClauseError::Other(format!("Clause {} not found", clause_name)))?;
-
-        clause.next_outputs_from_witness(params_bytes, witness, state)
+        self.core
+            .execute_clause_from_witness(clause_name, witness, state)
     }
 
     fn contract_type_id(&self) -> std::any::TypeId {
@@ -1544,7 +1495,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
         let committed = state_bytes.ok_or(ContractError::MissingState)?;
         let internal_key = self.internal_key_from_committed(committed)?;
-        let output_key = compute_taproot_output_key(&internal_key, Some(&self.taptree));
+        let output_key = compute_taproot_output_key(&internal_key, Some(&self.core.taptree));
         Ok(ScriptBuf::new_p2tr_tweaked(
             TweakedPublicKey::dangerous_assume_tweaked(output_key),
         ))
@@ -1559,7 +1510,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
     }
 
     fn taptree(&self) -> &Arc<TapTree> {
-        &self.taptree
+        &self.core.taptree
     }
 
     fn clone_boxed(&self) -> Box<dyn ErasedContract> {
@@ -1585,72 +1536,45 @@ pub enum InstanceStatus {
 /// A contract instance representing a specific UTXO with associated contract and state.
 ///
 /// Instances track the lifecycle of a contract from creation through funding to spending,
-/// and maintain references to child instances created when spent.
+/// and maintain references to child instances created when spent. Fields are private so
+/// the lifecycle invariants (status vs. outpoint/funding tx) cannot be corrupted; use
+/// the accessors and [`mark_funded`](Self::mark_funded) / [`mark_spent`](Self::mark_spent).
 #[derive(Debug)]
 pub struct ContractInstance {
     /// The contract template (type-erased for runtime polymorphism).
-    pub contract: Arc<dyn ErasedContract>,
+    contract: Arc<dyn ErasedContract>,
 
-    /// Serialized contract parameters (cached from `contract.params_bytes()`).
-    pub params_bytes: Vec<u8>,
-
-    /// Committed contract state bytes — the taproot state commitment (None for
-    /// non-augmented contracts). Used for addressing.
-    pub state_bytes: Option<Vec<u8>>,
-
-    /// The instance's logical state, when richer than its committed bytes (see
-    /// [`ErasedState`]). Passed to a clause's `next_outputs` when this is spent.
-    pub expanded_state: Option<Box<dyn ErasedState>>,
+    /// The instance's logical state (None for non-augmented contracts). Its
+    /// committed bytes — the taproot state commitment used for addressing —
+    /// derive from it (see [`ErasedState`]).
+    state: Option<Box<dyn ErasedState>>,
 
     /// The outpoint identifying this instance on-chain (None until funded).
-    pub outpoint: Option<OutPoint>,
+    outpoint: Option<OutPoint>,
 
     /// The transaction that funded this instance (None until funded).
-    pub funding_tx: Option<Transaction>,
+    funding_tx: Option<Transaction>,
 
     /// Current status in the instance lifecycle.
-    pub status: InstanceStatus,
+    status: InstanceStatus,
 
     /// Transaction ID that spent this instance (None until spent).
-    pub spent_in_tx: Option<Txid>,
+    spent_in_tx: Option<Txid>,
 
     /// Name of the clause used to spend this instance (None until spent).
-    pub clause_name: Option<String>,
+    clause_name: Option<String>,
 
     /// Child instances created when this instance was spent.
-    pub outputs: Vec<Rc<RefCell<ContractInstance>>>,
+    outputs: Vec<Rc<RefCell<ContractInstance>>>,
 }
 
 impl ContractInstance {
-    /// Create a new unfunded instance from its committed state bytes (no logical
-    /// state). The params are taken from the contract, which is self-describing.
-    pub fn new(contract: Arc<dyn ErasedContract>, state_bytes: Option<Vec<u8>>) -> Self {
-        Self::new_with_parts(contract, state_bytes, None)
-    }
-
-    /// Create a new unfunded instance carrying a logical (expanded) state; its
-    /// committed bytes are derived from `expanded.encode()`.
-    pub fn new_with_expanded(
-        contract: Arc<dyn ErasedContract>,
-        expanded: Option<Box<dyn ErasedState>>,
-    ) -> Self {
-        let state_bytes = expanded.as_ref().map(|s| s.committed_bytes());
-        Self::new_with_parts(contract, state_bytes, expanded)
-    }
-
-    /// Create a new unfunded instance from explicit committed bytes and (optional)
-    /// logical state. Callers should keep the two consistent.
-    pub fn new_with_parts(
-        contract: Arc<dyn ErasedContract>,
-        state_bytes: Option<Vec<u8>>,
-        expanded_state: Option<Box<dyn ErasedState>>,
-    ) -> Self {
-        let params_bytes = contract.params_bytes().to_vec();
+    /// Create a new unfunded instance. The params are taken from the contract,
+    /// which is self-describing; the committed state bytes derive from `state`.
+    pub fn new(contract: Arc<dyn ErasedContract>, state: Option<Box<dyn ErasedState>>) -> Self {
         Self {
             contract,
-            params_bytes,
-            state_bytes,
-            expanded_state,
+            state,
             outpoint: None,
             funding_tx: None,
             status: InstanceStatus::Unfunded,
@@ -1658,6 +1582,52 @@ impl ContractInstance {
             clause_name: None,
             outputs: Vec::new(),
         }
+    }
+
+    /// The contract template.
+    pub fn contract(&self) -> &Arc<dyn ErasedContract> {
+        &self.contract
+    }
+
+    /// The instance's logical state, if any.
+    pub fn state(&self) -> Option<&dyn ErasedState> {
+        self.state.as_deref()
+    }
+
+    /// The committed state bytes (the taproot state commitment used for
+    /// addressing), if the instance has state.
+    pub fn committed_state_bytes(&self) -> Option<Vec<u8>> {
+        self.state.as_ref().map(|s| s.committed_bytes())
+    }
+
+    /// Current status in the instance lifecycle.
+    pub fn status(&self) -> InstanceStatus {
+        self.status
+    }
+
+    /// The outpoint identifying this instance on-chain (None until funded).
+    pub fn outpoint(&self) -> Option<OutPoint> {
+        self.outpoint
+    }
+
+    /// The transaction that funded this instance (None until funded).
+    pub fn funding_tx(&self) -> Option<&Transaction> {
+        self.funding_tx.as_ref()
+    }
+
+    /// Transaction ID that spent this instance (None until spent).
+    pub fn spent_in_tx(&self) -> Option<Txid> {
+        self.spent_in_tx
+    }
+
+    /// Name of the clause used to spend this instance (None until spent).
+    pub fn clause_name(&self) -> Option<&str> {
+        self.clause_name.as_deref()
+    }
+
+    /// Child instances created when this instance was spent.
+    pub fn outputs(&self) -> &[Rc<RefCell<ContractInstance>>] {
+        &self.outputs
     }
 
     /// Mark the instance as funded with the given outpoint and transaction.

@@ -41,7 +41,7 @@ fn reference_params() -> RpsParams {
 fn test_rps_s0_taptree_matches_reference() {
     let s0 = RpsGameS0::new(reference_params());
     assert_eq!(
-        hex::encode(s0.contract.taptree.root_hash()),
+        hex::encode(s0.contract.taptree().root_hash()),
         "627bc918efafddfc00f69cc3d14bc2b8d9a7854d05fd048a6eee0640aaa4a26f"
     );
 }
@@ -52,7 +52,7 @@ fn test_rps_s1_taptree_matches_reference() {
     // adjudication scripts and payout templates are byte-identical to pymatt.
     let s1 = RpsGameS1::new(reference_params());
     assert_eq!(
-        hex::encode(s1.contract.taptree.root_hash()),
+        hex::encode(s1.contract.taptree().root_hash()),
         "3a7709078e9ce23ab2fa1c8191bba476a27ced73c6a372e290d3a273305a250c"
     );
 }

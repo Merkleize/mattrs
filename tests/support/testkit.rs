@@ -28,13 +28,13 @@ pub fn fund_fake(
     amount: u64,
     seed: u8,
 ) -> InstanceHandle {
-    let instance = Rc::new(RefCell::new(ContractInstance::new_with_expanded(
+    let instance = Rc::new(RefCell::new(ContractInstance::new(
         contract, expanded,
     )));
     let script_pubkey = {
         let inst = instance.borrow();
-        inst.contract
-            .script_pubkey(inst.state_bytes.as_deref())
+        inst.contract()
+            .script_pubkey(inst.committed_state_bytes().as_deref())
             .unwrap()
     };
     let funding_tx = Transaction {

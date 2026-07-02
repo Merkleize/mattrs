@@ -124,9 +124,7 @@ impl<'a> ContractManager<'a> {
         amount: Amount,
     ) -> Result<InstanceHandle, ManagerError> {
         // Create the instance (its committed bytes derive from the logical state).
-        let instance = Rc::new(RefCell::new(ContractInstance::new_with_expanded(
-            contract, state,
-        )));
+        let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state)));
 
         // Get the script pubkey for this instance
         let script_pubkey = self.get_instance_script_pubkey(&instance)?;
@@ -182,20 +180,19 @@ impl<'a> ContractManager<'a> {
         builder: &SpendBuilder,
     ) -> Result<(Transaction, NextOutputs), ManagerError> {
         let inst = builder.instance.borrow();
-        if inst.status != InstanceStatus::Funded {
+        if inst.status() != InstanceStatus::Funded {
             return Err(ManagerError::InvalidInstance(
                 "Instance is not funded".to_string(),
             ));
         }
         let outpoint = inst
-            .outpoint
+            .outpoint()
             .ok_or_else(|| ManagerError::InvalidInstance("No outpoint".to_string()))?;
 
-        let next = inst.contract.execute_clause_from_witness(
+        let next = inst.contract().execute_clause_from_witness(
             builder.clause_name,
-            &inst.params_bytes,
             &builder.witness_args,
-            inst.expanded_state.as_deref(),
+            inst.state(),
         )?;
         drop(inst);
 
@@ -280,10 +277,9 @@ impl<'a> ContractManager<'a> {
 
         let mut handles = Vec::new();
         for (idx, clause_output) in by_index {
-            let instance = Rc::new(RefCell::new(ContractInstance::new_with_parts(
+            let instance = Rc::new(RefCell::new(ContractInstance::new(
                 clause_output.next_contract.clone(),
                 clause_output.next_state.clone(),
-                clause_output.next_state_expanded.clone(),
             )));
             instance
                 .borrow_mut()
@@ -314,17 +310,16 @@ impl<'a> ContractManager<'a> {
 
         for builder in builders {
             let inst = builder.instance.borrow();
-            if inst.status != InstanceStatus::Funded {
+            if inst.status() != InstanceStatus::Funded {
                 return Err(ManagerError::InvalidInstance(
                     "Instance is not funded".to_string(),
                 ));
             }
             let outpoint = inst
-                .outpoint
+                .outpoint()
                 .ok_or_else(|| ManagerError::InvalidInstance("No outpoint".to_string()))?;
             let prevout = inst
-                .funding_tx
-                .as_ref()
+                .funding_tx()
                 .map(|ftx| ftx.output[outpoint.vout as usize].clone())
                 .ok_or_else(|| {
                     ManagerError::TransactionBuildError("No prevout available".to_string())
@@ -337,11 +332,10 @@ impl<'a> ContractManager<'a> {
                 sequence: builder.sequence.unwrap_or(Sequence::ZERO),
                 witness: bitcoin::Witness::new(),
             });
-            let next = inst.contract.execute_clause_from_witness(
+            let next = inst.contract().execute_clause_from_witness(
                 builder.clause_name,
-                &inst.params_bytes,
                 &builder.witness_args,
-                inst.expanded_state.as_deref(),
+                inst.state(),
             )?;
             nexts.push(next);
         }
@@ -376,7 +370,7 @@ impl<'a> ContractManager<'a> {
                 };
                 let script_pubkey = clause_output
                     .next_contract
-                    .script_pubkey(clause_output.next_state.as_deref())?;
+                    .script_pubkey(clause_output.committed_state_bytes().as_deref())?;
                 let entry = outputs_map.entry(idx).or_insert_with(|| TxOut {
                     script_pubkey: script_pubkey.clone(),
                     value: Amount::ZERO,
@@ -459,7 +453,9 @@ impl<'a> ContractManager<'a> {
         instance: &Rc<RefCell<ContractInstance>>,
     ) -> Result<bitcoin::ScriptBuf, ManagerError> {
         let inst = instance.borrow();
-        Ok(inst.contract.script_pubkey(inst.state_bytes.as_deref())?)
+        Ok(inst
+            .contract()
+            .script_pubkey(inst.committed_state_bytes().as_deref())?)
     }
 
     fn wait_for_transaction(&self, txid: Txid) -> Result<Transaction, ManagerError> {
@@ -520,11 +516,9 @@ impl<'a> ContractManager<'a> {
         // tapscript + control block.
         let prevout = {
             let inst = builder.instance.borrow();
-            inst.funding_tx
-                .as_ref()
+            inst.funding_tx()
                 .and_then(|ftx| {
-                    inst.outpoint
-                        .as_ref()
+                    inst.outpoint()
                         .map(|op| ftx.output[op.vout as usize].clone())
                 })
                 .ok_or_else(|| {
@@ -560,7 +554,7 @@ impl<'a> ContractManager<'a> {
         prevouts: &[TxOut],
     ) -> Result<bitcoin::Witness, ManagerError> {
         let inst = instance.borrow();
-        let clause = inst.contract.get_clause(clause_name).ok_or_else(|| {
+        let clause = inst.contract().get_clause(clause_name).ok_or_else(|| {
             ManagerError::TransactionBuildError(format!("Clause '{}' not found", clause_name))
         })?;
         let leaf_script = clause.script().clone();
@@ -617,10 +611,10 @@ impl<'a> ContractManager<'a> {
 
         // Append the leaf script and control block (state-tweaked key for augmented).
         let internal_key = inst
-            .contract
-            .control_block_internal_key(inst.state_bytes.as_deref())?;
+            .contract()
+            .control_block_internal_key(inst.committed_state_bytes().as_deref())?;
         let control_block = inst
-            .contract
+            .contract()
             .taptree()
             .control_block(&internal_key, clause_name)
             .ok_or_else(|| {
@@ -650,13 +644,8 @@ impl<'a> ContractManager<'a> {
 
         let input_amount = {
             let inst = builder.instance.borrow();
-            inst.funding_tx
-                .as_ref()
-                .and_then(|ftx| {
-                    inst.outpoint
-                        .as_ref()
-                        .map(|op| ftx.output[op.vout as usize].value)
-                })
+            inst.funding_tx()
+                .and_then(|ftx| inst.outpoint().map(|op| ftx.output[op.vout as usize].value))
                 .unwrap_or(Amount::ZERO)
         };
 
@@ -692,7 +681,7 @@ impl<'a> ContractManager<'a> {
             let idx = index_of(co);
             let script_pubkey = co
                 .next_contract
-                .script_pubkey(co.next_state.as_deref())?;
+                .script_pubkey(co.committed_state_bytes().as_deref())?;
             let value = match co.next_amount {
                 ClauseOutputAmountBehaviour::PreserveOutput => preserve_value,
                 ClauseOutputAmountBehaviour::IgnoreOutput => Amount::ZERO,
@@ -728,7 +717,7 @@ impl<'a> ContractManager<'a> {
         // Get parent's transaction info
         let parent_ref = parent.borrow();
         let parent_txid = parent_ref
-            .spent_in_tx
+            .spent_in_tx()
             .ok_or_else(|| ManagerError::InvalidInstance("Parent not spent yet".to_string()))?;
         drop(parent_ref);
 
@@ -741,7 +730,7 @@ impl<'a> ContractManager<'a> {
                 OutputIndex::Same => {
                     let parent_ref = parent.borrow();
                     parent_ref
-                        .outpoint
+                        .outpoint()
                         .ok_or_else(|| {
                             ManagerError::InvalidInstance("No parent outpoint".to_string())
                         })?
@@ -752,10 +741,9 @@ impl<'a> ContractManager<'a> {
 
             // The child contract is self-describing, so its params come from it;
             // it also carries the logical state for its own future spends.
-            let instance = Rc::new(RefCell::new(ContractInstance::new_with_parts(
+            let instance = Rc::new(RefCell::new(ContractInstance::new(
                 clause_out.next_contract.clone(),
                 clause_out.next_state.clone(),
-                clause_out.next_state_expanded.clone(),
             )));
 
             let outpoint = OutPoint {
@@ -813,32 +801,36 @@ impl InstanceHandle {
 
     /// Get the instance status.
     pub fn status(&self) -> InstanceStatus {
-        self.instance.borrow().status
+        self.instance.borrow().status()
     }
 
     /// Get the outpoint (if funded).
     pub fn outpoint(&self) -> Option<OutPoint> {
-        self.instance.borrow().outpoint
+        self.instance.borrow().outpoint()
     }
 
     /// The `TypeId` of the underlying contract (for typed-handle conversions).
     pub fn contract_type_id(&self) -> std::any::TypeId {
-        self.instance.borrow().contract.contract_type_id()
+        self.instance.borrow().contract().contract_type_id()
     }
 
-    /// Decode this instance's state as `S`, if it has any.
-    pub fn state<S: ContractState>(&self) -> Option<S> {
+    /// This instance's state as `S`, if it has any: the logical state when it is
+    /// an `S` (by downcast), else whatever `S::decode` recovers from the committed
+    /// bytes (for round-tripping states).
+    pub fn state<S: ContractState + 'static>(&self) -> Option<S> {
         let inst = self.instance.borrow();
-        inst.state_bytes
-            .as_deref()
-            .and_then(|bytes| S::decode(bytes).ok())
+        let erased = inst.state()?;
+        if let Some(typed) = erased.as_any().downcast_ref::<S>() {
+            return Some(typed.clone());
+        }
+        S::decode(&erased.committed_bytes()).ok()
     }
 
     /// Get the child instances created from spending this instance.
     pub fn outputs(&self) -> Vec<InstanceHandle> {
         self.instance
             .borrow()
-            .outputs
+            .outputs()
             .iter()
             .cloned()
             .map(|instance| InstanceHandle { instance })

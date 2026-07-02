@@ -163,7 +163,7 @@ impl BisectParams {
     }
 
     fn leaf_root(&self) -> [u8; 32] {
-        self.leaf().contract.taptree.root_hash()
+        self.leaf().contract.taptree().root_hash()
     }
 
     fn child(&self, i: i64, j: i64) -> BisectParams {
@@ -183,7 +183,7 @@ impl BisectParams {
             let m = self.m();
             Bisect1::new(self.child(self.i, self.i + m - 1))
                 .contract
-                .taptree
+                .taptree()
                 .root_hash()
         }
     }
@@ -196,7 +196,7 @@ impl BisectParams {
             let m = self.m();
             Bisect1::new(self.child(self.i + m, self.j))
                 .contract
-                .taptree
+                .taptree()
                 .root_hash()
         }
     }
@@ -509,7 +509,7 @@ contract! {
 
 impl Bisect1 {
     fn bisect2_root(p: &BisectParams) -> [u8; 32] {
-        Bisect2::new(p.clone()).contract.taptree.root_hash()
+        Bisect2::new(p.clone()).contract.taptree().root_hash()
     }
 
     fn alice_reveal_script(p: &BisectParams) -> ScriptBuf {
@@ -642,7 +642,7 @@ contract! {
 
 impl G256S0 {
     fn choose_script(p: &G256Params) -> ScriptBuf {
-        let s1_root = G256S1::new(p.clone()).contract.taptree.root_hash();
+        let s1_root = G256S1::new(p.clone()).contract.taptree().root_hash();
         script! {
             OP_SHA256
             { check_output_contract(s1_root, -1, None) }
@@ -687,7 +687,7 @@ contract! {
 
 impl G256S1 {
     fn reveal_script(p: &G256Params) -> ScriptBuf {
-        let s2_root = G256S2::new(p.clone()).contract.taptree.root_hash();
+        let s2_root = G256S2::new(p.clone()).contract.taptree().root_hash();
         script! {
             OP_DUP
             OP_SHA256
@@ -756,7 +756,7 @@ impl G256S2 {
     }
 
     fn start_challenge_script(p: &G256Params) -> ScriptBuf {
-        let bisect_root = Bisect1::new(p.bisect()).contract.taptree.root_hash();
+        let bisect_root = Bisect1::new(p.bisect()).contract.taptree().root_hash();
         script! {
             OP_TOALTSTACK
             // y != z

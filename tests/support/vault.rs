@@ -153,7 +153,7 @@ impl Vault {
     fn trigger_script(params: &VaultParams) -> ScriptBuf {
         let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
             .contract
-            .taptree
+            .taptree()
             .root_hash();
 
         script! {
@@ -169,7 +169,7 @@ impl Vault {
     fn trigger_and_revault_script(params: &VaultParams) -> ScriptBuf {
         let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
             .contract
-            .taptree
+            .taptree()
             .root_hash();
 
         script! {

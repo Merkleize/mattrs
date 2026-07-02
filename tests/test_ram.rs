@@ -60,7 +60,7 @@ fn test_ram_taptree_matches_reference() {
     // matches the pymatt reference RAM(4).get_taptree_merkle_root().
     let ram = Ram::new(RamParams { size: 4 });
     assert_eq!(
-        hex::encode(ram.contract.taptree.root_hash()),
+        hex::encode(ram.contract.taptree().root_hash()),
         "c86ddcabdddb39b345fbb7bc3cc4471c4a57672dddb27615a3b7e69027cf7bad"
     );
 }
