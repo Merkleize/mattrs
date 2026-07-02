@@ -14,16 +14,20 @@
 //!
 //! # Defining a contract
 //!
-//! - Declare params/state/args structs and derive [`macro@ContractParams`],
-//!   [`macro@ContractState`], and [`macro@ClauseArgs`] (re-exported here from
-//!   `mattrs-derive`).
-//! - Build clauses with the `clause!` macro and assemble them with the
-//!   `clause_tree!` macro, then hand the tree to
-//!   [`StandardP2TR::new`](contracts::StandardP2TR::new) or
-//!   [`StandardAugmentedP2TR::new`](contracts::StandardAugmentedP2TR::new).
+//! - Declare params/state structs and derive [`macro@ContractParams`] /
+//!   [`macro@ContractState`] (re-exported here from `mattrs-derive`).
+//! - Write one [`macro@contract`]`! { .. }` block: it generates the per-clause
+//!   `*Args` structs, the clause tree, the contract struct (`new`/`fund`/
+//!   `as_erased`), and a typed handle with one spend method per clause.
 //! - Drive funding/spending on-chain with [`ContractManager`](manager::ContractManager).
 //!
-//! See `tests/support/vault.rs` for a complete worked example (a two-stage vault).
+//! Contracts whose clause layout is only known at runtime bypass the DSL and use
+//! the same primitives directly (`clause!` / `clause_tree!` /
+//! [`StandardClause::new`](contracts::StandardClause::new)) — see [`fraud`] for a
+//! worked example (the generic bisection fraud proof).
+//!
+//! Start with `examples/getting_started.rs` (runs offline); `tests/support/vault.rs`
+//! is a complete two-stage vault.
 
 // Lets the `mattrs-derive` macros refer to this crate as `::mattrs::...` even when
 // the deriving type lives inside this crate (e.g. examples/tests), so the derives

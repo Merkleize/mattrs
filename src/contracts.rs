@@ -1,3 +1,27 @@
+//! Core contract model: typed clauses, taproot trees, and contract templates.
+//!
+//! The types here layer as follows:
+//!
+//! - **Witness encoding** — [`WitnessEncodable`] turns values into witness-stack
+//!   elements; [`ClauseArgs`], [`ContractParams`] and [`ContractState`] are the
+//!   per-role encodings a contract declares (usually via the derive macros).
+//!   [`ErasedState`] carries a *logical* state on an instance even when its
+//!   on-chain commitment is lossy (e.g. a Merkle root).
+//! - **Clauses** — a [`StandardClause`] is one tapscript spending path: a name,
+//!   a script, [`ArgSpec`]s describing its witness layout, and an optional
+//!   function computing the [`NextOutputs`] it produces when spent (covenant
+//!   [`ClauseOutput`]s or a fixed [`CtvTemplate`]). [`ErasedClause`] is its
+//!   type-erased view for runtime dispatch.
+//! - **Trees** — a [`ClauseTree`] arranges clauses into the taproot tree shape;
+//!   the address-bearing script [`TapTree`], the spend-time clause lookup, and
+//!   the witness layout are all *derived* from it, so they cannot drift apart.
+//! - **Contracts** — [`StandardP2TR`] (plain internal key) and
+//!   [`StandardAugmentedP2TR`] (state-tweaked internal key) wrap a clause tree
+//!   plus encoded params; [`ErasedContract`] is their type-erased view.
+//! - **Instances** — a [`ContractInstance`] tracks one UTXO of a contract
+//!   through its funded/spent lifecycle (driven by the
+//!   [`ContractManager`](crate::manager::ContractManager)).
+
 use std::{cell::RefCell, fmt, fmt::Debug, marker::PhantomData, rc::Rc, sync::Arc};
 
 use bitcoin::{
@@ -684,7 +708,9 @@ impl From<CtvTemplate> for NextOutputs {
 /// A single leaf in a taproot tree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TapLeaf {
+    /// The clause name this leaf belongs to (not consensus-visible).
     pub name: String,
+    /// The leaf's tapscript.
     pub script: ScriptBuf,
 }
 
@@ -1026,7 +1052,10 @@ impl Clone for Box<dyn ArgType> {
 /// Specification for a single clause argument.
 #[derive(Clone)]
 pub struct ArgSpec {
+    /// The argument name (matches the `*Args` struct field).
     pub name: String,
+    /// How many witness elements the argument occupies, and whether it is a
+    /// signature (see [`ArgType`]).
     pub arg_type: Arc<dyn ArgType>,
 }
 
@@ -1067,6 +1096,9 @@ where
     S: ContractState + 'static,
     A: ClauseArgs + 'static,
 {
+    /// Build a clause from its name, tapscript, witness-layout specs, and the
+    /// optional function computing its next outputs (`None` = terminal clause).
+    /// `arg_specs` must describe exactly the witness layout `A` encodes to.
     pub fn new(
         name: String,
         script: ScriptBuf,

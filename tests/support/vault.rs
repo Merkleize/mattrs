@@ -5,6 +5,18 @@
 //! `mattrs` API. Each contract's clauses, taptree, typed handle, and per-clause
 //! spend methods are generated from one `contract!` block; the tapscripts stay as
 //! ordinary, reviewable functions referenced by the DSL.
+//!
+//! ```text
+//! Vault{alternate_pk?, spend_delay, recover_pk, unvault_pk}
+//!   - trigger(sig, ctv_hash, out_i)          => Unvaulting[ctv_hash]
+//!   - trigger_and_revault(sig, ctv_hash,
+//!                         out_i, revault_i)  => Vault (deduct) + Unvaulting[ctv_hash]
+//!   - recover(out_i)                         => recover_pk          (terminal)
+//!
+//! Unvaulting{alternate_pk?, spend_delay, recover_pk}[ctv_hash]
+//!   - withdraw(ctv_hash), after spend_delay  => the CTV template    (terminal)
+//!   - recover(out_i)                         => recover_pk          (terminal)
+//! ```
 #![allow(dead_code)]
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};

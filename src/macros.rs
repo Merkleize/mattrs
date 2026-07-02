@@ -1,3 +1,9 @@
+//! Declarative helpers below the `contract!` DSL: `clause!` builds a single
+//! `StandardClause`, `clause_tree!` arranges (type-erased) clauses into a
+//! `ClauseTree` with nested-bracket syntax. The `contract!` macro expands to
+//! these same primitives; use them directly when a contract doesn't fit the DSL
+//! (e.g. runtime-shaped clauses like `mattrs::fraud`'s).
+
 /// Helper macro for creating `StandardClause` instances with less boilerplate.
 ///
 /// Returns `Arc<StandardClause<P, S, ArgsType>>`. Bind it to

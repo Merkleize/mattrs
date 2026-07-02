@@ -6,8 +6,32 @@ contracts using `CHECKCONTRACTVERIFY` (CCV) and `CHECKTEMPLATEVERIFY` (CTV).
 It provides witness (de)serialization, typed clauses with type-erased runtime
 dispatch, P2TR / augmented-P2TR contract templates, a taproot tree, derive macros
 (`mattrs-derive`), a `contract!` DSL that generates a typed handle with one spend
-method per clause, and an RPC-driven `ContractManager` for funding and spending
-instances on regtest.
+method per clause, a generic bisection fraud-proof module (`mattrs::fraud`), and
+an RPC-driven `ContractManager` for funding and spending instances on regtest.
+
+## Getting started
+
+The crate is unpublished; use it as a path dependency:
+
+```toml
+[dependencies]
+mattrs = { path = "../mattrs2" }
+bitcoin = "0.32"
+bitcoin-script = { path = "../mattrs2/bitcoin-script" }   # patched vendor, see below
+```
+
+Then run the offline example — it defines a two-clause contract with the
+`contract!` DSL, derives its address, and builds a signed spend without a node:
+
+```sh
+cargo run --example getting_started
+```
+
+> **Note on `bitcoin-script/`**: this repository vendors a *patched* copy of
+> [BitVM/rust-bitcoin-script](https://github.com/BitVM/rust-bitcoin-script) v0.2.0.
+> The patch (`bitcoin-script/src/parse.rs`) teaches the `script!` macro the MATT
+> opcodes `OP_CHECKTEMPLATEVERIFY` (0xb3) and `OP_CHECKCONTRACTVERIFY` (0xbb),
+> which upstream does not know. Do not "upgrade" it back to upstream.
 
 ## Design: one source of truth
 
@@ -38,20 +62,35 @@ struct VaultParams { /* ... */ }
 contract! {
     contract Vault {
         params VaultParams;
+        // optional; defaults to the NUMS key (no key-spend path)
         internal_key |p| internal_key_or_nums(p.alternate_pk);
 
         clause trigger {
             args {
-                #[signer(|p| p.unvault_pk.serialize())] sig: Signature,
+                #[signer(p.unvault_pk)] sig: Signature,   // auto-filled at spend time
                 ctv_hash: [u8; 32],
                 out_i: i64,
             }
             script Vault::trigger_script;          // fn(&VaultParams) -> ScriptBuf
-            next(p, a) { /* -> Result<Vec<ClauseOutput>, ClauseError> */ }
+            // The body yields Result<T, ClauseError> where T is anything
+            // Into<NextOutputs>: Vec<ClauseOutput>, CtvTemplate, or NextOutputs.
+            next(p, a) { /* ... */ }
         }
         // ... more clauses ...
         tree [trigger, [trigger_and_revault, recover]];
     }
+}
+```
+
+Multi-field contract state commits with a derive instead of a manual impl:
+
+```rust
+#[derive(Debug, Clone, ContractState)]
+#[commit(merkle)]                  // encode() = Merkle root of the fields' leaves
+pub struct G256S2State {
+    pub t_a: [u8; 32],             // a raw 32-byte leaf
+    #[leaf(sha256)] pub y: i64,    // leaf = sha256 of the field's witness encoding
+    #[leaf(sha256)] pub x: i64,
 }
 ```
 
@@ -82,6 +121,29 @@ with `MissingSigner`.
 
 A complete worked example (a two-stage vault) lives in `tests/support/vault.rs`.
 
+## Fraud proofs: `mattrs::fraud`
+
+The generic bisection fraud-proof protocol (pymatt's `hub/fraud.py`) is a library
+module: Alice claims an `n`-step computation's result, Bob disputes it, and the
+`Bisect_1`/`Bisect_2` contracts bisect the execution trace down to one step, which
+the `Leaf` contract re-runs on-chain. The whole machinery is generic over a
+`Computer` — the step function and value-commitment as script fragments plus the
+witness specs of one value:
+
+```rust
+let compute2x = Computer {
+    encoder: script! { OP_SHA256 },     // value commitment
+    func:    script! { OP_DUP OP_ADD }, // one step: y = 2x
+    specs:   vec![ArgSpec { name: "x".into(), arg_type: Arc::new(IntType) }],
+};
+let leaf_factory: LeafFactory =
+    Arc::new(move |_i| Leaf::new(LeafParams { alice_pk, bob_pk }, &compute2x));
+let challenge = Bisect1::new(BisectParams { alice_pk, bob_pk, i: 0, j: 7 },
+                             &leaf_factory, /*forfait_timeout=*/10);
+```
+
+`tests/support/game256.rs` instantiates it for the game256 example in ~30 lines.
+
 ## Ported examples
 
 The examples from the Python reference framework (`pymatt`) are ported under
@@ -92,13 +154,15 @@ The examples from the Python reference framework (`pymatt`) are ported under
 | --- | --- | --- |
 | **vault** (`vault.rs`) | two-stage vault; CCV + CTV; augmented state; multi-input trigger-with-revault | address matches; spendable (regtest e2e) |
 | **rps** (`rps.rs`) | hashed state; clause-owned **CTV templates** for payouts; `check_in/out_contract` | roots match; spends build |
-| **ram** (`ram.rs`) | a Merkle-committed cell vector; the `MerkleProofType` witness arg; **expanded state** | root matches; `write` spends |
-| **game256** (`game256.rs`) | a recursive **bisection fraud proof** (`Leaf` → `Bisect_1`/`Bisect_2` → `G256S0/1/2`) | all taptrees match |
+| **ram** (`ram.rs`) | a Merkle-committed cell vector; the `WitProof<N>` witness arg; **expanded state** | root matches; `write` spends |
+| **game256** (`game256.rs`) | the **bisection fraud proof** (`mattrs::fraud`) driven by the `G256S0/1/2` game stages | all taptrees match; the full state machine spends |
 
-Supporting MATT infrastructure lives in the library for downstream reuse: a data
-`MerkleTree` / `MerkleProof` / `WitProof` / `MerkleProofType` (`mattrs::merkle`)
-and the `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
-`check_output_contract` / `older` script fragments (`mattrs::script_helpers`).
+Supporting MATT infrastructure lives in the library for downstream reuse: the
+generic fraud-proof contracts (`mattrs::fraud`), a data `MerkleTree` /
+`MerkleProof` / `WitProof` / `MerkleProofType` (`mattrs::merkle`), and the
+`merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
+`check_output_contract` / `older` / `timeout_sig_script` script fragments
+(`mattrs::script_helpers`), plus `commit_int` (`mattrs::script_utils`).
 
 ## Spend-API features
 
@@ -112,11 +176,12 @@ and the `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
 ## Testing
 
 ```sh
-cargo test          # unit + integration tests (no node required)
-cargo test -- --ignored   # also runs the end-to-end test against a regtest bitcoind
+cargo test                # unit + integration tests (no node required)
+cargo test -- --ignored   # also runs the end-to-end tests against a regtest bitcoind
 ```
 
-The integration test in `tests/test_vault.rs` is `#[ignore]`d by default because
-it needs a configured regtest `bitcoind`.
+The end-to-end tests are `#[ignore]`d by default because they need a configured
+regtest `bitcoind` with a funded `testwallet` (cookie or env-var RPC auth; see
+`tests/support/testkit.rs`).
 
 [`ClauseTree`]: src/contracts.rs
