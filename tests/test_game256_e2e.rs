@@ -41,7 +41,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
 
     // The game stages: Bob picks x, Alice claims y (fraudulently), Bob starts
     // the challenge with his own result z and trace commitment.
-    let s0 = G256S0::fund(&mut manager, Amount::from_sat(AMOUNT), params)?;
+    let s0 = G256S0::new(params).fund(&mut manager, Amount::from_sat(AMOUNT))?;
     let s1: G256S1Handle = s0
         .choose(alice_vals[0])
         .sign(HotSigner::new(bob_xpriv()))

@@ -18,10 +18,7 @@ use std::sync::Arc;
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::argtypes::IntType;
-use mattrs::contracts::{
-    ArgSpec, ClauseArgs, ClauseOutput, ContractParams, ContractState, WitnessEncodable,
-    WitnessError,
-};
+use mattrs::contracts::{ArgSpec, ClauseOutput};
 use mattrs::{contract, Signature};
 use mattrs_derive::{ContractParams, ContractState};
 
@@ -157,7 +154,7 @@ contract! {
 
 impl G256S0 {
     fn choose_script(p: &G256Params) -> ScriptBuf {
-        let s1_root = G256S1::new(p.clone()).contract.taptree().root_hash();
+        let s1_root = G256S1::new(p.clone()).taptree_root();
         script! {
             OP_SHA256
             { check_output_contract(s1_root, -1, None) }
@@ -201,7 +198,7 @@ contract! {
 
 impl G256S1 {
     fn reveal_script(p: &G256Params) -> ScriptBuf {
-        let s2_root = G256S2::new(p.clone()).contract.taptree().root_hash();
+        let s2_root = G256S2::new(p.clone()).taptree_root();
         script! {
             OP_DUP
             OP_SHA256
@@ -265,7 +262,7 @@ impl G256S2 {
     }
 
     fn start_challenge_script(p: &G256Params) -> ScriptBuf {
-        let bisect_root = bisect1(p.bisect()).contract.taptree().root_hash();
+        let bisect_root = bisect1(p.bisect()).taptree_root();
         script! {
             OP_TOALTSTACK
             // y != z

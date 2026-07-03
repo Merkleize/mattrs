@@ -61,6 +61,15 @@ pub fn regtest_client(wallet_name: &str) -> Client {
     mattrs::manager::regtest_rpc_client(wallet_name)
 }
 
+/// Convert an untyped handle into the typed handle `T`, panicking on a
+/// contract-type mismatch (test fixtures know which contract they funded).
+pub fn try_handle<T: TryFrom<InstanceHandle>>(handle: InstanceHandle) -> T
+where
+    T::Error: std::fmt::Debug,
+{
+    handle.try_into().expect("fixture contract type mismatch")
+}
+
 /// Fake a funded instance of `contract` (optionally carrying `expanded` logical
 /// state) holding `amount` sats, at a distinct outpoint keyed by `seed`. The
 /// funding output pays the contract's own address, derived from its committed state.

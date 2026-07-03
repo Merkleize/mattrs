@@ -41,7 +41,7 @@ fn reference_params() -> RpsParams {
 fn test_rps_s0_taptree_matches_reference() {
     let s0 = RpsGameS0::new(reference_params());
     assert_eq!(
-        hex::encode(s0.contract.taptree().root_hash()),
+        hex::encode(s0.taptree_root()),
         "627bc918efafddfc00f69cc3d14bc2b8d9a7854d05fd048a6eee0640aaa4a26f"
     );
 }
@@ -52,7 +52,7 @@ fn test_rps_s1_taptree_matches_reference() {
     // adjudication scripts and payout templates are byte-identical to pymatt.
     let s1 = RpsGameS1::new(reference_params());
     assert_eq!(
-        hex::encode(s1.contract.taptree().root_hash()),
+        hex::encode(s1.taptree_root()),
         "3a7709078e9ce23ab2fa1c8191bba476a27ced73c6a372e290d3a273305a250c"
     );
 }
@@ -79,13 +79,13 @@ use bitcoin::{Amount, ScriptBuf, Sequence, TxOut};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use support::rps::{RpsGameS0Handle, RpsGameS1Handle, RpsGameS1State};
-use support::testkit::{bob_xpriv, fund_fake, offline_client};
+use support::testkit::{bob_xpriv, fund_fake, offline_client, try_handle};
 
 #[test]
 fn test_rps_bob_move_commits_s1_state() {
     let params = reference_params();
 
-    let handle = RpsGameS0Handle(fund_fake(
+    let handle = try_handle::<RpsGameS0Handle>(fund_fake(
         RpsGameS0::new(params.clone()).as_erased(),
         None,
         2000,
@@ -116,7 +116,7 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
     let params = reference_params();
     let bob_pk = params.bob_pk;
 
-    let handle = RpsGameS1Handle(fund_fake(
+    let handle = try_handle::<RpsGameS1Handle>(fund_fake(
         RpsGameS1::new(params).as_erased(),
         Some(Box::new(RpsGameS1State {
             commitment: move_commitment(1),
@@ -164,7 +164,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let mut manager = ContractManager::new(client);
 
     // Fund the game with both players' stakes.
-    let s0 = RpsGameS0::fund(&mut manager, pot, params)?;
+    let s0 = RpsGameS0::new(params).fund(&mut manager, pot)?;
 
     // Bob reveals paper (m_b = 1), signed; the S1 child commits sha256(bn(1)).
     let s1: RpsGameS1Handle = s0
@@ -172,7 +172,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .sign(HotSigner::new(bob_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
-    let state = s1.handle().state::<RpsGameS1State>().expect("S1 state");
+    let state = s1.state().expect("S1 state");
     assert_eq!(state.commitment, move_commitment(1));
 
     // Rock vs paper: Bob wins. A cheating alice_wins spend must be rejected by

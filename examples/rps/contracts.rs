@@ -13,10 +13,7 @@ use bitcoin::{
     Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey,
 };
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{
-    ClauseArgs, ClauseOutput, ContractParams, ContractState, CtvTemplate, WitnessEncodable,
-    WitnessError,
-};
+use mattrs::contracts::{ClauseOutput, CtvTemplate};
 use mattrs::{contract, script_utils::commit_int, Signature};
 use mattrs_derive::{ContractParams, ContractState};
 
@@ -95,7 +92,7 @@ contract! {
 
 impl RpsGameS0 {
     fn bob_move_script(p: &RpsParams) -> ScriptBuf {
-        let s1_taptree_root = RpsGameS1::new(p.clone()).contract.taptree().root_hash();
+        let s1_taptree_root = RpsGameS1::new(p.clone()).taptree_root();
         script! {
             // check Bob's signature, leaving <m_b> on top
             { p.bob_pk }

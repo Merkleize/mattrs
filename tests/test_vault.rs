@@ -170,7 +170,7 @@ fn test_trigger_without_signer_errors() {
     // must fail loudly (MissingSigner) rather than broadcast an unsigned witness.
     // This builds the tx locally and does no RPC.
     use mattrs::manager::ManagerError;
-    use support::testkit::{fund_fake, offline_client};
+    use support::testkit::{fund_fake, offline_client, try_handle};
     use support::vault::VaultHandle;
 
     let params = VaultParams {
@@ -182,7 +182,7 @@ fn test_trigger_without_signer_errors() {
     let vault = Vault::new(params);
 
     // Fake a funded instance so the tx can be built (and a prevout exists).
-    let handle = VaultHandle(fund_fake(vault.as_erased(), None, 100_000, 0));
+    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, 0));
 
     let client = offline_client();
     let manager = ContractManager::new(client);
@@ -206,7 +206,7 @@ fn test_batch_merges_and_deducts_outputs() {
     // merge into a single output; the revault is a separate deducted output at
     // index 1. Mirrors pymatt's trigger_with_revault batch. Builds locally, no RPC.
     use mattrs::signer::HotSigner;
-    use support::testkit::{fund_fake, offline_client};
+    use support::testkit::{fund_fake, offline_client, try_handle};
     use support::vault::VaultHandle;
 
     let unvault_privkey = alice_xpriv();
@@ -221,7 +221,8 @@ fn test_batch_merges_and_deducts_outputs() {
     let vault = Vault::new(params);
 
     // Fund three vault instances of 100_000 sat each (same address, distinct txids).
-    let funded = |seed: u8| VaultHandle(fund_fake(vault.as_erased(), None, 100_000, seed));
+    let funded =
+        |seed: u8| try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, seed));
     let h1 = funded(1);
     let h2 = funded(2);
     let h3 = funded(3);
@@ -288,7 +289,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let mut manager = ContractManager::new(client);
 
     // Create and fund a Vault instance, getting a typed VaultHandle back.
-    let vault = Vault::fund(&mut manager, Amount::from_sat(amount), params)?;
+    let vault = Vault::new(params).fund(&mut manager, Amount::from_sat(amount))?;
 
     let ctv_template = vec![
         (
@@ -321,10 +322,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     // The child Unvaulting instance is funded and carries the ctv_hash as its state.
     assert_eq!(unvaulting.handle().status(), InstanceStatus::Funded);
-    let state = unvaulting
-        .handle()
-        .state::<UnvaultingState>()
-        .expect("Unvaulting instance should have state");
+    let state = unvaulting.state().expect("Unvaulting instance should have state");
     assert_eq!(state.ctv_hash, ctv_hash);
 
     let withdraw_outputs: Vec<bitcoin::TxOut> = ctv_template
@@ -390,7 +388,9 @@ fn test_observe_spend_decodes_clause_and_children() {
     // The actor builds (but does not broadcast) a trigger spend.
     let actor_client = offline_client();
     let actor_manager = ContractManager::new(actor_client);
-    let actor_handle = support::vault::VaultHandle(fund_fake(vault.as_erased(), None, 100_000, 7));
+    let actor_handle: support::vault::VaultHandle = fund_fake(vault.as_erased(), None, 100_000, 7)
+        .try_into()
+        .unwrap();
     let tx = actor_handle
         .trigger(ctv_hash, 0)
         .sign(HotSigner::new(alice_xpriv()))

@@ -12,7 +12,7 @@ use mattrs::ctv::create_ctv_template;
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client};
-use support::vault::{UnvaultingHandle, UnvaultingState, Vault, VaultParams, VaultTriggerArgs};
+use support::vault::{UnvaultingHandle, Vault, VaultParams, VaultTriggerArgs};
 
 #[test]
 #[ignore = "requires a running regtest bitcoind"]
@@ -29,7 +29,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     let mut actor = ContractManager::new(actor_client);
 
     let amount = 49_999_900u64;
-    let vault_a = Vault::fund(&mut actor, Amount::from_sat(amount), params.clone())?;
+    let vault_a = Vault::new(params.clone()).fund(&mut actor, Amount::from_sat(amount))?;
     let funding_outpoint = vault_a.handle().outpoint().unwrap();
 
     let ctv_template = vec![(
@@ -84,14 +84,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
         unvaulting_b.handle().outpoint(),
         unvaulting_a.handle().outpoint()
     );
-    assert_eq!(
-        unvaulting_b
-            .handle()
-            .state::<UnvaultingState>()
-            .unwrap()
-            .ctv_hash,
-        ctv_hash
-    );
+    assert_eq!(unvaulting_b.state().unwrap().ctv_hash, ctv_hash);
 
     // Follow the terminal withdraw: no children, clause + args recorded.
     let final_children = observer.wait_for_spend(unvaulting_b.handle())?;

@@ -20,10 +20,7 @@
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{
-    ClauseArgs, ClauseError, ClauseOutput, ContractParams, ContractState, WitnessEncodable,
-    WitnessError,
-};
+use mattrs::contracts::{ClauseError, ClauseOutput};
 use mattrs::{
     contract, contracts::CCV_FLAG_CHECK_INPUT, contracts::CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
     internal_key_or_nums, optional_key_script, Signature,
@@ -163,9 +160,7 @@ impl Vault {
 
     fn trigger_script(params: &VaultParams) -> ScriptBuf {
         let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
-            .contract
-            .taptree()
-            .root_hash();
+            .taptree_root();
 
         script! {
             { optional_key_script(params.alternate_pk) }
@@ -179,9 +174,7 @@ impl Vault {
 
     fn trigger_and_revault_script(params: &VaultParams) -> ScriptBuf {
         let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
-            .contract
-            .taptree()
-            .root_hash();
+            .taptree_root();
 
         script! {
             0 OP_SWAP

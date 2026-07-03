@@ -18,7 +18,7 @@ use bitcoin::bip32::Xpriv;
 use bitcoin::hashes::Hash;
 use bitcoin_script::{define_pushable, script};
 use bitcoincore_rpc::{Auth, Client};
-use mattrs::contracts::{ClauseArgs, ContractInstance, ContractParams, WitnessEncodable, WitnessError};
+use mattrs::contracts::ContractInstance;
 use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::signer::HotSigner;
 use mattrs::{contract, ContractParams as DeriveContractParams, Signature};
@@ -139,10 +139,10 @@ fn main() {
         delay: 10,
     };
     let timelock = TimeLock::new(params.clone());
-    let script_pubkey = timelock.as_erased().script_pubkey(None).unwrap();
-    let address =
-        bitcoin::Address::from_script(&script_pubkey, bitcoin::Network::Regtest.params()).unwrap();
-    println!("TimeLock address (regtest): {address}");
+    println!(
+        "TimeLock address (regtest): {}",
+        timelock.address(bitcoin::Network::Regtest)
+    );
 
     // 2. Fund it. Here we fake the funding so the example runs offline; against a
     //    real node you would use `TimeLock::fund(&mut manager, amount)` instead.

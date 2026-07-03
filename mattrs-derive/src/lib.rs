@@ -123,7 +123,9 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let encode_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         quote! {
-            stack.extend(self.#field_name.encode_to_witness());
+            stack.extend(::mattrs::contracts::WitnessEncodable::encode_to_witness(
+                &self.#field_name,
+            ));
         }
     });
 
@@ -131,7 +133,7 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let field_name = &f.ident;
         let field_type = &f.ty;
         quote! {
-            let (#field_name, consumed) = <#field_type as WitnessEncodable>::decode_from_witness(&witness[offset..])?;
+            let (#field_name, consumed) = <#field_type as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&witness[offset..])?;
             offset += consumed;
         }
     });
@@ -226,14 +228,14 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     Ok(quote! {
-        impl WitnessEncodable for #name {
+        impl ::mattrs::contracts::WitnessEncodable for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut stack = Vec::new();
                 #(#encode_fields)*
                 stack
             }
 
-            fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError>
+            fn decode_from_witness(witness: &[Vec<u8>]) -> ::core::result::Result<(Self, usize), ::mattrs::contracts::WitnessError>
             where
                 Self: Sized
             {
@@ -245,16 +247,16 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl ClauseArgs for #name {
+        impl ::mattrs::contracts::ClauseArgs for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-                <Self as WitnessEncodable>::encode_to_witness(self)
+                <Self as ::mattrs::contracts::WitnessEncodable>::encode_to_witness(self)
             }
 
-            fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError>
+            fn decode_from_witness(witness: &[Vec<u8>]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError>
             where
                 Self: Sized
             {
-                let (args, _) = <Self as WitnessEncodable>::decode_from_witness(witness)?;
+                let (args, _) = <Self as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(witness)?;
                 Ok(args)
             }
         }
@@ -461,7 +463,9 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let encode_to_witness_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         quote! {
-            result.extend(self.#field_name.encode_to_witness());
+            result.extend(::mattrs::contracts::WitnessEncodable::encode_to_witness(
+                &self.#field_name,
+            ));
         }
     });
 
@@ -469,7 +473,7 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let field_name = &f.ident;
         let field_type = &f.ty;
         quote! {
-            let (#field_name, consumed) = <#field_type as WitnessEncodable>::decode_from_witness(&witness[offset..])?;
+            let (#field_name, consumed) = <#field_type as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&witness[offset..])?;
             offset += consumed;
         }
     });
@@ -478,7 +482,8 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let field_name = &f.ident;
         quote! {
             // Encode field and prepend witness element count and sizes
-            let field_witness = self.#field_name.encode_to_witness();
+            let field_witness =
+                ::mattrs::contracts::WitnessEncodable::encode_to_witness(&self.#field_name);
             // Write number of witness elements as varint (just use a u32 for simplicity)
             bytes.extend(&(field_witness.len() as u32).to_le_bytes());
             // Write each element with its length prefix
@@ -496,7 +501,7 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let (#field_name, consumed_bytes) = {
                 // Read number of witness elements
                 if byte_offset + 4 > bytes.len() {
-                    return Err(WitnessError::InsufficientData);
+                    return Err(::mattrs::contracts::WitnessError::InsufficientData);
                 }
                 let mut count_bytes = [0u8; 4];
                 count_bytes.copy_from_slice(&bytes[byte_offset..byte_offset+4]);
@@ -507,7 +512,7 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 let mut temp_witness = Vec::new();
                 for _ in 0..element_count {
                     if local_offset + 4 > bytes.len() {
-                        return Err(WitnessError::InsufficientData);
+                        return Err(::mattrs::contracts::WitnessError::InsufficientData);
                     }
                     let mut len_bytes = [0u8; 4];
                     len_bytes.copy_from_slice(&bytes[local_offset..local_offset+4]);
@@ -515,13 +520,13 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     local_offset += 4;
 
                     if local_offset + elem_len > bytes.len() {
-                        return Err(WitnessError::InsufficientData);
+                        return Err(::mattrs::contracts::WitnessError::InsufficientData);
                     }
                     temp_witness.push(bytes[local_offset..local_offset+elem_len].to_vec());
                     local_offset += elem_len;
                 }
 
-                let (value, _) = <#field_type as WitnessEncodable>::decode_from_witness(&temp_witness)?;
+                let (value, _) = <#field_type as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&temp_witness)?;
                 (value, local_offset - byte_offset)
             };
             byte_offset += consumed_bytes;
@@ -532,14 +537,14 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let field_names_for_bytes = fields.iter().map(|f| &f.ident);
 
     Ok(quote! {
-        impl WitnessEncodable for #name {
+        impl ::mattrs::contracts::WitnessEncodable for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
                 #(#encode_to_witness_fields)*
                 result
             }
 
-            fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+            fn decode_from_witness(witness: &[Vec<u8>]) -> ::core::result::Result<(Self, usize), ::mattrs::contracts::WitnessError> {
                 let mut offset = 0;
                 #(#decode_from_witness_fields)*
                 Ok((Self {
@@ -548,14 +553,14 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl ContractParams for #name {
+        impl ::mattrs::contracts::ContractParams for #name {
             fn encode(&self) -> Vec<u8> {
                 let mut bytes = Vec::new();
                 #(#encode_to_bytes_fields)*
                 bytes
             }
 
-            fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
+            fn decode(bytes: &[u8]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError> {
                 let mut byte_offset = 0;
                 #(#decode_from_bytes_fields)*
 
@@ -687,7 +692,9 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let encode_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         quote! {
-            result.extend(self.#field_name.encode_to_witness());
+            result.extend(::mattrs::contracts::WitnessEncodable::encode_to_witness(
+                &self.#field_name,
+            ));
         }
     });
 
@@ -695,7 +702,7 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
         let field_name = &f.ident;
         let field_type = &f.ty;
         quote! {
-            let (#field_name, consumed) = <#field_type as WitnessEncodable>::decode_from_witness(&witness[offset..])?;
+            let (#field_name, consumed) = <#field_type as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&witness[offset..])?;
             offset += consumed;
         }
     });
@@ -703,14 +710,14 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let field_names = fields.iter().map(|f| &f.ident);
 
     Ok(quote! {
-        impl WitnessEncodable for #name {
+        impl ::mattrs::contracts::WitnessEncodable for #name {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
                 #(#encode_fields)*
                 result
             }
 
-            fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+            fn decode_from_witness(witness: &[Vec<u8>]) -> ::core::result::Result<(Self, usize), ::mattrs::contracts::WitnessError> {
                 let mut offset = 0;
                 #(#decode_fields)*
                 Ok((Self {
@@ -719,15 +726,19 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl ContractState for #name {
+        impl ::mattrs::contracts::ContractState for #name {
             fn encode(&self) -> Vec<u8> {
-                self.encode_to_witness().into_iter().flatten().collect()
+                ::mattrs::contracts::WitnessEncodable::encode_to_witness(self)
+                    .into_iter()
+                    .flatten()
+                    .collect()
             }
 
-            fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
+            fn decode(bytes: &[u8]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError> {
                 // Convert bytes to witness format (single element)
                 let witness = vec![bytes.to_vec()];
-                let (state, _) = Self::decode_from_witness(&witness)?;
+                let (state, _) =
+                    <Self as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&witness)?;
                 Ok(state)
             }
         }
@@ -770,15 +781,15 @@ fn expand_merkle_state(
     );
 
     Ok(quote! {
-        impl ContractState for #name {
+        impl ::mattrs::contracts::ContractState for #name {
             fn encode(&self) -> Vec<u8> {
                 let mut leaves: Vec<[u8; 32]> = Vec::new();
                 #(#leaf_pushes)*
                 ::mattrs::merkle::MerkleTree::new(leaves).root().to_vec()
             }
 
-            fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-                Err(WitnessError::InvalidData(#decode_msg.to_string()))
+            fn decode(_bytes: &[u8]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError> {
+                Err(::mattrs::contracts::WitnessError::InvalidData(#decode_msg.to_string()))
             }
         }
     })

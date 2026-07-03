@@ -1081,6 +1081,12 @@ impl InstanceHandle {
         self.instance.borrow().contract().contract_type_id()
     }
 
+    /// The underlying contract's human-readable name (e.g. `"Vault"`), for
+    /// introspection and display.
+    pub fn contract_name(&self) -> &'static str {
+        self.instance.borrow().contract().contract_name()
+    }
+
     /// The name of the clause that spent this instance (None until spent).
     pub fn clause_name(&self) -> Option<String> {
         self.instance.borrow().clause_name().map(str::to_string)

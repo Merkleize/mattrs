@@ -65,7 +65,7 @@ fn test_ram_taptree_matches_reference() {
     // matches the pymatt reference RAM(4).get_taptree_merkle_root().
     let ram = Ram::new(RamParams { size: 4 });
     assert_eq!(
-        hex::encode(ram.contract.taptree().root_hash()),
+        hex::encode(ram.taptree_root()),
         "c86ddcabdddb39b345fbb7bc3cc4471c4a57672dddb27615a3b7e69027cf7bad"
     );
 }
@@ -114,7 +114,7 @@ fn test_ram_write_commits_updated_root() {
     // cell 2, and commits the new Merkle root to the output. Builds locally, no RPC.
     use bitcoin::Amount;
     use mattrs::manager::ContractManager;
-    use support::testkit::{fund_fake, offline_client};
+    use support::testkit::{fund_fake, offline_client, try_handle};
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
     let ram = Ram::new(RamParams { size: 4 });
@@ -122,7 +122,7 @@ fn test_ram_write_commits_updated_root() {
     // The instance commits the initial leaves' Merkle root, and carries the leaves
     // themselves as expanded state.
     let committed = MerkleTree::new(leaves.clone()).root();
-    let handle = RamHandle(fund_fake(
+    let handle = try_handle::<RamHandle>(fund_fake(
         ram.as_erased(),
         Some(Box::new(RamState {
             leaves: leaves.clone(),
@@ -179,10 +179,9 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     let mut manager = ContractManager::new(client);
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
-    let ram = Ram::fund(
+    let ram = Ram::new(RamParams { size: 4 }).fund(
         &mut manager,
         Amount::from_sat(100_000),
-        RamParams { size: 4 },
         RamState {
             leaves: leaves.clone(),
         },

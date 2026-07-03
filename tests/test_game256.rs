@@ -37,7 +37,7 @@ fn test_leaf_taptree_matches_reference() {
     let (alice_pk, bob_pk) = keys();
     let leaf = leaf(alice_pk, bob_pk);
     assert_eq!(
-        hex::encode(leaf.contract.taptree().root_hash()),
+        hex::encode(leaf.taptree_root()),
         "82dda0e32408a73bf19265805bcba563421e853fa22870bfd5887a402cf34916"
     );
 }
@@ -58,25 +58,25 @@ fn test_bisect_taptrees_match_reference() {
 
     // base range: both children are Leaves
     assert_eq!(
-        root(&bisect2(bp(0, 1)).contract.taptree().root_hash()),
+        root(&bisect2(bp(0, 1)).taptree_root()),
         "051002010223fec1898647323c278a6f9aebdae955ba66b2c1989875204bbe60"
     );
     assert_eq!(
-        root(&bisect1(bp(0, 1)).contract.taptree().root_hash()),
+        root(&bisect1(bp(0, 1)).taptree_root()),
         "646593ebe11ebd3b03663c56b502d0cc910678aafabac268bb33381b7dedbc52"
     );
     // size 4: children are sub-Bisect_1s
     assert_eq!(
-        root(&bisect2(bp(0, 3)).contract.taptree().root_hash()),
+        root(&bisect2(bp(0, 3)).taptree_root()),
         "6eebc0a155c3b98c6b812f44e75242a39187c2e4a8f0f145ee4de83347e7b942"
     );
     assert_eq!(
-        root(&bisect1(bp(0, 3)).contract.taptree().root_hash()),
+        root(&bisect1(bp(0, 3)).taptree_root()),
         "0b82edb494d12798f767348922edeed15ba45f13771bee50133d23561a1af263"
     );
     // the full 8-step game bisect nests the entire recursion
     assert_eq!(
-        root(&bisect1(bp(0, 7)).contract.taptree().root_hash()),
+        root(&bisect1(bp(0, 7)).taptree_root()),
         "3f9b156e3ccf21e59c79c6de2b4cb8f018a1f11e9a6c133af4906e7e6b9cfc2f"
     );
 }
@@ -90,15 +90,15 @@ fn test_g256_stage_taptrees_match_reference() {
     let p = G256Params { alice_pk, bob_pk };
 
     assert_eq!(
-        hex::encode(G256S0::new(p.clone()).contract.taptree().root_hash()),
+        hex::encode(G256S0::new(p.clone()).taptree_root()),
         "ddba91cb57ac4e1b4c79c8dc48c5b62e39ecd4687b6256ec1eb5f77fad6f3429"
     );
     assert_eq!(
-        hex::encode(G256S1::new(p.clone()).contract.taptree().root_hash()),
+        hex::encode(G256S1::new(p.clone()).taptree_root()),
         "3186a6c6434dd328e3664f72b93186981087d94b13359dfd8ecc5384d8a3cc84"
     );
     assert_eq!(
-        hex::encode(G256S2::new(p).contract.taptree().root_hash()),
+        hex::encode(G256S2::new(p).taptree_root()),
         "d04adc2924609a0c189c095d320829e22b9879017f81bd84f245a23d3e9c18be"
     );
 }
@@ -122,7 +122,7 @@ use support::game256::{
     Bisect1Handle, Bisect1State, Bisect2Handle, Bisect2State, G256S0Handle, G256S1Handle,
     G256S1State, G256S2Handle, G256S2State, LeafState,
 };
-use support::testkit::{alice_xpriv, bob_xpriv, fund_fake, offline_client};
+use support::testkit::{alice_xpriv, bob_xpriv, fund_fake, offline_client, try_handle};
 
 /// The committed address of `contract` with committed `state`.
 fn addr<S: ContractState + 'static>(contract: Arc<dyn ErasedContract>, state: &S) -> bitcoin::ScriptBuf {
@@ -145,7 +145,7 @@ fn test_game256_state_transitions() {
     let manager = ContractManager::new(client);
 
     // 1. G256S0.choose(x) -> G256S1 committed to x.
-    let s0 = G256S0Handle(fund_fake(G256S0::new(p.clone()).as_erased(), None, 100_000, 1));
+    let s0 = try_handle::<G256S0Handle>(fund_fake(G256S0::new(p.clone()).as_erased(), None, 100_000, 1));
     let tx = s0.choose(5).sign(HotSigner::new(bob_xpriv())).build_tx(&manager).unwrap();
     assert_eq!(
         tx.output[0].script_pubkey,
@@ -153,7 +153,7 @@ fn test_game256_state_transitions() {
     );
 
     // 2. G256S2.start_challenge -> Bisect_1(0,7) with sha256-committed endpoints.
-    let s2 = G256S2Handle(fund_fake(
+    let s2 = try_handle::<G256S2Handle>(fund_fake(
         G256S2::new(p.clone()).as_erased(),
         Some(Box::new(G256S2State { t_a: [7; 32], y: 10, x: 5 })),
         100_000,
@@ -182,7 +182,7 @@ fn test_game256_state_transitions() {
     );
 
     // 3. Bisect_2(0,7).bob_reveal_left -> a *sub-Bisect_1(0,3)* (children not leaves).
-    let b2 = Bisect2Handle(fund_fake(
+    let b2 = try_handle::<Bisect2Handle>(fund_fake(
         bisect2(bp(0, 7)).as_erased(),
         Some(Box::new(Bisect2State {
             h_start: [1; 32],
@@ -220,7 +220,7 @@ fn test_game256_state_transitions() {
     );
 
     // 4. Bisect_2(0,1).bob_reveal_left -> a *Leaf* (children ARE leaves).
-    let b2_leaf = Bisect2Handle(fund_fake(
+    let b2_leaf = try_handle::<Bisect2Handle>(fund_fake(
         bisect2(bp(0, 1)).as_erased(),
         Some(Box::new(Bisect2State {
             h_start: [1; 32],
@@ -252,7 +252,7 @@ fn test_game256_state_transitions() {
     );
 
     // 5. G256S1.reveal -> G256S2 (state passthrough of t_a/y/x).
-    let s1 = G256S1Handle(fund_fake(
+    let s1 = try_handle::<G256S1Handle>(fund_fake(
         G256S1::new(p.clone()).as_erased(),
         Some(Box::new(G256S1State { x: 5 })),
         100_000,
@@ -272,7 +272,7 @@ fn test_game256_state_transitions() {
     );
 
     // 6. Bisect_1.alice_reveal -> Bisect_2 (same range), state passthrough.
-    let b1 = Bisect1Handle(fund_fake(
+    let b1 = try_handle::<Bisect1Handle>(fund_fake(
         bisect1(bp(0, 7)).as_erased(),
         Some(Box::new(Bisect1State {
             h_start: [1; 32],

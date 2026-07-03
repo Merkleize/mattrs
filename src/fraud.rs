@@ -44,9 +44,8 @@ use bitcoin_script::{define_pushable, script};
 
 use crate::argtypes::{BytesType, SignerType};
 use crate::contracts::{
-    ArgSpec, ClauseArgs, ClauseOutput, ClauseTree, ContractParams, ContractState, ErasedClause,
-    ErasedContract, NextOutputs, NextOutputsFn, RawArgs, StandardAugmentedP2TR, StandardClause,
-    WitnessEncodable, WitnessError,
+    ArgSpec, ClauseArgs, ClauseOutput, ClauseTree, ErasedClause, ErasedContract, NextOutputs,
+    NextOutputsFn, RawArgs, StandardAugmentedP2TR, StandardClause,
 };
 use crate::manager::{InstanceHandle, SpendBuilder, WrongContractType};
 use crate::script_helpers::{
@@ -164,13 +163,18 @@ impl Leaf {
             ));
 
         let tree = ClauseTree::branch(ClauseTree::leaf(alice_reveal), ClauseTree::leaf(bob_reveal));
-        let contract = StandardAugmentedP2TR::new(nums_key(), &params, tree);
+        let contract = StandardAugmentedP2TR::new("fraud::Leaf", nums_key(), &params, tree);
         Self { params, contract }
     }
 
     /// The contract as a type-erased `ErasedContract`.
     pub fn as_erased(&self) -> Arc<dyn ErasedContract> {
         Arc::new(self.contract.clone())
+    }
+
+    /// The merkle root of the contract's script taptree.
+    pub fn taptree_root(&self) -> [u8; 32] {
+        self.contract.taptree().root_hash()
     }
 
     /// `[sig, <one spec per step-value element>, h_y_<other party>]`.
@@ -330,10 +334,8 @@ pub struct Bisect1 {
 
 impl Bisect1 {
     pub fn new(params: BisectParams, leaf_factory: &LeafFactory, forfait_timeout: u32) -> Self {
-        let bisect2_root = Bisect2::new(params.clone(), leaf_factory, forfait_timeout)
-            .contract
-            .taptree()
-            .root_hash();
+        let bisect2_root =
+            Bisect2::new(params.clone(), leaf_factory, forfait_timeout).taptree_root();
 
         let lf = leaf_factory.clone();
         let next: NextOutputsFn<BisectParams, Bisect1State, Bisect1AliceRevealArgs> =
@@ -369,13 +371,18 @@ impl Bisect1 {
             ));
 
         let tree = ClauseTree::branch(ClauseTree::leaf(alice_reveal), ClauseTree::leaf(forfait));
-        let contract = StandardAugmentedP2TR::new(nums_key(), &params, tree);
+        let contract = StandardAugmentedP2TR::new("fraud::Bisect1", nums_key(), &params, tree);
         Self { params, contract }
     }
 
     /// The contract as a type-erased `ErasedContract`.
     pub fn as_erased(&self) -> Arc<dyn ErasedContract> {
         Arc::new(self.contract.clone())
+    }
+
+    /// The merkle root of the contract's script taptree.
+    pub fn taptree_root(&self) -> [u8; 32] {
+        self.contract.taptree().root_hash()
     }
 
     // witness: <alice_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b>
@@ -412,8 +419,8 @@ impl Bisect2 {
         let m = params.m();
         let (left_root, right_root) = if params.children_are_leaves() {
             (
-                leaf_factory(params.i).contract.taptree().root_hash(),
-                leaf_factory(params.i + m).contract.taptree().root_hash(),
+                leaf_factory(params.i).taptree_root(),
+                leaf_factory(params.i + m).taptree_root(),
             )
         } else {
             (
@@ -422,13 +429,9 @@ impl Bisect2 {
                     leaf_factory,
                     forfait_timeout,
                 )
-                .contract
-                .taptree()
-                .root_hash(),
+                .taptree_root(),
                 Bisect1::new(params.child(params.i + m, params.j), leaf_factory, forfait_timeout)
-                    .contract
-                    .taptree()
-                    .root_hash(),
+                    .taptree_root(),
             )
         };
 
@@ -517,13 +520,18 @@ impl Bisect2 {
             ),
             ClauseTree::leaf(forfait),
         );
-        let contract = StandardAugmentedP2TR::new(nums_key(), &params, tree);
+        let contract = StandardAugmentedP2TR::new("fraud::Bisect2", nums_key(), &params, tree);
         Self { params, contract }
     }
 
     /// The contract as a type-erased `ErasedContract`.
     pub fn as_erased(&self) -> Arc<dyn ErasedContract> {
         Arc::new(self.contract.clone())
+    }
+
+    /// The merkle root of the contract's script taptree.
+    pub fn taptree_root(&self) -> [u8; 32] {
+        self.contract.taptree().root_hash()
     }
 
     // witness: <bob_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b>

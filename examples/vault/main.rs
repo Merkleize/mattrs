@@ -70,21 +70,15 @@ enum Kind {
 
 impl Repl {
     fn kind(&self, handle: &InstanceHandle) -> Option<Kind> {
-        if VaultHandle::try_from(handle.clone()).is_ok() {
-            Some(Kind::Vault)
-        } else if UnvaultingHandle::try_from(handle.clone()).is_ok() {
-            Some(Kind::Unvaulting)
-        } else {
-            None
+        match handle.contract_name() {
+            "Vault" => Some(Kind::Vault),
+            "Unvaulting" => Some(Kind::Unvaulting),
+            _ => None,
         }
     }
 
     fn kind_str(&self, handle: &InstanceHandle) -> &'static str {
-        match self.kind(handle) {
-            Some(Kind::Vault) => "Vault",
-            Some(Kind::Unvaulting) => "Unvaulting",
-            None => "?",
-        }
+        handle.contract_name()
     }
 
     fn item(&self, idx_str: &str) -> Result<(usize, InstanceHandle), String> {
@@ -115,11 +109,8 @@ impl Repl {
 
     fn fund(&mut self, amount_str: &str) -> Result<(), Box<dyn std::error::Error>> {
         let amount: u64 = amount_str.parse()?;
-        let vault = Vault::fund(
-            &mut self.manager,
-            Amount::from_sat(amount),
-            self.params.clone(),
-        )?;
+        let vault =
+            Vault::new(self.params.clone()).fund(&mut self.manager, Amount::from_sat(amount))?;
         self.track(vault.handle().clone());
         Ok(())
     }
@@ -211,7 +202,7 @@ impl Repl {
         vaults.sort_by_key(|(_, h)| std::cmp::Reverse(h.prevout().expect("funded").value));
         let mut builders = Vec::new();
         for (i, (_, handle)) in vaults.iter().enumerate() {
-            let vault = VaultHandle(handle.clone());
+            let vault: VaultHandle = handle.clone().try_into().expect("kind checked");
             let builder = if i == 0 && revault > Amount::ZERO {
                 vault
                     .trigger_and_revault(ctv_hash, 0, 1)
@@ -246,7 +237,8 @@ impl Repl {
             .ok_or("unknown CTV template (trigger it in this session first)")?
             .clone();
 
-        UnvaultingHandle(handle)
+        let unvaulting: UnvaultingHandle = handle.try_into().expect("kind checked");
+        unvaulting
             .withdraw(ctv_hash)
             .outputs(outputs)
             .sequence(SPEND_DELAY)
@@ -271,14 +263,20 @@ impl Repl {
         }];
 
         match self.kind(&handle) {
-            Some(Kind::Vault) => VaultHandle(handle)
-                .recover(0)
-                .outputs(recover_out)
-                .exec_none(&mut self.manager)?,
-            Some(Kind::Unvaulting) => UnvaultingHandle(handle)
-                .recover(0)
-                .outputs(recover_out)
-                .exec_none(&mut self.manager)?,
+            Some(Kind::Vault) => {
+                let vault: VaultHandle = handle.try_into().expect("kind checked");
+                vault
+                    .recover(0)
+                    .outputs(recover_out)
+                    .exec_none(&mut self.manager)?
+            }
+            Some(Kind::Unvaulting) => {
+                let unvaulting: UnvaultingHandle = handle.try_into().expect("kind checked");
+                unvaulting
+                    .recover(0)
+                    .outputs(recover_out)
+                    .exec_none(&mut self.manager)?
+            }
             None => return Err(format!("instance {idx} is not recoverable").into()),
         }
         println!("Recovered {} sats to the recovery key", value.to_sat());
@@ -351,10 +349,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     println!(
         "Vault address: {}\n",
-        bitcoin::Address::from_script(
-            &Vault::new(params.clone()).as_erased().script_pubkey(None)?,
-            bitcoin::Network::Regtest.params(),
-        )?
+        Vault::new(params.clone()).address(bitcoin::Network::Regtest)
     );
 
     let client = regtest_rpc_client(&wallet);

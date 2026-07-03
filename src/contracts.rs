@@ -1243,6 +1243,10 @@ pub trait ErasedContract: Debug + Send + Sync {
     /// type-erased instance is the contract a typed handle expects.
     fn contract_type_id(&self) -> std::any::TypeId;
 
+    /// A human-readable contract name (e.g. `"Vault"`), for introspection and
+    /// display; not consensus-visible.
+    fn contract_name(&self) -> &'static str;
+
     /// Get the script pubkey for this contract (with optional state).
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError>;
 
@@ -1275,6 +1279,9 @@ impl Clone for Box<dyn ErasedContract> {
 /// internal key is derived (plain vs. state-tweaked).
 #[derive(Clone)]
 struct P2trContractCore {
+    /// A human-readable contract name (e.g. `"Vault"`), for introspection and
+    /// display; not consensus-visible.
+    name: &'static str,
     taptree: Arc<TapTree>,
     clauses: Vec<Arc<dyn ErasedClause>>,
     /// Encoded params, so the contract is self-describing and child instances can
@@ -1285,11 +1292,12 @@ struct P2trContractCore {
 impl P2trContractCore {
     /// Derive the script taptree and the clause list from one `clause_tree`, so
     /// they cannot drift apart.
-    fn new<P: ContractParams>(params: &P, clause_tree: ClauseTree) -> Self {
+    fn new<P: ContractParams>(name: &'static str, params: &P, clause_tree: ClauseTree) -> Self {
         let taptree = Arc::new(clause_tree.to_script_tree());
         let clauses = clause_tree.clauses();
         debug_assert_no_duplicate_clauses(&clauses);
         Self {
+            name,
             taptree,
             clauses,
             params_bytes: params.encode(),
@@ -1325,10 +1333,15 @@ impl<P: ContractParams> StandardP2TR<P> {
     /// Build a contract from its params and a clause tree. The script taptree and
     /// the clause list are both derived from `clause_tree`, so they cannot drift
     /// apart; the encoded params are stored so the contract is self-describing.
-    pub fn new(internal_pubkey: XOnlyPublicKey, params: &P, clause_tree: ClauseTree) -> Self {
+    pub fn new(
+        name: &'static str,
+        internal_pubkey: XOnlyPublicKey,
+        params: &P,
+        clause_tree: ClauseTree,
+    ) -> Self {
         Self {
             internal_pubkey,
-            core: P2trContractCore::new(params, clause_tree),
+            core: P2trContractCore::new(name, params, clause_tree),
             _phantom: PhantomData,
         }
     }
@@ -1403,6 +1416,10 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         std::any::TypeId::of::<Self>()
     }
 
+    fn contract_name(&self) -> &'static str {
+        self.core.name
+    }
+
     fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
         Ok(self.script_pubkey())
     }
@@ -1443,10 +1460,15 @@ impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
     /// Build an augmented contract from its params and a clause tree. The script
     /// taptree and the clause list are both derived from `clause_tree`, so they
     /// cannot drift apart; the encoded params are stored to be self-describing.
-    pub fn new(naked_internal_pubkey: XOnlyPublicKey, params: &P, clause_tree: ClauseTree) -> Self {
+    pub fn new(
+        name: &'static str,
+        naked_internal_pubkey: XOnlyPublicKey,
+        params: &P,
+        clause_tree: ClauseTree,
+    ) -> Self {
         Self {
             naked_internal_pubkey,
-            core: P2trContractCore::new(params, clause_tree),
+            core: P2trContractCore::new(name, params, clause_tree),
             _phantom: PhantomData,
         }
     }
@@ -1541,6 +1563,10 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
 
     fn contract_type_id(&self) -> std::any::TypeId {
         std::any::TypeId::of::<Self>()
+    }
+
+    fn contract_name(&self) -> &'static str {
+        self.core.name
     }
 
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {

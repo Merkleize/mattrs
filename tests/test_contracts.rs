@@ -90,6 +90,7 @@ fn test_vault_contract_creation() {
     // Build the contract from a single-leaf clause tree.
     let trigger_erased: Arc<dyn ErasedClause> = Arc::new(trigger_clause.clone());
     let contract = StandardAugmentedP2TR::<VaultParams, VaultState>::new(
+        "TestVault",
         owner_pubkey,
         &params,
         ClauseTree::leaf(trigger_erased),
@@ -320,7 +321,7 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
     )
     .unwrap();
     let erased: Arc<dyn ErasedContract> =
-        Arc::new(StandardP2TR::<()>::new(owner, &(), ClauseTree::leaf(clause)));
+        Arc::new(StandardP2TR::<()>::new("Pay", owner, &(), ClauseTree::leaf(clause)));
     let script_pubkey = erased.script_pubkey(None).unwrap();
 
     // Fake a funded instance (building the tx does no RPC).

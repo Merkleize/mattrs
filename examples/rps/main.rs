@@ -151,11 +151,7 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::erro
     // Fund the game with both stakes and tell Bob where it lives.
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client);
-    let s0 = RpsGameS0::fund(
-        &mut manager,
-        Amount::from_sat((2 * DEFAULT_STAKE) as u64),
-        params,
-    )?;
+    let s0 = RpsGameS0::new(params).fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
     let outpoint = s0.handle().outpoint().expect("just funded");
     println!("Game funded at {outpoint}");
     send_json(

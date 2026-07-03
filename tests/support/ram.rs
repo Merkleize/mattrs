@@ -13,10 +13,7 @@
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{
-    ClauseArgs, ClauseError, ClauseOutput, ContractParams, ContractState, WitnessEncodable,
-    WitnessError,
-};
+use mattrs::contracts::{ClauseError, ClauseOutput};
 use mattrs::contract;
 use mattrs_derive::{ContractParams, ContractState};
 
