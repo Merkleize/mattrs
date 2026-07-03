@@ -75,7 +75,7 @@ fn test_ctv_template_hash() {
         ),
     ];
 
-    let (_, ctv_hash) = create_ctv_template(&template, bitcoin::Sequence(10)).unwrap();
+    let ctv_hash = create_ctv_template(&template, bitcoin::Sequence(10)).ctv_hash();
 
     // Expected hash from mattrs_old test
     let expected_hex = "b288279b3012acaedfde4e4e347ad6f3147d416edbebf76668f16b91f2969215";
@@ -185,7 +185,7 @@ fn test_trigger_without_signer_errors() {
     let handle = VaultHandle(fund_fake(vault.as_erased(), None, 100_000, 0));
 
     let client = offline_client();
-    let manager = ContractManager::new(&client);
+    let manager = ContractManager::new(client);
 
     let err = handle
         .trigger([7u8; 32], 0)
@@ -227,7 +227,7 @@ fn test_batch_merges_and_deducts_outputs() {
     let h3 = funded(3);
 
     let client = offline_client();
-    let manager = ContractManager::new(&client);
+    let manager = ContractManager::new(client);
 
     let ctv_hash = [7u8; 32];
     let revault_amount = Amount::from_sat(30_000);
@@ -285,7 +285,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     let amount = 49999900;
 
-    let mut manager = ContractManager::new(&client);
+    let mut manager = ContractManager::new(client);
 
     // Create and fund a Vault instance, getting a typed VaultHandle back.
     let vault = Vault::fund(&mut manager, Amount::from_sat(amount), params)?;
@@ -305,7 +305,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         ),
     ];
 
-    let (_, ctv_hash) = create_ctv_template(&ctv_template, bitcoin::Sequence(10))?;
+    let ctv_hash = create_ctv_template(&ctv_template, bitcoin::Sequence(10)).ctv_hash();
 
     assert_eq!(
         ctv_hash.to_hex_string(bitcoin::hex::Case::Lower),
@@ -389,7 +389,7 @@ fn test_observe_spend_decodes_clause_and_children() {
 
     // The actor builds (but does not broadcast) a trigger spend.
     let actor_client = offline_client();
-    let actor_manager = ContractManager::new(&actor_client);
+    let actor_manager = ContractManager::new(actor_client);
     let actor_handle = support::vault::VaultHandle(fund_fake(vault.as_erased(), None, 100_000, 7));
     let tx = actor_handle
         .trigger(ctv_hash, 0)
@@ -399,7 +399,7 @@ fn test_observe_spend_decodes_clause_and_children() {
 
     // The observer holds its own instance of the same (deterministic) funding.
     let observer_client = offline_client();
-    let mut observer = ContractManager::new(&observer_client);
+    let mut observer = ContractManager::new(observer_client);
     let observed = fund_fake(vault.as_erased(), None, 100_000, 7);
 
     let children = observer.observe_spend(&observed, &tx).unwrap();

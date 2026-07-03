@@ -37,9 +37,31 @@ use crate::{
 /// Type alias for a map of signers keyed by public key.
 pub type SignerMap = HashMap<XOnlyPublicKey, Box<dyn Signer>>;
 
-/// How many 100ms polls [`ContractManager::wait_for_spend`] performs before
-/// giving up (30 seconds).
-const POLL_ATTEMPTS: usize = 300;
+/// The interval between chain polls.
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The default polling window of [`ContractManager::wait_for_spend`] and
+/// [`ContractManager::wait_for_transaction`]; see
+/// [`ContractManager::wait_for_spend_within`] to override it.
+const DEFAULT_POLL_WINDOW: Duration = Duration::from_secs(30);
+
+/// Poll `check` every [`POLL_INTERVAL`] until it yields a value or `window`
+/// elapses (`None` = poll forever). Returns `Ok(None)` on timeout.
+fn poll_until<T>(
+    window: Option<Duration>,
+    mut check: impl FnMut() -> Result<Option<T>, ManagerError>,
+) -> Result<Option<T>, ManagerError> {
+    let deadline = window.map(|w| std::time::Instant::now() + w);
+    loop {
+        if let Some(value) = check()? {
+            return Ok(Some(value));
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(None);
+        }
+        sleep(POLL_INTERVAL);
+    }
+}
 
 /// Error type for manager operations.
 #[derive(Debug)]
@@ -65,6 +87,16 @@ pub enum ManagerError {
     UnrecognizedSpend(String),
     /// No transaction spending this outpoint was found within the polling window.
     SpendNotFound(OutPoint),
+    /// The transaction did not appear on the node within the polling window.
+    TransactionNotFound(Txid),
+    /// The outpoint given to [`ContractManager::track_instance`] does not pay
+    /// the contract's expected script (wrong contract, params, or state).
+    WrongFundingScript(OutPoint),
+    /// The spend produces no transaction outputs: a terminal clause constrains
+    /// none, so they must be supplied with [`SpendBuilder::outputs`].
+    NoOutputs,
+    /// Two spends of a batch set a different amount for the same output index.
+    ConflictingOutputAmount { index: u32 },
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
@@ -104,6 +136,25 @@ impl std::fmt::Display for ManagerError {
             ManagerError::SpendNotFound(outpoint) => {
                 write!(f, "No transaction spending {} found while polling", outpoint)
             }
+            ManagerError::TransactionNotFound(txid) => {
+                write!(f, "Transaction {} not found while polling", txid)
+            }
+            ManagerError::WrongFundingScript(outpoint) => write!(
+                f,
+                "Outpoint {} does not pay the contract's expected script \
+                 (wrong contract, params, or state?)",
+                outpoint
+            ),
+            ManagerError::NoOutputs => write!(
+                f,
+                "The spend produces no outputs; terminal clauses need explicit \
+                 outputs (SpendBuilder::outputs)"
+            ),
+            ManagerError::ConflictingOutputAmount { index } => write!(
+                f,
+                "Conflicting amounts were set for output index {}",
+                index
+            ),
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
             }
@@ -141,17 +192,18 @@ impl From<ContractError> for ManagerError {
 }
 
 /// Manages contract instances and their lifecycle.
-pub struct ContractManager<'a> {
+pub struct ContractManager {
     /// RPC client for blockchain interaction.
-    rpc: &'a Client,
+    rpc: Client,
 
     /// All instances managed by this manager.
     instances: Vec<Rc<RefCell<ContractInstance>>>,
 }
 
-impl<'a> ContractManager<'a> {
-    /// Create a new contract manager.
-    pub fn new(rpc: &'a Client) -> Self {
+impl ContractManager {
+    /// Create a new contract manager owning the RPC client (use
+    /// [`rpc`](Self::rpc) for direct access to it).
+    pub fn new(rpc: Client) -> Self {
         Self {
             rpc,
             instances: Vec::new(),
@@ -160,7 +212,7 @@ impl<'a> ContractManager<'a> {
 
     /// The RPC client, for callers that need direct access (e.g. mining or funding).
     pub fn rpc(&self) -> &Client {
-        self.rpc
+        &self.rpc
     }
 
     /// Create and fund a new contract instance. Params are taken from the
@@ -277,9 +329,9 @@ impl<'a> ContractManager<'a> {
     /// template clauses are single-input only and are rejected here.
     pub fn spend_batch(
         &mut self,
-        builders: Vec<SpendBuilder>,
+        builders: &[SpendBuilder],
     ) -> Result<Vec<InstanceHandle>, ManagerError> {
-        let (tx, nexts) = self.assemble(&builders)?;
+        let (tx, nexts) = self.assemble(builders)?;
 
         let txid = self.rpc.send_raw_transaction(&tx)?;
         for (vin, builder) in builders.iter().enumerate() {
@@ -411,11 +463,17 @@ impl<'a> ContractManager<'a> {
             return Ok((template.outputs.clone(), Some(template.sequence)));
         }
 
-        // Pool the per-builder DeductOutput amounts.
+        // Pool the per-builder DeductOutput amounts; setting the same index to
+        // two different amounts is a caller bug, not a merge.
         let mut output_amounts: BTreeMap<u32, Amount> = BTreeMap::new();
         for builder in builders {
             for (idx, amount) in &builder.output_amounts {
-                output_amounts.insert(*idx, *amount);
+                match output_amounts.insert(*idx, *amount) {
+                    Some(previous) if previous != *amount => {
+                        return Err(ManagerError::ConflictingOutputAmount { index: *idx });
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -471,6 +529,12 @@ impl<'a> ContractManager<'a> {
             }
         }
 
+        // A transaction with no outputs is never valid: the clause is terminal
+        // and the caller forgot to supply outputs explicitly.
+        if outputs_map.is_empty() {
+            return Err(ManagerError::NoOutputs);
+        }
+
         // Flatten into a contiguous 0..n output vector.
         let mut outputs = Vec::with_capacity(outputs_map.len());
         for i in 0..outputs_map.len() as u32 {
@@ -495,17 +559,13 @@ impl<'a> ContractManager<'a> {
     }
 
     fn wait_for_transaction(&self, txid: Txid) -> Result<Transaction, ManagerError> {
-        // Poll for transaction
-        for _ in 0..30 {
-            if let Ok(_tx_info) = self.rpc.get_raw_transaction_info(&txid, None) {
-                let tx_hex = self.rpc.get_raw_transaction(&txid, None)?;
-                return Ok(tx_hex);
+        poll_until(Some(DEFAULT_POLL_WINDOW), || {
+            match self.rpc.get_raw_transaction(&txid, None) {
+                Ok(tx) => Ok(Some(tx)),
+                Err(_) => Ok(None), // not (yet) known to the node
             }
-            sleep(Duration::from_millis(100));
-        }
-        Err(ManagerError::Other(
-            "Transaction not found after polling".to_string(),
-        ))
+        })?
+        .ok_or(ManagerError::TransactionNotFound(txid))
     }
 
     /// Build the full script-path witness for one input: the clause arguments with
@@ -682,7 +742,7 @@ impl<'a> ContractManager<'a> {
             .get(outpoint.vout as usize)
             .ok_or(ManagerError::OutputNotFound)?;
         if paid.script_pubkey != expected_spk {
-            return Err(ManagerError::OutputNotFound);
+            return Err(ManagerError::WrongFundingScript(outpoint));
         }
 
         instance.borrow_mut().mark_funded(outpoint, funding_tx);
@@ -811,11 +871,22 @@ impl<'a> ContractManager<'a> {
         &mut self,
         handle: &InstanceHandle,
     ) -> Result<Vec<InstanceHandle>, ManagerError> {
+        self.wait_for_spend_within(handle, Some(DEFAULT_POLL_WINDOW))
+    }
+
+    /// [`wait_for_spend`](Self::wait_for_spend) with an explicit polling window:
+    /// give up with [`ManagerError::SpendNotFound`] after `window`, or poll
+    /// forever when `window` is `None` (e.g. waiting on a human counterparty).
+    pub fn wait_for_spend_within(
+        &mut self,
+        handle: &InstanceHandle,
+        window: Option<Duration>,
+    ) -> Result<Vec<InstanceHandle>, ManagerError> {
         if handle.status() == InstanceStatus::Spent {
             return Ok(handle.outputs());
         }
         let outpoint = handle.outpoint().ok_or(ManagerError::NotFunded)?;
-        let spending_tx = self.wait_for_spending_tx(outpoint)?;
+        let spending_tx = self.wait_for_spending_tx(outpoint, window)?;
         self.observe_spend(handle, &spending_tx)
     }
 
@@ -840,10 +911,14 @@ impl<'a> ContractManager<'a> {
         Ok(result)
     }
 
-    /// Poll until a transaction spending `outpoint` appears, in the mempool
-    /// (`gettxspendingprevout`) or in a block (scanned from the funding
-    /// transaction's height onward).
-    fn wait_for_spending_tx(&self, outpoint: OutPoint) -> Result<Transaction, ManagerError> {
+    /// Poll (within `window`; `None` = forever) until a transaction spending
+    /// `outpoint` appears, in the mempool (`gettxspendingprevout`) or in a
+    /// block (scanned from the funding transaction's height onward).
+    fn wait_for_spending_tx(
+        &self,
+        outpoint: OutPoint,
+        window: Option<Duration>,
+    ) -> Result<Transaction, ManagerError> {
         // Scan blocks starting where the funding transaction confirmed (or the
         // next block, if it is still unconfirmed).
         let mut next_height = {
@@ -854,7 +929,7 @@ impl<'a> ContractManager<'a> {
             }
         };
 
-        for _ in 0..POLL_ATTEMPTS {
+        poll_until(window, || {
             // 1. The mempool.
             let query = serde_json::json!([{
                 "txid": outpoint.txid.to_string(),
@@ -869,7 +944,7 @@ impl<'a> ContractManager<'a> {
                 let txid: Txid = txid_str
                     .parse()
                     .map_err(|e| ManagerError::Other(format!("bad spendingtxid: {}", e)))?;
-                return Ok(self.rpc.get_raw_transaction(&txid, None)?);
+                return Ok(Some(self.rpc.get_raw_transaction(&txid, None)?));
             }
 
             // 2. Blocks mined since the last look.
@@ -882,15 +957,14 @@ impl<'a> ContractManager<'a> {
                     .iter()
                     .find(|tx| tx.input.iter().any(|i| i.previous_output == outpoint))
                 {
-                    return Ok(tx.clone());
+                    return Ok(Some(tx.clone()));
                 }
                 next_height += 1;
             }
 
-            sleep(Duration::from_millis(100));
-        }
-
-        Err(ManagerError::SpendNotFound(outpoint))
+            Ok(None)
+        })?
+        .ok_or(ManagerError::SpendNotFound(outpoint))
     }
 }
 
@@ -1015,6 +1089,12 @@ impl InstanceHandle {
     /// Transaction ID that spent this instance (None until spent).
     pub fn spent_in_tx(&self) -> Option<Txid> {
         self.instance.borrow().spent_in_tx()
+    }
+
+    /// The input index of the spending transaction that consumed this instance
+    /// (None until spent).
+    pub fn spending_vin(&self) -> Option<usize> {
+        self.instance.borrow().spending_vin()
     }
 
     /// The witness arguments of the spend, in witness order (None until spent).

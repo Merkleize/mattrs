@@ -65,18 +65,14 @@ pub fn compute_ctv_hash(outputs: &[TxOut], sequence: Sequence) -> [u8; 32] {
 
 /// Create a CTV template from a list of addresses and amounts.
 ///
-/// This is a convenience function for creating outputs and computing their CTV hash.
-///
-/// # Arguments
-/// * `template` - List of (address, amount) pairs
-/// * `sequence` - The sequence number for the input
-///
-/// # Returns
-/// A tuple of (outputs, ctv_hash)
+/// This is a convenience function for building a
+/// [`CtvTemplate`](crate::contracts::CtvTemplate), which carries both the
+/// outputs and (via [`ctv_hash`](crate::contracts::CtvTemplate::ctv_hash))
+/// the BIP-119 hash a clause script commits to.
 pub fn create_ctv_template(
     template: &[(Address, Amount)],
     sequence: Sequence,
-) -> Result<(Vec<TxOut>, [u8; 32]), String> {
+) -> crate::contracts::CtvTemplate {
     let outputs: Vec<TxOut> = template
         .iter()
         .map(|(addr, amount)| TxOut {
@@ -85,9 +81,7 @@ pub fn create_ctv_template(
         })
         .collect();
 
-    let ctv_hash = compute_ctv_hash(&outputs, sequence);
-
-    Ok((outputs, ctv_hash))
+    crate::contracts::CtvTemplate::new(outputs, sequence)
 }
 
 #[cfg(test)]
@@ -120,7 +114,7 @@ mod tests {
             ),
         ];
 
-        let (_, ctv_hash) = create_ctv_template(&template, Sequence(10)).unwrap();
+        let ctv_hash = create_ctv_template(&template, Sequence(10)).ctv_hash();
 
         // Expected hash from mattrs_old test
         let expected_hex = "b288279b3012acaedfde4e4e347ad6f3147d416edbebf76668f16b91f2969215";

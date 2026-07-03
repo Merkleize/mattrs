@@ -26,7 +26,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 
     // ---- The actor drives the whole vault lifecycle. ----
     let actor_client = regtest_client("testwallet");
-    let mut actor = ContractManager::new(&actor_client);
+    let mut actor = ContractManager::new(actor_client);
 
     let amount = 49_999_900u64;
     let vault_a = Vault::fund(&mut actor, Amount::from_sat(amount), params.clone())?;
@@ -36,7 +36,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
         Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?.assume_checked(),
         Amount::from_sat(amount),
     )];
-    let (_, ctv_hash) = create_ctv_template(&ctv_template, bitcoin::Sequence(10))?;
+    let ctv_hash = create_ctv_template(&ctv_template, bitcoin::Sequence(10)).ctv_hash();
 
     let unvaulting_a: UnvaultingHandle = vault_a
         .trigger(ctv_hash, 0)
@@ -63,7 +63,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     // The trigger spend is buried in a block by now (block-scan path); the
     // withdraw is still in the mempool (gettxspendingprevout path).
     let observer_client = regtest_client("testwallet");
-    let mut observer = ContractManager::new(&observer_client);
+    let mut observer = ContractManager::new(observer_client);
 
     let vault_b = observer.track_instance(
         Vault::new(params.clone()).as_erased(),

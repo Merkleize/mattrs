@@ -154,7 +154,7 @@ fn main() {
     //    from the registered signer — no placeholder is ever written by hand.
     //    Building performs no RPC, so an unreachable client works offline.
     let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
-    let manager = ContractManager::new(&client);
+    let manager = ContractManager::new(client);
 
     let dest = bitcoin::Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")
         .unwrap()

@@ -38,7 +38,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
 use mattrs::contracts::ClauseArgs;
-use mattrs::manager::{ContractManager, InstanceHandle, ManagerError};
+use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 
 use contracts::{
@@ -76,20 +76,6 @@ fn urandom<const N: usize>() -> [u8; N] {
         .read_exact(&mut buf)
         .expect("read /dev/urandom");
     buf
-}
-
-/// Like `ContractManager::wait_for_spend`, but waits indefinitely instead of
-/// giving up after the polling window (a human counterparty takes their time).
-fn wait_for_spend_forever(
-    manager: &mut ContractManager,
-    handle: &InstanceHandle,
-) -> Result<Vec<InstanceHandle>, ManagerError> {
-    loop {
-        match manager.wait_for_spend(handle) {
-            Err(ManagerError::SpendNotFound(_)) => continue,
-            other => return other,
-        }
-    }
 }
 
 /// RPC client for the local regtest node (see `mattrs::manager::regtest_rpc_client`).
@@ -164,7 +150,7 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::erro
 
     // Fund the game with both stakes and tell Bob where it lives.
     let client = rpc_client(wallet);
-    let mut manager = ContractManager::new(&client);
+    let mut manager = ContractManager::new(client);
     let s0 = RpsGameS0::fund(
         &mut manager,
         Amount::from_sat((2 * DEFAULT_STAKE) as u64),
@@ -179,7 +165,8 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::erro
 
     // Follow Bob's turn: his spend reveals m_b in the witness.
     println!("Waiting for Bob's move on-chain...");
-    let children = wait_for_spend_forever(&mut manager, s0.handle())?;
+    // Wait with no time limit: a human counterparty takes their time.
+    let children = manager.wait_for_spend_within(s0.handle(), None)?;
     let s1: RpsGameS1Handle = children
         .into_iter()
         .next()
@@ -242,7 +229,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::error:
             .ok_or("missing 'vout' in peer message")? as u32,
     };
     let client = rpc_client(wallet);
-    let mut manager = ContractManager::new(&client);
+    let mut manager = ContractManager::new(client);
     let s0: RpsGameS0Handle = manager
         .track_instance(RpsGameS0::new(params).as_erased(), None, outpoint)?
         .try_into()?;
@@ -258,7 +245,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::error:
 
     // Follow Alice's adjudication and check her revealed commitment.
     println!("Waiting for Alice's adjudication on-chain...");
-    wait_for_spend_forever(&mut manager, s1.handle())?;
+    manager.wait_for_spend_within(s1.handle(), None)?;
     let clause = s1.handle().clause_name().expect("spent");
     // The three adjudication clauses share one witness layout (m_b, m_a, r_a).
     let args =

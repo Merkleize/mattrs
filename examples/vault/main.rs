@@ -53,8 +53,8 @@ const RECOVER_XPRIV: &str = "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjs
 
 const SPEND_DELAY: u32 = 10;
 
-struct Repl<'a> {
-    manager: ContractManager<'a>,
+struct Repl {
+    manager: ContractManager,
     params: VaultParams,
     unvault_xpriv: Xpriv,
     /// Every instance ever shown to the user, addressed by its `list` index.
@@ -68,7 +68,7 @@ enum Kind {
     Unvaulting,
 }
 
-impl Repl<'_> {
+impl Repl {
     fn kind(&self, handle: &InstanceHandle) -> Option<Kind> {
         if VaultHandle::try_from(handle.clone()).is_ok() {
             Some(Kind::Vault)
@@ -197,8 +197,9 @@ impl Repl<'_> {
             .checked_sub(outputs_total)
             .ok_or("outputs exceed the vaults' total amount")?;
 
-        let (tx_outs, ctv_hash) = create_ctv_template(&template, Sequence(SPEND_DELAY))?;
-        self.templates.insert(ctv_hash, tx_outs);
+        let tmpl = create_ctv_template(&template, Sequence(SPEND_DELAY));
+        let ctv_hash = tmpl.ctv_hash();
+        self.templates.insert(ctv_hash, tmpl.outputs);
         println!(
             "Triggering {} vault(s) towards template {} (revault: {} sats)",
             vaults.len(),
@@ -221,7 +222,7 @@ impl Repl<'_> {
             builders.push(builder.sign(HotSigner::new(self.unvault_xpriv)));
         }
 
-        let children = self.manager.spend_batch(builders)?;
+        let children = self.manager.spend_batch(&builders)?;
         for child in children {
             self.track(child);
         }
@@ -358,7 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = regtest_rpc_client(&wallet);
     let mut repl = Repl {
-        manager: ContractManager::new(&client),
+        manager: ContractManager::new(client),
         params,
         unvault_xpriv,
         items: Vec::new(),

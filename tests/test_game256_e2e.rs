@@ -33,7 +33,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     let n = 8usize;
 
     let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(&client);
+    let mut manager = ContractManager::new(client);
     let params = G256Params {
         alice_pk: alice_pk(),
         bob_pk: bob_pk(),
