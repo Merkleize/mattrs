@@ -22,9 +22,9 @@
 //! - Drive funding/spending on-chain with [`ContractManager`](manager::ContractManager).
 //!
 //! Contracts whose clause layout is only known at runtime bypass the DSL and use
-//! the same primitives directly (`clause!` / `clause_tree!` /
-//! [`StandardClause::new`](contracts::StandardClause::new)) — see [`fraud`] for a
-//! worked example (the generic bisection fraud proof).
+//! the same primitives directly ([`StandardClause::new`](contracts::StandardClause::new)
+//! and the [`clause_tree!`](macro@clause_tree) macro) — see [`fraud`] for a worked
+//! example (the generic bisection fraud proof).
 //!
 //! Start with `examples/getting_started.rs` (runs offline); `tests/support/vault.rs`
 //! is a complete two-stage vault.
@@ -56,6 +56,7 @@ pub mod merkle;
 pub mod script_helpers;
 pub mod script_utils;
 pub mod signer;
+pub mod testutil;
 
 /// NUMS ("nothing-up-my-sleeve") x-only public key, used as a taproot internal key
 /// when a contract has no key-spend path.

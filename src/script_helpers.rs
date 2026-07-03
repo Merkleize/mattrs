@@ -2,11 +2,24 @@
 //! pymatt's `matt/script_helpers.py`. These build the small CCV/CSV building
 //! blocks that MATT contracts assemble their tapscripts from.
 
+use bitcoin::key::TweakedPublicKey;
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use crate::{contracts::CCV_FLAG_CHECK_INPUT, optional_key_script};
 
 define_pushable!();
+
+/// The P2TR scriptPubKey (`OP_1 <key>`) that pays `key` *directly as the witness
+/// program*, with no key tweak or script path.
+///
+/// This is pymatt's `OpaqueP2TR`: it is what a `CHECKCONTRACTVERIFY` with empty
+/// data and an empty taptree constrains an output to (the recovery outputs of the
+/// vault, for instance). Because `key` is used verbatim, it must already be the
+/// final output key — hence the internal `dangerous_assume_tweaked`, which is
+/// safe precisely here.
+pub fn opaque_p2tr(key: XOnlyPublicKey) -> ScriptBuf {
+    ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(key))
+}
 
 /// CCV fragment that constrains the *current input's* contract (the committed
 /// data is expected on the stack). `index = -1` means "this input"; `pubkey`

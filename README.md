@@ -51,9 +51,11 @@ contract rather than from a parallel field.
 ## Defining a contract
 
 A single `contract! { .. }` block generates the per-clause `*Args` structs, the
-clause objects and taptree, a contract struct (`new` / `fund` / `as_erased`), and a
-typed handle with **one spend method per clause**. Params/state stay ordinary
-derived structs; the tapscripts stay as reviewable functions the DSL references.
+clause objects and taptree, a contract struct (`new` / `fund` / `address` /
+`taptree_root` / `as_erased`), and a typed handle with **one spend method per
+clause**. Params/state stay ordinary derived structs; the tapscripts stay as
+reviewable functions the DSL references. The derives are self-contained — a
+contract file imports only the traits it actually names.
 
 ```rust
 #[derive(Debug, Clone, ContractParams)]
@@ -97,7 +99,8 @@ pub struct G256S2State {
 ## Spending: a clause is a typed method call
 
 ```rust
-let vault = Vault::fund(&mut manager, amount, params)?;      // VaultHandle
+let vault = Vault::new(params).fund(&mut manager, amount)?;  // VaultHandle
+// (augmented contracts take the initial state too: `.fund(&mut manager, amount, state)`)
 
 // trigger: signed, exactly one child, returned typed
 let unvaulting: UnvaultingHandle = vault
@@ -159,10 +162,12 @@ The examples from the Python reference framework (`pymatt`) are ported under
 
 Supporting MATT infrastructure lives in the library for downstream reuse: the
 generic fraud-proof contracts (`mattrs::fraud`), a data `MerkleTree` /
-`MerkleProof` / `WitProof` / `MerkleProofType` (`mattrs::merkle`), and the
+`MerkleProof` / `WitProof` / `MerkleProofType` (`mattrs::merkle`), the
 `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
-`check_output_contract` / `older` / `timeout_sig_script` script fragments
-(`mattrs::script_helpers`), plus `commit_int` (`mattrs::script_utils`).
+`check_output_contract` / `older` / `timeout_sig_script` / `opaque_p2tr` script
+fragments (`mattrs::script_helpers`), `commit_int` (`mattrs::script_utils`), and
+`offline_client()` / `fund_fake(..)` for building spends without a node
+(`mattrs::testutil`, used by the examples and fixtures).
 
 ## Demos
 

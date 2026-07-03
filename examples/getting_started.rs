@@ -9,18 +9,14 @@
 //! Run with `cargo run --example getting_started`. No Bitcoin node is needed:
 //! the instance is fake-funded and the spend is built (signed) but not broadcast.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::str::FromStr;
 
-use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxOut, Txid, XOnlyPublicKey};
+use bitcoin::{Amount, ScriptBuf, TxOut, XOnlyPublicKey};
 use bitcoin::bip32::Xpriv;
-use bitcoin::hashes::Hash;
 use bitcoin_script::{define_pushable, script};
-use bitcoincore_rpc::{Auth, Client};
-use mattrs::contracts::ContractInstance;
-use mattrs::manager::{ContractManager, InstanceHandle};
+use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
+use mattrs::testutil::{fund_fake, offline_client};
 use mattrs::{contract, ContractParams as DeriveContractParams, Signature};
 
 define_pushable!();
@@ -89,33 +85,6 @@ impl TimeLock {
 // Demo
 // ============================================================================
 
-/// Fake a funded instance so a spend can be built without a node: the "funding
-/// transaction" exists only in memory, at a made-up outpoint.
-fn fund_fake(contract: &TimeLock, amount: Amount) -> InstanceHandle {
-    let instance = Rc::new(RefCell::new(ContractInstance::new(
-        contract.as_erased(),
-        None,
-    )));
-    let script_pubkey = contract.as_erased().script_pubkey(None).unwrap();
-    let funding_tx = Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![TxOut {
-            script_pubkey,
-            value: amount,
-        }],
-    };
-    instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: Txid::from_byte_array([1u8; 32]),
-            vout: 0,
-        },
-        funding_tx,
-    );
-    InstanceHandle::new(instance)
-}
-
 fn main() {
     // Demo keys (never use these on mainnet).
     let owner_xpriv = Xpriv::from_str(
@@ -144,17 +113,18 @@ fn main() {
         timelock.address(bitcoin::Network::Regtest)
     );
 
-    // 2. Fund it. Here we fake the funding so the example runs offline; against a
-    //    real node you would use `TimeLock::fund(&mut manager, amount)` instead.
-    let handle: TimeLockHandle = fund_fake(&timelock, Amount::from_sat(100_000))
-        .try_into()
-        .unwrap();
+    // 2. Fund it. Here we fake the funding so the example runs offline (see
+    //    `mattrs::testutil`); against a real node you would use
+    //    `timelock.fund(&mut manager, amount)` instead.
+    let handle: TimeLockHandle =
+        fund_fake(timelock.as_erased(), None, Amount::from_sat(100_000), 1)
+            .try_into()
+            .unwrap();
 
     // 3. Build the withdraw spend. The signature argument is filled automatically
     //    from the registered signer — no placeholder is ever written by hand.
     //    Building performs no RPC, so an unreachable client works offline.
-    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
-    let manager = ContractManager::new(client);
+    let manager = ContractManager::new(offline_client());
 
     let dest = bitcoin::Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")
         .unwrap()

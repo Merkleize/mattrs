@@ -39,10 +39,11 @@ use std::str::FromStr;
 
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
-use bitcoin::{Address, Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
+use bitcoin::{Address, Amount, Sequence, TxOut, XOnlyPublicKey};
 use mattrs::contracts::InstanceStatus;
 use mattrs::ctv::create_ctv_template;
 use mattrs::manager::{regtest_rpc_client, ContractManager, InstanceHandle};
+use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
 use contracts::{UnvaultingHandle, UnvaultingState, Vault, VaultHandle, VaultParams};
@@ -254,11 +255,9 @@ impl Repl {
         }
         let value = handle.prevout().expect("funded").value;
         // The recover clauses' CCV (empty data, empty taptree) constrains output 0
-        // to pay the recovery key *as the witness program*, with no further tweak.
+        // to pay the recovery key as the witness program, with no further tweak.
         let recover_out = vec![TxOut {
-            script_pubkey: ScriptBuf::new_p2tr_tweaked(
-                bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(self.params.recover_pk),
-            ),
+            script_pubkey: opaque_p2tr(self.params.recover_pk),
             value,
         }];
 

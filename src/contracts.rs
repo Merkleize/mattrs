@@ -27,7 +27,7 @@ use std::{cell::RefCell, fmt, fmt::Debug, marker::PhantomData, rc::Rc, sync::Arc
 use bitcoin::{
     OutPoint, ScriptBuf, Sequence, TapTweakHash, Transaction, TxOut, Txid, XOnlyPublicKey,
     hashes::{Hash, sha256},
-    key::{Secp256k1, TweakedPublicKey},
+    key::Secp256k1,
     taproot::{LeafVersion, TapLeafHash, TapNodeHash},
 };
 
@@ -1363,9 +1363,7 @@ impl<P: ContractParams> StandardP2TR<P> {
 
     /// Get the scriptPubKey for this contract (OP_1 <output_key>).
     pub fn script_pubkey(&self) -> ScriptBuf {
-        ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(
-            self.output_key(),
-        ))
+        crate::script_helpers::opaque_p2tr(self.output_key())
     }
 }
 
@@ -1510,9 +1508,7 @@ impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
     /// Get the scriptPubKey for this contract with the given state.
     pub fn script_pubkey(&self, state: &S) -> Result<ScriptBuf, ContractError> {
         let output_key = self.output_key(state)?;
-        Ok(ScriptBuf::new_p2tr_tweaked(
-            TweakedPublicKey::dangerous_assume_tweaked(output_key),
-        ))
+        Ok(crate::script_helpers::opaque_p2tr(output_key))
     }
 }
 
@@ -1573,9 +1569,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         let committed = state_bytes.ok_or(ContractError::MissingState)?;
         let internal_key = self.internal_key_from_committed(committed)?;
         let output_key = compute_taproot_output_key(&internal_key, Some(&self.core.taptree));
-        Ok(ScriptBuf::new_p2tr_tweaked(
-            TweakedPublicKey::dangerous_assume_tweaked(output_key),
-        ))
+        Ok(crate::script_helpers::opaque_p2tr(output_key))
     }
 
     fn control_block_internal_key(

@@ -5,16 +5,14 @@
 //! (`offline_client` + `fund_fake`). The `#[ignore]`d end-to-end tests use
 //! `regtest_client` against a real regtest `bitcoind` instead.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
-use bitcoin::{hashes::Hash, Amount, OutPoint, Transaction, TxOut, Txid, XOnlyPublicKey};
-use bitcoincore_rpc::{Auth, Client};
-use mattrs::contracts::{ContractInstance, ErasedContract, ErasedState};
+use bitcoin::{Amount, XOnlyPublicKey};
+use bitcoincore_rpc::Client;
+use mattrs::contracts::{ErasedContract, ErasedState};
 use mattrs::manager::InstanceHandle;
 
 /// Alice's test key. Its x-only pubkey (`67c20aa2…`) is the "alice" key of the
@@ -52,7 +50,7 @@ pub fn bob_pk() -> XOnlyPublicKey {
 /// An offline RPC client. It is never actually contacted — building (as opposed to
 /// broadcasting) a spend performs no RPC.
 pub fn offline_client() -> Client {
-    Client::new("http://127.0.0.1:1", Auth::None).unwrap()
+    mattrs::testutil::offline_client()
 }
 
 /// An RPC client for the local regtest node, used by the `#[ignore]`d e2e
@@ -71,38 +69,14 @@ where
 }
 
 /// Fake a funded instance of `contract` (optionally carrying `expanded` logical
-/// state) holding `amount` sats, at a distinct outpoint keyed by `seed`. The
-/// funding output pays the contract's own address, derived from its committed state.
+/// state) holding `amount` sats, at a distinct outpoint keyed by `seed`.
+///
+/// Thin wrapper over [`mattrs::testutil::fund_fake`] taking sats directly.
 pub fn fund_fake(
     contract: Arc<dyn ErasedContract>,
     expanded: Option<Box<dyn ErasedState>>,
     amount: u64,
     seed: u8,
 ) -> InstanceHandle {
-    let instance = Rc::new(RefCell::new(ContractInstance::new(
-        contract, expanded,
-    )));
-    let script_pubkey = {
-        let inst = instance.borrow();
-        inst.contract()
-            .script_pubkey(inst.committed_state_bytes().as_deref())
-            .unwrap()
-    };
-    let funding_tx = Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![TxOut {
-            script_pubkey,
-            value: Amount::from_sat(amount),
-        }],
-    };
-    instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: Txid::from_byte_array([seed; 32]),
-            vout: 0,
-        },
-        funding_tx,
-    );
-    InstanceHandle::new(instance)
+    mattrs::testutil::fund_fake(contract, expanded, Amount::from_sat(amount), seed)
 }
