@@ -197,11 +197,11 @@ fn test_game256_state_transitions() {
         100_000,
         3,
     ));
+    // The eight committed fields come from the instance state; Bob only
+    // supplies his midstate and sub-traces.
     let tx = b2
-        .bob_reveal_left(
-            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32], [9; 32],
-            [10; 32], [11; 32],
-        )
+        .bob_reveal_left([9; 32], [10; 32], [11; 32])
+        .unwrap()
         .sign(HotSigner::new(bob_xpriv()))
         .build_tx(&manager)
         .unwrap();
@@ -236,10 +236,8 @@ fn test_game256_state_transitions() {
         4,
     ));
     let tx = b2_leaf
-        .bob_reveal_left(
-            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32], [9; 32],
-            [10; 32], [11; 32],
-        )
+        .bob_reveal_left([9; 32], [10; 32], [11; 32])
+        .unwrap()
         .sign(HotSigner::new(bob_xpriv()))
         .build_tx(&manager)
         .unwrap();
@@ -285,9 +283,8 @@ fn test_game256_state_transitions() {
         6,
     ));
     let tx = b1
-        .alice_reveal(
-            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32], [7; 32], [8; 32],
-        )
+        .alice_reveal([6; 32], [7; 32], [8; 32])
+        .unwrap()
         .sign(HotSigner::new(alice_xpriv()))
         .build_tx(&manager)
         .unwrap();

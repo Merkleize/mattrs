@@ -73,17 +73,14 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         let size = j - i + 1;
         let m = size / 2;
 
+        // The committed range endpoints and traces come from the instance
+        // state; Alice only supplies her midstate and sub-traces.
         let b2: Bisect2Handle = b1
             .alice_reveal(
-                h_a[i],
-                h_a[j + 1],
-                h_b[j + 1],
-                trace(&h_a, i, j),
-                trace(&h_b, i, j),
                 h_a[i + m],
                 trace(&h_a, i, i + m - 1),
                 trace(&h_a, i + m, j),
-            )
+            )?
             .sign(HotSigner::new(alice_xpriv()))
             .exec_one(&mut manager)?
             .try_into()?;
@@ -91,33 +88,9 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         let go_left = h_a[i + m] != h_b[i + m];
         path.push(if go_left { 'L' } else { 'R' });
         let builder = if go_left {
-            b2.bob_reveal_left(
-                h_a[i],
-                h_a[j + 1],
-                h_b[j + 1],
-                trace(&h_a, i, j),
-                trace(&h_b, i, j),
-                h_a[i + m],
-                trace(&h_a, i, i + m - 1),
-                trace(&h_a, i + m, j),
-                h_b[i + m],
-                trace(&h_b, i, i + m - 1),
-                trace(&h_b, i + m, j),
-            )
+            b2.bob_reveal_left(h_b[i + m], trace(&h_b, i, i + m - 1), trace(&h_b, i + m, j))?
         } else {
-            b2.bob_reveal_right(
-                h_a[i],
-                h_a[j + 1],
-                h_b[j + 1],
-                trace(&h_a, i, j),
-                trace(&h_b, i, j),
-                h_a[i + m],
-                trace(&h_a, i, i + m - 1),
-                trace(&h_a, i + m, j),
-                h_b[i + m],
-                trace(&h_b, i, i + m - 1),
-                trace(&h_b, i + m, j),
-            )
+            b2.bob_reveal_right(h_b[i + m], trace(&h_b, i, i + m - 1), trace(&h_b, i + m, j))?
         };
         let child = builder
             .sign(HotSigner::new(bob_xpriv()))
@@ -142,7 +115,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
 
     // Only honest Bob can re-run step 5 (64 -> 128) and take the pot.
     let dest = manager.rpc().get_new_address(None, None)?.assume_checked();
-    leaf.bob_reveal(vec![bn2vch(bob_vals[i])], h_a[i + 1])
+    leaf.bob_reveal(vec![bn2vch(bob_vals[i])])?
         .sign(HotSigner::new(bob_xpriv()))
         .outputs(vec![TxOut {
             script_pubkey: dest.script_pubkey(),

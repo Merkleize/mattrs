@@ -92,6 +92,12 @@ pub type LeafFactory = Arc<dyn Fn(i64) -> Leaf + Send + Sync>;
 /// with `m = (j - i + 1) / 2`. This is the off-chain half of the equation the
 /// `Bisect` reveal clauses re-check on-chain; each party derives the reveal
 /// arguments for range `[i, j]` from its own claimed `hs`.
+///
+/// # Panics
+///
+/// Panics if the range falls outside `hs` (`j + 1 >= hs.len()`) or its size
+/// `j - i + 1` is not a power of two — both protocol invariants of the ranges
+/// the bisection visits.
 pub fn trace(hs: &[[u8; 32]], i: usize, j: usize) -> [u8; 32] {
     assert!(i <= j && j + 1 < hs.len(), "trace range out of bounds");
     let size = j - i + 1;
@@ -114,6 +120,7 @@ pub fn trace(hs: &[[u8; 32]], i: usize, j: usize) -> [u8; 32] {
 // Leaf — the disputed single step, re-run on-chain
 // ============================================================================
 
+/// The two parties of a [`Leaf`] adjudication.
 #[derive(Debug, Clone, ContractParams)]
 pub struct LeafParams {
     pub alice_pk: XOnlyPublicKey,
@@ -146,6 +153,8 @@ enum RevealSide {
 }
 
 impl Leaf {
+    /// Build the single-step adjudication contract for `computer`'s step
+    /// function, between `params`' two parties.
     pub fn new(params: LeafParams, computer: &Computer) -> Self {
         let alice_reveal: Arc<dyn ErasedClause> =
             Arc::new(StandardClause::<LeafParams, LeafState, RawArgs>::new(
@@ -218,6 +227,7 @@ impl Leaf {
 // Bisect_1 / Bisect_2 — the recursive core, over any step range [i, j]
 // ============================================================================
 
+/// The two parties of a bisection stage and the step range it disputes.
 #[derive(Debug, Clone, ContractParams)]
 pub struct BisectParams {
     pub alice_pk: XOnlyPublicKey,
@@ -333,6 +343,9 @@ pub struct Bisect1 {
 }
 
 impl Bisect1 {
+    /// Build Alice's bisection stage over `params`' step range, recursing (via
+    /// [`Bisect2`]) into `leaf_factory` leaves or sub-`Bisect1`s, and letting
+    /// Bob collect via `forfait` after `forfait_timeout` blocks.
     pub fn new(params: BisectParams, leaf_factory: &LeafFactory, forfait_timeout: u32) -> Self {
         let bisect2_root =
             Bisect2::new(params.clone(), leaf_factory, forfait_timeout).taptree_root();
@@ -414,96 +427,21 @@ pub struct Bisect2 {
     pub contract: StandardAugmentedP2TR<BisectParams, Bisect2State>,
 }
 
+/// Which half of the disputed range Bob's reveal recurses into.
+#[derive(Debug, Clone, Copy)]
+enum Side {
+    Left,
+    Right,
+}
+
 impl Bisect2 {
+    /// Build Bob's bisection stage over `params`' step range, recursing into
+    /// `leaf_factory` leaves (or sub-[`Bisect1`]s) and letting Alice collect
+    /// via `forfait` after `forfait_timeout` blocks.
     pub fn new(params: BisectParams, leaf_factory: &LeafFactory, forfait_timeout: u32) -> Self {
-        let m = params.m();
-        let (left_root, right_root) = if params.children_are_leaves() {
-            (
-                leaf_factory(params.i).taptree_root(),
-                leaf_factory(params.i + m).taptree_root(),
-            )
-        } else {
-            (
-                Bisect1::new(
-                    params.child(params.i, params.i + m - 1),
-                    leaf_factory,
-                    forfait_timeout,
-                )
-                .taptree_root(),
-                Bisect1::new(params.child(params.i + m, params.j), leaf_factory, forfait_timeout)
-                    .taptree_root(),
-            )
-        };
-
-        let lf = leaf_factory.clone();
-        let next_left: NextOutputsFn<BisectParams, Bisect2State, Bisect2BobRevealArgs> =
-            Arc::new(move |p, a, _s| {
-                let output = if p.children_are_leaves() {
-                    ClauseOutput::at_same_index()
-                        .to(lf(p.i).as_erased())
-                        .with_state(&LeafState {
-                            h_start: a.h_start,
-                            h_end_alice: a.h_mid_a,
-                            h_end_bob: a.h_mid_b,
-                        })
-                } else {
-                    let m = p.m();
-                    ClauseOutput::at_same_index()
-                        .to(Bisect1::new(p.child(p.i, p.i + m - 1), &lf, forfait_timeout)
-                            .as_erased())
-                        .with_state(&Bisect1State {
-                            h_start: a.h_start,
-                            h_end_a: a.h_mid_a,
-                            h_end_b: a.h_mid_b,
-                            trace_a: a.trace_left_a,
-                            trace_b: a.trace_left_b,
-                        })
-                };
-                Ok(NextOutputs::Contracts(vec![
-                    output.preserve_amount().build(),
-                ]))
-            });
-
-        let lf = leaf_factory.clone();
-        let next_right: NextOutputsFn<BisectParams, Bisect2State, Bisect2BobRevealArgs> =
-            Arc::new(move |p, a, _s| {
-                let m = p.m();
-                let output = if p.children_are_leaves() {
-                    ClauseOutput::at_same_index()
-                        .to(lf(p.i + m).as_erased())
-                        .with_state(&LeafState {
-                            h_start: a.h_mid_a,
-                            h_end_alice: a.h_end_a,
-                            h_end_bob: a.h_end_b,
-                        })
-                } else {
-                    ClauseOutput::at_same_index()
-                        .to(Bisect1::new(p.child(p.i + m, p.j), &lf, forfait_timeout).as_erased())
-                        .with_state(&Bisect1State {
-                            h_start: a.h_mid_a,
-                            h_end_a: a.h_end_a,
-                            h_end_b: a.h_end_b,
-                            trace_a: a.trace_right_a,
-                            trace_b: a.trace_right_b,
-                        })
-                };
-                Ok(NextOutputs::Contracts(vec![
-                    output.preserve_amount().build(),
-                ]))
-            });
-
-        let bob_reveal_left: Arc<dyn ErasedClause> = Arc::new(StandardClause::new(
-            "bob_reveal_left".to_string(),
-            Self::bob_reveal_left_script(params.bob_pk, params.children_are_leaves(), left_root),
-            Bisect2BobRevealArgs::arg_specs_for_params(&params),
-            Some(next_left),
-        ));
-        let bob_reveal_right: Arc<dyn ErasedClause> = Arc::new(StandardClause::new(
-            "bob_reveal_right".to_string(),
-            Self::bob_reveal_right_script(params.bob_pk, params.children_are_leaves(), right_root),
-            Bisect2BobRevealArgs::arg_specs_for_params(&params),
-            Some(next_right),
-        ));
+        let bob_reveal_left = Self::bob_reveal_clause(&params, Side::Left, leaf_factory, forfait_timeout);
+        let bob_reveal_right =
+            Self::bob_reveal_clause(&params, Side::Right, leaf_factory, forfait_timeout);
         let forfait: Arc<dyn ErasedClause> =
             Arc::new(StandardClause::<BisectParams, Bisect2State, Bisect2ForfaitArgs>::new(
                 "forfait".to_string(),
@@ -534,22 +472,109 @@ impl Bisect2 {
         self.contract.taptree().root_hash()
     }
 
+    /// The child range Bob's reveal on `side` recurses into.
+    fn child_params(params: &BisectParams, side: Side) -> BisectParams {
+        let m = params.m();
+        match side {
+            Side::Left => params.child(params.i, params.i + m - 1),
+            Side::Right => params.child(params.i + m, params.j),
+        }
+    }
+
+    /// One of the two `bob_reveal_*` clauses; they differ only in which half of
+    /// the range they recurse into.
+    fn bob_reveal_clause(
+        params: &BisectParams,
+        side: Side,
+        leaf_factory: &LeafFactory,
+        forfait_timeout: u32,
+    ) -> Arc<dyn ErasedClause> {
+        let child = Self::child_params(params, side);
+        let child_root = if params.children_are_leaves() {
+            leaf_factory(child.i).taptree_root()
+        } else {
+            Bisect1::new(child, leaf_factory, forfait_timeout).taptree_root()
+        };
+        let name = match side {
+            Side::Left => "bob_reveal_left",
+            Side::Right => "bob_reveal_right",
+        };
+        Arc::new(StandardClause::new(
+            name.to_string(),
+            Self::bob_reveal_script(params.bob_pk, params.children_are_leaves(), side, child_root),
+            Bisect2BobRevealArgs::arg_specs_for_params(params),
+            Some(Self::bob_reveal_next(side, leaf_factory.clone(), forfait_timeout)),
+        ))
+    }
+
+    /// The next-outputs function of a `bob_reveal_*` clause: the dispute
+    /// continues on `side`'s half, whose endpoints and traces come from the
+    /// revealed values (a [`Leaf`] at a single step, else a sub-[`Bisect1`]).
+    fn bob_reveal_next(
+        side: Side,
+        lf: LeafFactory,
+        forfait_timeout: u32,
+    ) -> NextOutputsFn<BisectParams, Bisect2State, Bisect2BobRevealArgs> {
+        Arc::new(move |p, a, _s| {
+            // The child range's start/end commitments and per-party sub-traces.
+            let (h_start, h_end_alice, h_end_bob, trace_alice, trace_bob) = match side {
+                Side::Left => (a.h_start, a.h_mid_a, a.h_mid_b, a.trace_left_a, a.trace_left_b),
+                Side::Right => (a.h_mid_a, a.h_end_a, a.h_end_b, a.trace_right_a, a.trace_right_b),
+            };
+            let child = Self::child_params(p, side);
+            let output = if p.children_are_leaves() {
+                ClauseOutput::at_same_index()
+                    .to(lf(child.i).as_erased())
+                    .with_state(&LeafState {
+                        h_start,
+                        h_end_alice,
+                        h_end_bob,
+                    })
+            } else {
+                ClauseOutput::at_same_index()
+                    .to(Bisect1::new(child, &lf, forfait_timeout).as_erased())
+                    .with_state(&Bisect1State {
+                        h_start,
+                        h_end_a: h_end_alice,
+                        h_end_b: h_end_bob,
+                        trace_a: trace_alice,
+                        trace_b: trace_bob,
+                    })
+            };
+            Ok(NextOutputs::Contracts(vec![
+                output.preserve_amount().build(),
+            ]))
+        })
+    }
+
     // witness: <bob_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b>
     // <h_mid_a> <trace_left_a> <trace_right_a> <h_mid_b> <trace_left_b> <trace_right_b>
-    fn bob_reveal_left_script(
+    fn bob_reveal_script(
         bob_pk: XOnlyPublicKey,
         children_are_leaves: bool,
+        side: Side,
         child_root: [u8; 32],
     ) -> ScriptBuf {
-        // The output construction differs when the child is a Leaf vs a sub-Bisect_1:
-        // it pushes its state fields (3 vs 5) then commits to the child's root.
-        let (picks, encoder) = if children_are_leaves {
-            (script! { 10 OP_PICK 6 OP_PICK 4 OP_PICK }, merkle_root(3))
-        } else {
-            (
+        // The output construction differs by side (which revealed values form the
+        // child's state) and by child kind (a Leaf's state has 3 fields, a
+        // sub-Bisect_1's has 5): pick them, then commit to the child's root.
+        let (picks, encoder) = match (side, children_are_leaves) {
+            (Side::Left, true) => (script! { 10 OP_PICK 6 OP_PICK 4 OP_PICK }, merkle_root(3)),
+            (Side::Left, false) => (
                 script! { 10 OP_PICK 6 OP_PICK 4 OP_PICK 7 OP_PICK 5 OP_PICK },
                 merkle_root(5),
-            )
+            ),
+            (Side::Right, true) => (script! { 5 OP_PICK 10 OP_PICK 10 OP_PICK }, merkle_root(3)),
+            (Side::Right, false) => (
+                script! { 5 OP_PICK 10 OP_PICK 10 OP_PICK 6 OP_PICK 4 OP_PICK },
+                merkle_root(5),
+            ),
+        };
+        // The midstate comparison routing the dispute: Bob recurses LEFT when the
+        // parties' midstates differ, RIGHT when they agree.
+        let mid_check = match side {
+            Side::Left => script! { OP_EQUAL OP_NOT OP_VERIFY },
+            Side::Right => script! { OP_EQUALVERIFY },
         };
         script! {
             OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
@@ -560,41 +585,8 @@ impl Bisect2 {
             // t_{i,j;b} = H(h_i || h_{j+1;b} || t_left_b || t_right_b)
             10 OP_PICK 9 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
             7 OP_PICK OP_EQUALVERIFY
-            // h_mid_a != h_mid_b (Bob iterates on the LEFT child)
-            5 OP_PICK 3 OP_PICK OP_EQUAL OP_NOT OP_VERIFY
-            { picks }
-            { encoder }
-            { check_output_contract(child_root, -1, None) }
-            { script_drop(11) }
-            { bob_pk }
-            OP_CHECKSIG
-        }
-    }
-
-    // Same witness layout as `bob_reveal_left`.
-    fn bob_reveal_right_script(
-        bob_pk: XOnlyPublicKey,
-        children_are_leaves: bool,
-        child_root: [u8; 32],
-    ) -> ScriptBuf {
-        let (picks, encoder) = if children_are_leaves {
-            (script! { 5 OP_PICK 10 OP_PICK 10 OP_PICK }, merkle_root(3))
-        } else {
-            (
-                script! { 5 OP_PICK 10 OP_PICK 10 OP_PICK 6 OP_PICK 4 OP_PICK },
-                merkle_root(5),
-            )
-        };
-        script! {
-            OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
-            { dup(8) }
-            { merkle_root(8) }
-            { check_input_contract(-1, None) }
-            OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
-            10 OP_PICK 9 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
-            7 OP_PICK OP_EQUALVERIFY
-            // h_mid_a == h_mid_b (Bob iterates on the RIGHT child)
-            5 OP_PICK 3 OP_PICK OP_EQUALVERIFY
+            5 OP_PICK 3 OP_PICK
+            { mid_check }
             { picks }
             { encoder }
             { check_output_contract(child_root, -1, None) }
@@ -608,6 +600,31 @@ impl Bisect2 {
 // ============================================================================
 // Typed handles (mirroring the shape the `contract!` DSL generates)
 // ============================================================================
+
+/// The reveal's state-bound witness fields could not be derived because the
+/// instance carries no (or a differently-typed) logical state.
+///
+/// The fraud handles' reveal methods read the committed state fields from the
+/// instance's expanded state — which the framework materializes on every
+/// executed or observed transition — so this only occurs on instances that
+/// were constructed by hand without their state.
+#[derive(Debug, Clone)]
+pub struct MissingStateError {
+    /// The contract whose state was needed.
+    pub contract: &'static str,
+}
+
+impl std::fmt::Display for MissingStateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} instance carries no logical state to derive the reveal from",
+            self.contract
+        )
+    }
+}
+
+impl std::error::Error for MissingStateError {}
 
 /// Convert an untyped [`InstanceHandle`] into the given typed handle after
 /// checking the underlying contract type.
@@ -629,18 +646,43 @@ macro_rules! impl_handle_try_from {
 
 /// Typed handle to a funded [`Leaf`] instance.
 #[derive(Clone)]
-pub struct LeafHandle(pub InstanceHandle);
+pub struct LeafHandle(InstanceHandle);
 
 impl LeafHandle {
-    /// Alice re-runs the disputed step. `x` is the step value's witness elements
-    /// (one per [`Computer`] spec); `h_y_b` is Bob's claimed ending commitment.
-    pub fn alice_reveal(&self, x: Vec<Vec<u8>>, h_y_b: [u8; 32]) -> SpendBuilder {
-        self.0.spend_clause("alice_reveal", Self::reveal_witness(x, h_y_b))
+    /// The underlying generic instance handle.
+    pub fn handle(&self) -> &InstanceHandle {
+        &self.0
     }
 
-    /// Bob re-runs the disputed step; `h_y_a` is Alice's claimed ending commitment.
-    pub fn bob_reveal(&self, x: Vec<Vec<u8>>, h_y_a: [u8; 32]) -> SpendBuilder {
-        self.0.spend_clause("bob_reveal", Self::reveal_witness(x, h_y_a))
+    /// This instance's typed state, if available.
+    pub fn state(&self) -> Option<LeafState> {
+        self.0.state::<LeafState>()
+    }
+
+    fn state_or_err(&self) -> Result<LeafState, MissingStateError> {
+        self.state().ok_or(MissingStateError {
+            contract: "fraud::Leaf",
+        })
+    }
+
+    /// Alice re-runs the disputed step, revealing the step value `x` (its
+    /// witness elements, one per [`Computer`] spec). The counterparty's claimed
+    /// ending commitment comes from the instance state.
+    pub fn alice_reveal(&self, x: Vec<Vec<u8>>) -> Result<SpendBuilder, MissingStateError> {
+        let state = self.state_or_err()?;
+        Ok(self
+            .0
+            .spend_clause("alice_reveal", Self::reveal_witness(x, state.h_end_bob)))
+    }
+
+    /// Bob re-runs the disputed step, revealing the step value `x` (its witness
+    /// elements, one per [`Computer`] spec). The counterparty's claimed ending
+    /// commitment comes from the instance state.
+    pub fn bob_reveal(&self, x: Vec<Vec<u8>>) -> Result<SpendBuilder, MissingStateError> {
+        let state = self.state_or_err()?;
+        Ok(self
+            .0
+            .spend_clause("bob_reveal", Self::reveal_witness(x, state.h_end_alice)))
     }
 
     fn reveal_witness(x: Vec<Vec<u8>>, other_hash: [u8; 32]) -> Vec<Vec<u8>> {
@@ -660,35 +702,47 @@ impl_handle_try_from!(
 
 /// Typed handle to a funded [`Bisect1`] instance.
 #[derive(Clone)]
-pub struct Bisect1Handle(pub InstanceHandle);
+pub struct Bisect1Handle(InstanceHandle);
 
 impl Bisect1Handle {
-    #[allow(clippy::too_many_arguments)]
+    /// The underlying generic instance handle.
+    pub fn handle(&self) -> &InstanceHandle {
+        &self.0
+    }
+
+    /// This instance's typed state, if available.
+    pub fn state(&self) -> Option<Bisect1State> {
+        self.0.state::<Bisect1State>()
+    }
+
+    /// Alice's turn: reveal her midstate commitment and the two sub-traces
+    /// backing her committed trace. The committed range endpoints and traces
+    /// come from the instance state, so the witness always matches it.
     pub fn alice_reveal(
         &self,
-        h_start: [u8; 32],
-        h_end_a: [u8; 32],
-        h_end_b: [u8; 32],
-        trace_a: [u8; 32],
-        trace_b: [u8; 32],
         h_mid_a: [u8; 32],
         trace_left_a: [u8; 32],
         trace_right_a: [u8; 32],
-    ) -> SpendBuilder {
+    ) -> Result<SpendBuilder, MissingStateError> {
+        let s = self.state().ok_or(MissingStateError {
+            contract: "fraud::Bisect1",
+        })?;
         let args = Bisect1AliceRevealArgs::new(
-            h_start,
-            h_end_a,
-            h_end_b,
-            trace_a,
-            trace_b,
+            s.h_start,
+            s.h_end_a,
+            s.h_end_b,
+            s.trace_a,
+            s.trace_b,
             h_mid_a,
             trace_left_a,
             trace_right_a,
         );
-        self.0
-            .spend_clause("alice_reveal", ClauseArgs::encode_to_witness(&args))
+        Ok(self
+            .0
+            .spend_clause("alice_reveal", ClauseArgs::encode_to_witness(&args)))
     }
 
+    /// Bob claims the pot after the forfait timeout (Alice stalled).
     pub fn forfait(&self) -> SpendBuilder {
         let args = Bisect1ForfaitArgs::new();
         self.0
@@ -704,109 +758,74 @@ impl_handle_try_from!(
 
 /// Typed handle to a funded [`Bisect2`] instance.
 #[derive(Clone)]
-pub struct Bisect2Handle(pub InstanceHandle);
+pub struct Bisect2Handle(InstanceHandle);
 
 impl Bisect2Handle {
-    #[allow(clippy::too_many_arguments)]
+    /// The underlying generic instance handle.
+    pub fn handle(&self) -> &InstanceHandle {
+        &self.0
+    }
+
+    /// This instance's typed state, if available.
+    pub fn state(&self) -> Option<Bisect2State> {
+        self.0.state::<Bisect2State>()
+    }
+
+    /// Bob's turn, disputing the LEFT half (the parties' midstates differ):
+    /// reveal his midstate commitment and sub-traces. The committed fields come
+    /// from the instance state, so the witness always matches it.
     pub fn bob_reveal_left(
         &self,
-        h_start: [u8; 32],
-        h_end_a: [u8; 32],
-        h_end_b: [u8; 32],
-        trace_a: [u8; 32],
-        trace_b: [u8; 32],
-        h_mid_a: [u8; 32],
-        trace_left_a: [u8; 32],
-        trace_right_a: [u8; 32],
         h_mid_b: [u8; 32],
         trace_left_b: [u8; 32],
         trace_right_b: [u8; 32],
-    ) -> SpendBuilder {
-        self.0.spend_clause(
-            "bob_reveal_left",
-            Self::reveal_witness(
-                h_start,
-                h_end_a,
-                h_end_b,
-                trace_a,
-                trace_b,
-                h_mid_a,
-                trace_left_a,
-                trace_right_a,
-                h_mid_b,
-                trace_left_b,
-                trace_right_b,
-            ),
-        )
+    ) -> Result<SpendBuilder, MissingStateError> {
+        self.bob_reveal("bob_reveal_left", h_mid_b, trace_left_b, trace_right_b)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Bob's turn, disputing the RIGHT half (the parties' midstates agree):
+    /// reveal his midstate commitment and sub-traces. The committed fields come
+    /// from the instance state, so the witness always matches it.
     pub fn bob_reveal_right(
         &self,
-        h_start: [u8; 32],
-        h_end_a: [u8; 32],
-        h_end_b: [u8; 32],
-        trace_a: [u8; 32],
-        trace_b: [u8; 32],
-        h_mid_a: [u8; 32],
-        trace_left_a: [u8; 32],
-        trace_right_a: [u8; 32],
         h_mid_b: [u8; 32],
         trace_left_b: [u8; 32],
         trace_right_b: [u8; 32],
-    ) -> SpendBuilder {
-        self.0.spend_clause(
-            "bob_reveal_right",
-            Self::reveal_witness(
-                h_start,
-                h_end_a,
-                h_end_b,
-                trace_a,
-                trace_b,
-                h_mid_a,
-                trace_left_a,
-                trace_right_a,
-                h_mid_b,
-                trace_left_b,
-                trace_right_b,
-            ),
-        )
+    ) -> Result<SpendBuilder, MissingStateError> {
+        self.bob_reveal("bob_reveal_right", h_mid_b, trace_left_b, trace_right_b)
     }
 
+    /// Alice claims the pot after the forfait timeout (Bob stalled).
     pub fn forfait(&self) -> SpendBuilder {
         let args = Bisect2ForfaitArgs::new();
         self.0
             .spend_clause("forfait", ClauseArgs::encode_to_witness(&args))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn reveal_witness(
-        h_start: [u8; 32],
-        h_end_a: [u8; 32],
-        h_end_b: [u8; 32],
-        trace_a: [u8; 32],
-        trace_b: [u8; 32],
-        h_mid_a: [u8; 32],
-        trace_left_a: [u8; 32],
-        trace_right_a: [u8; 32],
+    fn bob_reveal(
+        &self,
+        clause: &'static str,
         h_mid_b: [u8; 32],
         trace_left_b: [u8; 32],
         trace_right_b: [u8; 32],
-    ) -> Vec<Vec<u8>> {
+    ) -> Result<SpendBuilder, MissingStateError> {
+        let s = self.state().ok_or(MissingStateError {
+            contract: "fraud::Bisect2",
+        })?;
         let args = Bisect2BobRevealArgs::new(
-            h_start,
-            h_end_a,
-            h_end_b,
-            trace_a,
-            trace_b,
-            h_mid_a,
-            trace_left_a,
-            trace_right_a,
+            s.h_start,
+            s.h_end_a,
+            s.h_end_b,
+            s.trace_a,
+            s.trace_b,
+            s.h_mid_a,
+            s.trace_left_a,
+            s.trace_right_a,
             h_mid_b,
             trace_left_b,
             trace_right_b,
         );
-        ClauseArgs::encode_to_witness(&args)
+        Ok(self.0.spend_clause(clause, ClauseArgs::encode_to_witness(&args)))
     }
 }
 
