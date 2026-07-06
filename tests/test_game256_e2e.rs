@@ -17,7 +17,8 @@ use mattrs::signer::HotSigner;
 use support::game256::{
     Bisect1Handle, Bisect2Handle, G256Params, G256S0, G256S1Handle, G256S2Handle, LeafHandle,
 };
-use support::testkit::{alice_pk, alice_xpriv, bob_pk, bob_xpriv, regtest_client};
+use mattrs::report::Report;
+use support::testkit::{alice_pk, alice_xpriv, bob_pk, bob_xpriv, regtest_client, report_spend};
 
 const AMOUNT: u64 = 20_000;
 
@@ -34,6 +35,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
 
     let client = regtest_client("testwallet");
     let mut manager = ContractManager::new(client);
+    let mut report = Report::new();
     let params = G256Params {
         alice_pk: alice_pk(),
         bob_pk: bob_pk(),
@@ -61,6 +63,9 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         .sign(HotSigner::new(bob_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
+    report_spend(&mut report, "Game setup", "choose (Bob picks x)", &manager, s0.handle());
+    report_spend(&mut report, "Game setup", "reveal (Alice claims y)", &manager, s1.handle());
+    report_spend(&mut report, "Game setup", "start_challenge (Bob disputes)", &manager, s2.handle());
 
     // The bisection rounds: at range [i, j], Alice reveals her midstate and
     // sub-traces (checked against her committed trace); Bob then recurses into
@@ -95,6 +100,23 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         let child = builder
             .sign(HotSigner::new(bob_xpriv()))
             .exec_one(&mut manager)?;
+        report_spend(
+            &mut report,
+            "Bisection",
+            &format!("alice_reveal [{i}..{j}]"),
+            &manager,
+            b1.handle(),
+        );
+        report_spend(
+            &mut report,
+            "Bisection",
+            &format!(
+                "bob_reveal_{} [{i}..{j}]",
+                if go_left { "left" } else { "right" }
+            ),
+            &manager,
+            b2.handle(),
+        );
 
         if go_left {
             j = i + m - 1;
@@ -122,6 +144,14 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
             value: Amount::from_sat(AMOUNT),
         }])
         .exec_none(&mut manager)?;
+    report_spend(
+        &mut report,
+        "Leaf",
+        &format!("bob_reveal (re-run step {i} on-chain)"),
+        &manager,
+        leaf.handle(),
+    );
 
+    report.finalize("reports/report_game256.md");
     Ok(())
 }

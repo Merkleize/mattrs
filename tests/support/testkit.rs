@@ -11,9 +11,10 @@ use std::sync::Arc;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, XOnlyPublicKey};
-use bitcoincore_rpc::Client;
+use bitcoincore_rpc::{Client, RpcApi};
 use mattrs::contracts::{ErasedContract, ErasedState};
-use mattrs::manager::InstanceHandle;
+use mattrs::manager::{ContractManager, InstanceHandle};
+use mattrs::report::Report;
 
 /// Alice's test key. Its x-only pubkey (`67c20aa2…`) is the "alice" key of the
 /// pymatt reference fixtures (and the vault's unvault key).
@@ -79,4 +80,30 @@ pub fn fund_fake(
     seed: u8,
 ) -> InstanceHandle {
     mattrs::testutil::fund_fake(contract, expanded, Amount::from_sat(amount), seed)
+}
+
+/// Fetch the broadcast transaction that spent `handle` from the node and append
+/// it to `report` as a collapsible markdown block (regtest e2e tests only).
+///
+/// Polls briefly: right after a concurrently-running test mines the tx out of
+/// the mempool, the node's txindex can lag a moment behind.
+pub fn report_spend(
+    report: &mut Report,
+    section: &str,
+    title: &str,
+    manager: &ContractManager,
+    handle: &InstanceHandle,
+) {
+    let txid = handle.spent_in_tx().expect("instance not spent");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let tx = loop {
+        match manager.rpc().get_raw_transaction(&txid, None) {
+            Ok(tx) => break tx,
+            Err(e) if std::time::Instant::now() >= deadline => {
+                panic!("spending tx {txid} not found on node: {e}")
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    };
+    report.write_tx(section, title, &tx);
 }

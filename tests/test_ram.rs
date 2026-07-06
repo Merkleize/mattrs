@@ -173,10 +173,12 @@ fn test_merkle_helpers_match_reference() {
 fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin::Amount;
     use mattrs::manager::ContractManager;
-    use support::testkit::regtest_client;
+    use mattrs::report::Report;
+    use support::testkit::{regtest_client, report_spend};
 
     let client = regtest_client("testwallet");
     let mut manager = ContractManager::new(client);
+    let mut report = Report::new();
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
     let ram = Ram::new(RamParams { size: 4 }).fund(
@@ -196,6 +198,13 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
         .write(proof, new_value, tree.root())
         .exec_one(&mut manager)?
         .try_into()?;
+    report_spend(
+        &mut report,
+        "RAM",
+        "write (update cell 2)",
+        &manager,
+        ram.handle(),
+    );
 
     // Withdraw from the updated RAM, proving the freshly written value.
     let mut updated = leaves.clone();
@@ -212,5 +221,14 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
             value: Amount::from_sat(100_000),
         }])
         .exec_none(&mut manager)?;
+    report_spend(
+        &mut report,
+        "RAM",
+        "withdraw (prove cell 2)",
+        &manager,
+        child.handle(),
+    );
+
+    report.finalize("reports/report_ram.md");
     Ok(())
 }

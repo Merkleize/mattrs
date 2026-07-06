@@ -227,6 +227,8 @@ cargo test -- --ignored   # also runs the end-to-end tests against a regtest bit
 
 The end-to-end tests are `#[ignore]`d by default because they need a configured
 regtest `bitcoind` with a funded `testwallet` (cookie or env-var RPC auth; see
-`tests/support/testkit.rs`).
+`tests/support/testkit.rs`). They also write markdown reports of every
+transaction they broadcast (inputs, outputs, per-input witness breakdown with
+sizes) to `reports/` — see `mattrs::report`.
 
 [`ClauseTree`]: src/contracts.rs

@@ -153,7 +153,8 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
 #[test]
 #[ignore = "requires a running regtest bitcoind"]
 fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
-    use support::testkit::regtest_client;
+    use mattrs::report::Report;
+    use support::testkit::{regtest_client, report_spend};
 
     // Alice has committed to rock (m_a = 0) with an all-zeros nonce:
     // c_a = sha256(bn(0) || r_a), where bn(0) is empty.
@@ -162,6 +163,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = regtest_client("testwallet");
     let mut manager = ContractManager::new(client);
+    let mut report = Report::new();
 
     // Fund the game with both players' stakes.
     let s0 = RpsGameS0::new(params).fund(&mut manager, pot)?;
@@ -174,6 +176,13 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .try_into()?;
     let state = s1.state().expect("S1 state");
     assert_eq!(state.commitment, move_commitment(1));
+    report_spend(
+        &mut report,
+        "RPS",
+        "bob_move (Bob plays paper)",
+        &manager,
+        s0.handle(),
+    );
 
     // Rock vs paper: Bob wins. A cheating alice_wins spend must be rejected by
     // the node's script interpreter (the adjudication is consensus-enforced).
@@ -185,6 +194,15 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
 
     // The honest outcome pays the whole pot to Bob via the clause's CTV template.
     s1.bob_wins(1, 0, [0u8; 32]).exec_none(&mut manager)?;
+    report_spend(
+        &mut report,
+        "RPS",
+        "bob_wins (CTV payout of the pot)",
+        &manager,
+        s1.handle(),
+    );
+
+    report.finalize("reports/report_rps.md");
     Ok(())
 }
 
