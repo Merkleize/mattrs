@@ -25,6 +25,15 @@
 //! cargo run --example rps -- --alice --rock
 //! cargo run --example rps -- --bob --paper
 //! ```
+//!
+//! Omit the move flag to be prompted for one. With `--inspector` (and a build
+//! with `--features inspector`) the manager also serves live state snapshots
+//! for the `mattrs-inspector` TUI:
+//!
+//! ```sh
+//! cargo run --example rps --features inspector -- --alice --inspector
+//! cargo run -p mattrs-inspector
+//! ```
 
 #[allow(dead_code)]
 mod contracts;
@@ -120,7 +129,12 @@ fn hex32(value: &serde_json::Value, key: &str) -> Result<[u8; 32], Box<dyn std::
 // Alice: commits to a hidden move, funds the game, adjudicates
 // ----------------------------------------------------------------------------
 
-fn run_alice(m_a: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn run_alice(
+    m_a: i64,
+    addr: &str,
+    wallet: &str,
+    inspector: Option<u16>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let xpriv = Xpriv::from_str(ALICE_XPRIV)?;
     let pk_a = xonly(&xpriv);
 
@@ -151,6 +165,7 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::erro
     // Fund the game with both stakes and tell Bob where it lives.
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client);
+    maybe_enable_inspector(&mut manager, inspector);
     let s0 = RpsGameS0::new(params).fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
     let outpoint = s0.handle().outpoint().expect("just funded");
     println!("Game funded at {outpoint}");
@@ -175,7 +190,8 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::erro
 
     // Adjudicate: reveal (m_a, r_a); only the true outcome's clause validates.
     let clause = outcome_clause(m_a, m_b);
-    println!("Outcome: {clause} — broadcasting the adjudication");
+    println!("Outcome: {clause}");
+    wait_for_enter("Press ENTER to broadcast the adjudication transaction...");
     let builder = match clause {
         "tie" => s1.tie(m_b, m_a, r_a),
         "bob_wins" => s1.bob_wins(m_b, m_a, r_a),
@@ -190,7 +206,12 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::erro
 // Bob: tracks the funded game, reveals his move, observes the outcome
 // ----------------------------------------------------------------------------
 
-fn run_bob(m_b: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn run_bob(
+    m_b: i64,
+    addr: &str,
+    wallet: &str,
+    inspector: Option<u16>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let xpriv = Xpriv::from_str(BOB_XPRIV)?;
     let pk_b = xonly(&xpriv);
 
@@ -226,6 +247,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::error:
     };
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client);
+    maybe_enable_inspector(&mut manager, inspector);
     let s0: RpsGameS0Handle = manager
         .track_instance(RpsGameS0::new(params).as_erased(), None, outpoint)?
         .try_into()?;
@@ -261,11 +283,54 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str) -> Result<(), Box<dyn std::error:
 // CLI
 // ----------------------------------------------------------------------------
 
+fn prompt_move() -> i64 {
+    let stdin = std::io::stdin();
+    loop {
+        print!("Choose your move [r]ock, [p]aper, [s]cissors: ");
+        std::io::stdout().flush().unwrap();
+
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line).unwrap();
+        match line.trim().to_lowercase().as_str() {
+            "r" | "rock" => return 0,
+            "p" | "paper" => return 1,
+            "s" | "scissors" => return 2,
+            _ => println!("Invalid choice. Please enter r, p, or s."),
+        }
+    }
+}
+
+fn wait_for_enter(msg: &str) {
+    print!("{}", msg);
+    std::io::stdout().flush().unwrap();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).unwrap();
+}
+
+/// Start the manager's inspector server when `--inspector` was given (and the
+/// binary was built with the `inspector` feature).
+#[cfg(feature = "inspector")]
+fn maybe_enable_inspector(manager: &mut ContractManager, port: Option<u16>) {
+    if let Some(port) = port {
+        manager.enable_inspector(port);
+        println!("Inspector server on 127.0.0.1:{port} (run `cargo run -p mattrs-inspector`)");
+    }
+}
+
+#[cfg(not(feature = "inspector"))]
+fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) {
+    if port.is_some() {
+        eprintln!("warning: built without the `inspector` feature; --inspector is ignored");
+        eprintln!("         (rebuild with `--features inspector`)");
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut role: Option<&str> = None;
     let mut mv: Option<i64> = None;
     let mut addr = "127.0.0.1:12345".to_string();
     let mut wallet = "testwallet".to_string();
+    let mut inspector: Option<u16> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
@@ -278,19 +343,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--scissors" => mv = Some(2),
             "--addr" => addr = it.next().ok_or("--addr needs a value")?.clone(),
             "--wallet" => wallet = it.next().ok_or("--wallet needs a value")?.clone(),
+            "--inspector" => inspector = inspector.or(Some(34443)),
+            "--inspector-port" => {
+                inspector = Some(it.next().ok_or("--inspector-port needs a value")?.parse()?)
+            }
             other => return Err(format!("unknown argument `{other}` (see --help in the module doc)").into()),
         }
     }
 
-    let mv = mv.unwrap_or_else(|| {
-        let m = (urandom::<1>()[0] % 3) as i64;
-        println!("No move given; picking one at random.");
-        m
-    });
+    let mv = mv.unwrap_or_else(prompt_move);
 
     match role {
-        Some("alice") => run_alice(mv, &addr, &wallet),
-        Some("bob") => run_bob(mv, &addr, &wallet),
-        _ => Err("pass --alice or --bob (and optionally --rock/--paper/--scissors, --addr host:port, --wallet name)".into()),
+        Some("alice") => run_alice(mv, &addr, &wallet, inspector),
+        Some("bob") => run_bob(mv, &addr, &wallet, inspector),
+        _ => Err("pass --alice or --bob (and optionally --rock/--paper/--scissors, --addr host:port, --wallet name, --inspector)".into()),
     }
 }

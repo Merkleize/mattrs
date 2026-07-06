@@ -190,7 +190,7 @@ cargo run --example rps -- --alice --rock
 cargo run --example rps -- --bob --paper
 ```
 
-Omit the move flag to play a random move; `--addr host:port` and
+Omit the move flag to be prompted for one; `--addr host:port` and
 `--wallet name` override the defaults.
 
 **Vault REPL** (`examples/vault/`) drives the two-stage vault interactively:
