@@ -22,7 +22,18 @@ struct ContractDef {
     /// The `internal_key |p| ..` closure; `None` defaults to the NUMS key.
     ikey: Option<(Ident, Expr)>,
     clauses: Vec<ClauseDef>,
-    tree_tokens: TokenStream2,
+    tree: TreeDef,
+}
+
+/// The `tree ..;` section: either a static nested-bracket list, or a closure
+/// computing the [`ClauseTree`](mattrs::contracts::ClauseTree) from the params
+/// (for contracts whose clause set / taptree shape depends on runtime params).
+enum TreeDef {
+    /// `tree [ a, [b, c] ];` — the token tree fed to `clause_tree!`.
+    Static(TokenStream2),
+    /// `tree |p| { .. };` — `p` is bound to `&params`; the body evaluates to a
+    /// `ClauseTree`, with every clause in scope as a local.
+    Dynamic { p: Ident, body: Expr },
 }
 
 struct ClauseDef {
@@ -62,7 +73,7 @@ impl Parse for ContractDef {
         let mut state_ty: Option<Type> = None;
         let mut ikey: Option<(Ident, Expr)> = None;
         let mut clauses: Vec<ClauseDef> = Vec::new();
-        let mut tree_tokens: Option<TokenStream2> = None;
+        let mut tree: Option<TreeDef> = None;
 
         while !body.is_empty() {
             let section: Ident = body.parse()?;
@@ -85,9 +96,20 @@ impl Parse for ContractDef {
                     clauses.push(parse_clause(&body)?);
                 }
                 "tree" => {
-                    let content;
-                    bracketed!(content in body);
-                    tree_tokens = Some(content.parse()?);
+                    if body.peek(Token![|]) || body.peek(Token![move]) {
+                        // Dynamic form: `tree |p| <expr>;`.
+                        let closure: syn::ExprClosure = body.parse()?;
+                        let p = closure_ident(&closure)?;
+                        tree = Some(TreeDef::Dynamic {
+                            p,
+                            body: *closure.body,
+                        });
+                    } else {
+                        // Static form: `tree [ .. ];`.
+                        let content;
+                        bracketed!(content in body);
+                        tree = Some(TreeDef::Static(content.parse()?));
+                    }
                     body.parse::<Token![;]>()?;
                 }
                 other => {
@@ -99,9 +121,14 @@ impl Parse for ContractDef {
             }
         }
 
-        let tree_tokens =
-            tree_tokens.ok_or_else(|| syn::Error::new(name_span, "missing `tree [ .. ];`"))?;
-        validate_tree_names(&tree_tokens, &clauses)?;
+        let tree =
+            tree.ok_or_else(|| syn::Error::new(name_span, "missing `tree [ .. ];`"))?;
+        // The static form's clause references are resolved at macro-expansion
+        // time, so validate them here for a spanned error. The dynamic form's
+        // references are ordinary locals, checked by the compiler.
+        if let TreeDef::Static(tree_tokens) = &tree {
+            validate_tree_names(tree_tokens, &clauses)?;
+        }
 
         Ok(ContractDef {
             name,
@@ -110,7 +137,7 @@ impl Parse for ContractDef {
             state_ty,
             ikey,
             clauses,
-            tree_tokens,
+            tree,
         })
     }
 }
@@ -310,7 +337,20 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             let internal_key: ::bitcoin::XOnlyPublicKey = ::mattrs::nums_key();
         },
     };
-    let tree_tokens = &def.tree_tokens;
+    // The taptree: either the static nested-bracket list handed to `clause_tree!`,
+    // or a params-derived closure body evaluating to a `ClauseTree`. Both run after
+    // the clause locals are emitted, so either can reference clauses by name.
+    let tree_init: TokenStream2 = match &def.tree {
+        TreeDef::Static(tree_tokens) => quote! {
+            let tree = ::mattrs::clause_tree![ #tree_tokens ];
+        },
+        TreeDef::Dynamic { p, body } => quote! {
+            let tree: ::mattrs::contracts::ClauseTree = {
+                let #p = &params;
+                #body
+            };
+        },
+    };
 
     let mut args_structs: Vec<TokenStream2> = Vec::new();
     let mut clause_locals: Vec<TokenStream2> = Vec::new();
@@ -495,7 +535,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             pub fn new(params: #params_ty) -> Self {
                 #ikey_init
                 #(#clause_locals)*
-                let tree = ::mattrs::clause_tree![ #tree_tokens ];
+                #tree_init
                 let contract = <#contract_ty>::new(
                     ::core::stringify!(#name),
                     internal_key,
