@@ -444,10 +444,14 @@ fn infer_arg_type(ty: &Type) -> TokenStream2 {
     }
 }
 
-/// Derive macro for ContractParams trait.
+/// Derive macro for the ContractParams trait.
 ///
-/// Automatically implements encoding/decoding by encoding each field's witness elements
-/// and flattening them into a single byte vector.
+/// Implements the params' internal (non-consensus) serialization: it also derives
+/// [`ParamEncodable`](../mattrs/contracts/trait.ParamEncodable.html) for the struct,
+/// then frames each field's elements (length-prefixed) into a single byte vector.
+/// Because params use `ParamEncodable` — the superset that also covers the
+/// fixed-width unsigned integers — a params field may be a `u32` (e.g. a CSV
+/// delay), unlike a clause argument or a state leaf, which must be witness elements.
 #[proc_macro_derive(ContractParams)]
 pub fn derive_contract_params(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -460,20 +464,20 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let fields = named_fields(input, "ContractParams")?;
 
-    let encode_to_witness_fields = fields.iter().map(|f| {
+    let encode_param_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         quote! {
-            result.extend(::mattrs::contracts::WitnessEncodable::encode_to_witness(
+            result.extend(::mattrs::contracts::ParamEncodable::encode_param(
                 &self.#field_name,
             ));
         }
     });
 
-    let decode_from_witness_fields = fields.iter().map(|f| {
+    let decode_param_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         let field_type = &f.ty;
         quote! {
-            let (#field_name, consumed) = <#field_type as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&witness[offset..])?;
+            let (#field_name, consumed) = <#field_type as ::mattrs::contracts::ParamEncodable>::decode_param(&elements[offset..])?;
             offset += consumed;
         }
     });
@@ -481,13 +485,13 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let encode_to_bytes_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         quote! {
-            // Encode field and prepend witness element count and sizes
-            let field_witness =
-                ::mattrs::contracts::WitnessEncodable::encode_to_witness(&self.#field_name);
-            // Write number of witness elements as varint (just use a u32 for simplicity)
-            bytes.extend(&(field_witness.len() as u32).to_le_bytes());
-            // Write each element with its length prefix
-            for elem in field_witness {
+            // Encode field and prepend its element count and sizes.
+            let field_elements =
+                ::mattrs::contracts::ParamEncodable::encode_param(&self.#field_name);
+            // Write number of elements as a u32.
+            bytes.extend(&(field_elements.len() as u32).to_le_bytes());
+            // Write each element with its length prefix.
+            for elem in field_elements {
                 bytes.extend(&(elem.len() as u32).to_le_bytes());
                 bytes.extend(&elem);
             }
@@ -526,7 +530,7 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     local_offset += elem_len;
                 }
 
-                let (value, _) = <#field_type as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&temp_witness)?;
+                let (value, _) = <#field_type as ::mattrs::contracts::ParamEncodable>::decode_param(&temp_witness)?;
                 (value, local_offset - byte_offset)
             };
             byte_offset += consumed_bytes;
@@ -537,16 +541,16 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let field_names_for_bytes = fields.iter().map(|f| &f.ident);
 
     Ok(quote! {
-        impl ::mattrs::contracts::WitnessEncodable for #name {
-            fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        impl ::mattrs::contracts::ParamEncodable for #name {
+            fn encode_param(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
-                #(#encode_to_witness_fields)*
+                #(#encode_param_fields)*
                 result
             }
 
-            fn decode_from_witness(witness: &[Vec<u8>]) -> ::core::result::Result<(Self, usize), ::mattrs::contracts::WitnessError> {
+            fn decode_param(elements: &[Vec<u8>]) -> ::core::result::Result<(Self, usize), ::mattrs::contracts::WitnessError> {
                 let mut offset = 0;
-                #(#decode_from_witness_fields)*
+                #(#decode_param_fields)*
                 Ok((Self {
                     #(#field_names),*
                 }, offset))

@@ -2,11 +2,15 @@
 //!
 //! The types here layer as follows:
 //!
-//! - **Witness encoding** — [`WitnessEncodable`] turns values into witness-stack
-//!   elements; [`ClauseArgs`], [`ContractParams`] and [`ContractState`] are the
-//!   per-role encodings a contract declares (usually via the derive macros).
-//!   [`ErasedState`] carries a *logical* state on an instance even when its
-//!   on-chain commitment is lossy (e.g. a Merkle root).
+//! - **Witness encoding** — [`WitnessEncodable`] turns values into script-facing
+//!   witness-stack elements; a clause's [`ClauseArgs`] and a state's
+//!   [`ContractState`] leaves use it (so their bytes are exactly what the covenant
+//!   reads). [`ParamEncodable`] is the separate *internal* serialization for
+//!   [`ContractParams`] — a superset that also covers the fixed-width unsigned
+//!   integers, which are deliberately not valid witness elements. Contracts declare
+//!   these per-role encodings via the derive macros. [`ErasedState`] carries a
+//!   *logical* state on an instance even when its on-chain commitment is lossy
+//!   (e.g. a Merkle root).
 //! - **Clauses** — a [`StandardClause`] is one tapscript spending path: a name,
 //!   a script, [`ArgSpec`]s describing its witness layout, and an optional
 //!   function computing the [`NextOutputs`] it produces when spent (covenant
@@ -139,10 +143,21 @@ pub const CCV_FLAG_DEDUCT_OUTPUT_AMOUNT: i32 = 2;
 // Core Traits
 // ============================================================================
 
-/// Trait for types that can be encoded/decoded to/from a Bitcoin witness stack.
+/// Encoding of a value as one or more **witness-stack elements** — the
+/// script-facing, consensus-relevant format a tapscript actually reads.
 ///
-/// This trait provides a standardized interface for serializing and deserializing
-/// types to and from the witness stack format used in Bitcoin transactions.
+/// This is the role for a clause's arguments ([`ClauseArgs`]) and for a state
+/// commitment's Merkle leaves ([`ContractState`]): the bytes produced here are the
+/// bytes the covenant sees. Signed integers therefore use Bitcoin Script's number
+/// format (`bn2vch`), so scripts can do arithmetic on them; other types map to the
+/// bytes a script would push (a 32-byte hash, an x-only key, ...).
+///
+/// The *internal*, non-consensus serialization used to carry a contract's params
+/// is a separate trait, [`ParamEncodable`] — which every `WitnessEncodable` type
+/// satisfies for free, plus the fixed-width unsigned integers that are deliberately
+/// **not** valid witness elements. Keeping the two apart means a value whose
+/// encoding is not a valid script element (e.g. a little-endian `u32`) cannot reach
+/// a clause argument or a state commitment; use `i64` for anything a script reads.
 ///
 /// # Witness Stack Format
 ///
@@ -179,6 +194,40 @@ pub trait WitnessEncodable {
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError>
     where
         Self: Sized;
+}
+
+/// Serialization of a **contract-params field** — the internal, round-trippable
+/// encoding the `#[derive(ContractParams)]` codec frames to carry a contract's
+/// params on its instance. It is *not* a consensus/witness format.
+///
+/// Every [`WitnessEncodable`] type is `ParamEncodable` for free (via the blanket
+/// impl below), so params can hold hashes, keys, and script-number integers. In
+/// addition, the fixed-width **unsigned** integers (`u8`/`u16`/`u32`/`u64`) are
+/// `ParamEncodable` *only*: their little-endian bytes are not a valid Bitcoin
+/// script number, so they must never be a witness element. That exclusion is the
+/// point of the split — it is a compile error to use a `u32` as a clause argument
+/// or a state leaf; use `i64` for anything a script reads.
+pub trait ParamEncodable {
+    /// Encode into the framed-serialization elements the params codec wraps.
+    fn encode_param(&self) -> Vec<Vec<u8>>;
+
+    /// Decode from those elements, returning the value and the number consumed.
+    fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError>
+    where
+        Self: Sized;
+}
+
+/// Every witness element is trivially usable as a params field (same encoding).
+/// The fixed-width unsigned integers add their own `ParamEncodable` impls below,
+/// and are the only `ParamEncodable` types that are *not* `WitnessEncodable`.
+impl<T: WitnessEncodable> ParamEncodable for T {
+    fn encode_param(&self) -> Vec<Vec<u8>> {
+        self.encode_to_witness()
+    }
+
+    fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        Self::decode_from_witness(elements)
+    }
 }
 
 // ============================================================================
@@ -242,16 +291,18 @@ impl WitnessEncodable for Vec<u8> {
     }
 }
 
-/// Unsigned integers encode as their fixed-width little-endian bytes, one element.
-macro_rules! impl_le_witness {
+/// Unsigned integers serialize as their fixed-width little-endian bytes, one
+/// element. They are [`ParamEncodable`] only — deliberately *not* witness elements,
+/// since a fixed-width LE encoding is not a valid Bitcoin script number.
+macro_rules! impl_le_param {
     ($($t:ty),+ $(,)?) => {$(
-        impl WitnessEncodable for $t {
-            fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        impl ParamEncodable for $t {
+            fn encode_param(&self) -> Vec<Vec<u8>> {
                 vec![self.to_le_bytes().to_vec()]
             }
 
-            fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-                let first = witness.first().ok_or(WitnessError::StackUnderflow)?;
+            fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+                let first = elements.first().ok_or(WitnessError::StackUnderflow)?;
                 let bytes: [u8; std::mem::size_of::<$t>()] =
                     first.as_slice().try_into().map_err(|_| {
                         WitnessError::InvalidValue(format!(
@@ -267,7 +318,7 @@ macro_rules! impl_le_witness {
     )+};
 }
 
-impl_le_witness!(u8, u16, u32, u64);
+impl_le_param!(u8, u16, u32, u64);
 
 impl WitnessEncodable for bool {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -1761,5 +1812,37 @@ impl ContractInstance {
     /// Add a child instance created from spending this instance.
     pub fn add_output(&mut self, instance: Rc<RefCell<ContractInstance>>) {
         self.outputs.push(instance);
+    }
+}
+
+#[cfg(test)]
+mod encoding_role_tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_ints_are_param_only_fixed_width_le() {
+        // 300 = 0x012C -> fixed-width little-endian (not a script number).
+        assert_eq!(300u32.encode_param(), vec![vec![0x2c, 0x01, 0x00, 0x00]]);
+        let (v, consumed) = u32::decode_param(&[vec![0x2c, 0x01, 0x00, 0x00]]).unwrap();
+        assert_eq!((v, consumed), (300u32, 1));
+
+        // The full u64 range survives — it would overflow a script number.
+        let big = u64::MAX;
+        let (v, _) = u64::decode_param(&big.encode_param()).unwrap();
+        assert_eq!(v, big);
+    }
+
+    #[test]
+    fn witness_types_are_param_encodable_via_the_blanket() {
+        // The blanket delegates to the script-facing encoding, unchanged:
+        // a signed int is a minimal script number (bn2vch), a hash stays raw.
+        assert_eq!(
+            ParamEncodable::encode_param(&1i64),
+            WitnessEncodable::encode_to_witness(&1i64),
+        );
+        assert_eq!(ParamEncodable::encode_param(&1i64), vec![vec![0x01]]);
+
+        let hash = [0xabu8; 32];
+        assert_eq!(ParamEncodable::encode_param(&hash), vec![hash.to_vec()]);
     }
 }
