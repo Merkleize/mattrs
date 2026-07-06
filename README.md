@@ -163,6 +163,7 @@ The examples from the Python reference framework (`pymatt`) are ported under
 | **rps** (`examples/rps/contracts.rs`) | hashed state; clause-owned **CTV templates** for payouts; `check_in/out_contract` | roots match; regtest e2e; two-player demo |
 | **ram** (`ram.rs`) | a Merkle-committed cell vector; the `WitProof<N>` witness arg; **expanded state** | root matches; `write` spends |
 | **game256** (`game256.rs`) | the **bisection fraud proof** (`mattrs::fraud`) driven by the `G256S0/1/2` game stages | all taptrees match; full challenge regtest e2e |
+| **minivault** (`minivault.rs`) | CCV-only vault with feature-toggled clauses: a **runtime-shaped taptree** via the `StandardClause`/`ClauseTree` escape hatch | all 4 feature combos regtest e2e |
 
 Supporting MATT infrastructure lives in the library for downstream reuse: the
 generic fraud-proof contracts (`mattrs::fraud`), a data `MerkleTree` /

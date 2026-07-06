@@ -9,6 +9,8 @@
 #[allow(dead_code)]
 pub mod game256;
 #[allow(dead_code)]
+pub mod minivault;
+#[allow(dead_code)]
 pub mod ram;
 // The RPS contract lives with its two-player demo (examples/rps/); the tests
 // compile the same single source.
