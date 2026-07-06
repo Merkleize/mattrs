@@ -93,7 +93,7 @@ fn test_rps_bob_move_commits_s1_state() {
     ));
 
     let client = offline_client();
-    let manager = ContractManager::new(client);
+    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // Bob plays paper (m_b = 1), signing with his key.
     let tx = handle
@@ -126,7 +126,7 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
     ));
 
     let client = offline_client();
-    let manager = ContractManager::new(client);
+    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // The bob_wins clause pays out the whole pot to Bob via a CTV template.
     let tx = handle
@@ -162,7 +162,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
 
     let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(client);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     let mut report = Report::new();
 
     // Fund the game with both players' stakes.
@@ -180,7 +180,6 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         &mut report,
         "RPS",
         "bob_move (Bob plays paper)",
-        &manager,
         s0.handle(),
     );
 
@@ -198,7 +197,6 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         &mut report,
         "RPS",
         "bob_wins (CTV payout of the pot)",
-        &manager,
         s1.handle(),
     );
 

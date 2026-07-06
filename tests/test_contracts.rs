@@ -345,7 +345,7 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
     let handle = InstanceHandle::new(instance);
 
     let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
-    let manager = ContractManager::new(client);
+    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     let witness =
         <TriggerArgs as ClauseArgs>::encode_to_witness(&TriggerArgs { withdraw_amount: 1 });

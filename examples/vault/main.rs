@@ -383,7 +383,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let client = regtest_rpc_client(&wallet);
-    let mut manager = ContractManager::new(client);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
     let mut repl = Repl {
         manager,

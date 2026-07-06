@@ -47,16 +47,17 @@ pub struct InstanceSnapshot {
 }
 
 /// Flatten one instance for the snapshot.
-pub fn snapshot_instance(index: usize, inst: &ContractInstance) -> InstanceSnapshot {
+pub fn snapshot_instance(
+    index: usize,
+    inst: &ContractInstance,
+    network: bitcoin::Network,
+) -> InstanceSnapshot {
     let data = inst.committed_state_bytes().unwrap_or_default();
 
     let address = inst
-        .contract()
-        .script_pubkey(inst.committed_state_bytes().as_deref())
+        .script_pubkey()
         .ok()
-        .and_then(|spk| {
-            bitcoin::Address::from_script(&spk, bitcoin::Network::Regtest.params()).ok()
-        })
+        .and_then(|spk| bitcoin::Address::from_script(&spk, network.params()).ok())
         .map(|a| a.to_string());
 
     let outpoint = inst.outpoint().map(|op| format!("{}:{}", op.txid, op.vout));

@@ -164,7 +164,7 @@ fn run_alice(
 
     // Fund the game with both stakes and tell Bob where it lives.
     let client = rpc_client(wallet);
-    let mut manager = ContractManager::new(client);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
     let s0 = RpsGameS0::new(params).fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
     let outpoint = s0.handle().outpoint().expect("just funded");
@@ -246,7 +246,7 @@ fn run_bob(
             .ok_or("missing 'vout' in peer message")? as u32,
     };
     let client = rpc_client(wallet);
-    let mut manager = ContractManager::new(client);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
     let s0: RpsGameS0Handle = manager
         .track_instance(RpsGameS0::new(params).as_erased(), None, outpoint)?

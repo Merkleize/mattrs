@@ -24,6 +24,18 @@ pub trait Signer {
     fn public_key(&self) -> XOnlyPublicKey;
 }
 
+/// Boxed signers sign like the signer they box (so a `Box<dyn Signer>` can be
+/// passed wherever an `impl Signer` is expected).
+impl<S: Signer + ?Sized> Signer for Box<S> {
+    fn sign(&self, sighash: &[u8]) -> Vec<u8> {
+        (**self).sign(sighash)
+    }
+
+    fn public_key(&self) -> XOnlyPublicKey {
+        (**self).public_key()
+    }
+}
+
 /// A hot wallet signer using an extended private key.
 pub struct HotSigner {
     privkey: Xpriv,

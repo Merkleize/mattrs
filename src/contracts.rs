@@ -588,6 +588,16 @@ pub enum OutputIndex {
     Explicit(u32),
 }
 
+impl OutputIndex {
+    /// The concrete output index, given the index of the spending input.
+    pub fn resolve(&self, vin: usize) -> u32 {
+        match self {
+            OutputIndex::Same => vin as u32,
+            OutputIndex::Explicit(n) => *n,
+        }
+    }
+}
+
 /// Represents a specific output defined by a contract clause.
 ///
 /// The next contract carries its own params (see [`ErasedContract::params_bytes`]),
@@ -967,11 +977,19 @@ impl Debug for ClauseTree {
 /// names would make `get_clause` ambiguous and almost certainly indicate a bug.
 fn debug_assert_no_duplicate_clauses(clauses: &[Arc<dyn ErasedClause>]) {
     if cfg!(debug_assertions) {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen_names = std::collections::HashSet::new();
+        let mut seen_scripts = std::collections::HashSet::new();
         for clause in clauses {
             debug_assert!(
-                seen.insert(clause.name()),
+                seen_names.insert(clause.name()),
                 "duplicate clause name in contract: {}",
+                clause.name()
+            );
+            // An observed spend is decoded by matching the witness tapscript
+            // against the clauses, so two clauses must not share a script.
+            debug_assert!(
+                seen_scripts.insert(clause.script().clone()),
+                "two clauses share the same script (ambiguous to decode): {}",
                 clause.name()
             );
         }
@@ -1680,8 +1698,8 @@ pub struct ContractInstance {
     /// Current status in the instance lifecycle.
     status: InstanceStatus,
 
-    /// Transaction ID that spent this instance (None until spent).
-    spent_in_tx: Option<Txid>,
+    /// The transaction that spent this instance (None until spent).
+    spending_tx: Option<Transaction>,
 
     /// The input index of the spending transaction that consumed this instance
     /// (None until spent).
@@ -1709,7 +1727,7 @@ impl ContractInstance {
             outpoint: None,
             funding_tx: None,
             status: InstanceStatus::Unfunded,
-            spent_in_tx: None,
+            spending_tx: None,
             spending_vin: None,
             clause_name: None,
             spending_args: None,
@@ -1731,6 +1749,13 @@ impl ContractInstance {
     /// addressing), if the instance has state.
     pub fn committed_state_bytes(&self) -> Option<Vec<u8>> {
         self.state.as_ref().map(|s| s.committed_bytes())
+    }
+
+    /// The script pubkey this instance pays (the contract's, for the
+    /// instance's committed state).
+    pub fn script_pubkey(&self) -> Result<ScriptBuf, ContractError> {
+        self.contract
+            .script_pubkey(self.committed_state_bytes().as_deref())
     }
 
     /// Current status in the instance lifecycle.
@@ -1758,9 +1783,14 @@ impl ContractInstance {
         self.funding_tx.as_ref()
     }
 
+    /// The transaction that spent this instance (None until spent).
+    pub fn spending_tx(&self) -> Option<&Transaction> {
+        self.spending_tx.as_ref()
+    }
+
     /// Transaction ID that spent this instance (None until spent).
     pub fn spent_in_tx(&self) -> Option<Txid> {
-        self.spent_in_tx
+        self.spending_tx.as_ref().map(|tx| tx.compute_txid())
     }
 
     /// The input index of the spending transaction that consumed this instance
@@ -1797,12 +1827,12 @@ impl ContractInstance {
     /// it), through which clause, and with which witness arguments.
     pub fn mark_spent(
         &mut self,
-        txid: Txid,
+        spending_tx: Transaction,
         vin: usize,
         clause_name: String,
         spending_args: Vec<Vec<u8>>,
     ) {
-        self.spent_in_tx = Some(txid);
+        self.spending_tx = Some(spending_tx);
         self.spending_vin = Some(vin);
         self.clause_name = Some(clause_name);
         self.spending_args = Some(spending_args);

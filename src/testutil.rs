@@ -41,12 +41,10 @@ pub fn fund_fake(
     seed: u8,
 ) -> InstanceHandle {
     let instance = Rc::new(RefCell::new(ContractInstance::new(contract, expanded)));
-    let script_pubkey = {
-        let inst = instance.borrow();
-        inst.contract()
-            .script_pubkey(inst.committed_state_bytes().as_deref())
-            .expect("contract script_pubkey")
-    };
+    let script_pubkey = instance
+        .borrow()
+        .script_pubkey()
+        .expect("contract script_pubkey");
     let funding_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::locktime::absolute::LockTime::ZERO,

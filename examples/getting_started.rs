@@ -124,7 +124,7 @@ fn main() {
     // 3. Build the withdraw spend. The signature argument is filled automatically
     //    from the registered signer — no placeholder is ever written by hand.
     //    Building performs no RPC, so an unreachable client works offline.
-    let manager = ContractManager::new(offline_client());
+    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     let dest = bitcoin::Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")
         .unwrap()

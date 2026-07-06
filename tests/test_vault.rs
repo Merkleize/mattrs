@@ -185,7 +185,7 @@ fn test_trigger_without_signer_errors() {
     let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, 0));
 
     let client = offline_client();
-    let manager = ContractManager::new(client);
+    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     let err = handle
         .trigger([7u8; 32], 0)
@@ -228,7 +228,7 @@ fn test_batch_merges_and_deducts_outputs() {
     let h3 = funded(3);
 
     let client = offline_client();
-    let manager = ContractManager::new(client);
+    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     let ctv_hash = [7u8; 32];
     let revault_amount = Amount::from_sat(30_000);
@@ -286,7 +286,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     let amount = 49999900;
 
-    let mut manager = ContractManager::new(client);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // Create and fund a Vault instance, getting a typed VaultHandle back.
     let vault = Vault::new(params).fund(&mut manager, Amount::from_sat(amount))?;
@@ -387,7 +387,7 @@ fn test_observe_spend_decodes_clause_and_children() {
 
     // The actor builds (but does not broadcast) a trigger spend.
     let actor_client = offline_client();
-    let actor_manager = ContractManager::new(actor_client);
+    let actor_manager = ContractManager::new(actor_client, bitcoin::Network::Regtest);
     let actor_handle: support::vault::VaultHandle = fund_fake(vault.as_erased(), None, 100_000, 7)
         .try_into()
         .unwrap();
@@ -399,7 +399,7 @@ fn test_observe_spend_decodes_clause_and_children() {
 
     // The observer holds its own instance of the same (deterministic) funding.
     let observer_client = offline_client();
-    let mut observer = ContractManager::new(observer_client);
+    let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
     let observed = fund_fake(vault.as_erased(), None, 100_000, 7);
 
     let children = observer.observe_spend(&observed, &tx).unwrap();
@@ -426,6 +426,68 @@ fn test_observe_spend_decodes_clause_and_children() {
     let again = observer.observe_spend(&observed, &tx).unwrap();
     assert_eq!(again.len(), 1);
     assert_eq!(observer_instances_count(&observed), 1);
+}
+
+#[test]
+fn test_observe_batch_spend_decodes_all_inputs() {
+    // Two vaults spent by one batch transaction (a trigger_and_revault plus a
+    // plain trigger, merging into one unvaulting output). An observer with twin
+    // instances decodes each input's clause — including at vin > 0 — and
+    // materializes the merged child once, shared between both parents.
+    use mattrs::signer::HotSigner;
+    use support::testkit::{alice_xpriv, fund_fake, offline_client, try_handle};
+    use support::vault::VaultHandle;
+
+    let params = VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    };
+    let vault = Vault::new(params);
+    let ctv_hash = [7u8; 32];
+    let revault_amount = Amount::from_sat(30_000);
+
+    let funded =
+        |seed: u8| try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, seed));
+    let h1 = funded(1);
+    let h2 = funded(2);
+
+    let actor = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
+    let tx = actor
+        .build_batch_tx(&[
+            h1.trigger_and_revault(ctv_hash, 0, 1)
+                .sign(HotSigner::new(alice_xpriv()))
+                .output_amount(1, revault_amount),
+            h2.trigger(ctv_hash, 0).sign(HotSigner::new(alice_xpriv())),
+        ])
+        .unwrap();
+
+    // The observer holds its own twin instances (same deterministic outpoints).
+    let mut observer = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
+    let o1 = fund_fake(vault.as_erased(), None, 100_000, 1);
+    let o2 = fund_fake(vault.as_erased(), None, 100_000, 2);
+
+    let children1 = observer.observe_spend(&o1, &tx).unwrap();
+    let children2 = observer.observe_spend(&o2, &tx).unwrap();
+
+    // Each input decodes to its own clause, at its own input index.
+    assert_eq!(o1.clause_name().as_deref(), Some("trigger_and_revault"));
+    assert_eq!(o2.clause_name().as_deref(), Some("trigger"));
+    assert_eq!(o1.spending_vin(), Some(0));
+    assert_eq!(o2.spending_vin(), Some(1));
+    assert_eq!(o1.spending_tx().unwrap().compute_txid(), tx.compute_txid());
+
+    // Input 0 yields the unvaulting (index 0) and the revault (index 1); input
+    // 1's unvaulting output is the same child, materialized only once.
+    assert_eq!(children1.len(), 2);
+    assert_eq!(children2.len(), 1);
+    assert!(children1.contains(&children2[0]));
+    // The merged unvaulting holds both inputs' amounts, net of the revault.
+    assert_eq!(
+        children2[0].prevout().unwrap().value,
+        Amount::from_sat(170_000)
+    );
 }
 
 /// The parent's recorded children (used to check no duplicates were created).

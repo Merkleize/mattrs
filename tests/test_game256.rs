@@ -142,7 +142,7 @@ fn test_game256_state_transitions() {
         j,
     };
     let client = offline_client();
-    let manager = ContractManager::new(client);
+    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // 1. G256S0.choose(x) -> G256S1 committed to x.
     let s0 = try_handle::<G256S0Handle>(fund_fake(G256S0::new(p.clone()).as_erased(), None, 100_000, 1));

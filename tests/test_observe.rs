@@ -26,7 +26,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 
     // ---- The actor drives the whole vault lifecycle. ----
     let actor_client = regtest_client("testwallet");
-    let mut actor = ContractManager::new(actor_client);
+    let mut actor = ContractManager::new(actor_client, bitcoin::Network::Regtest);
 
     let amount = 49_999_900u64;
     let vault_a = Vault::new(params.clone()).fund(&mut actor, Amount::from_sat(amount))?;
@@ -63,7 +63,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     // The trigger spend is buried in a block by now (block-scan path); the
     // withdraw is still in the mempool (gettxspendingprevout path).
     let observer_client = regtest_client("testwallet");
-    let mut observer = ContractManager::new(observer_client);
+    let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
 
     let vault_b = observer.track_instance(
         Vault::new(params.clone()).as_erased(),
@@ -94,6 +94,85 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
         Some("withdraw")
     );
     assert_eq!(unvaulting_b.handle().status(), InstanceStatus::Spent);
+
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a running regtest bitcoind"]
+fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>> {
+    // Two vaults triggered by a single batch transaction; the observer tracks
+    // both and `wait_for_spends` returns the merged unvaulting child once.
+    let params = VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    };
+
+    let mut actor = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let amount = 20_000_000u64;
+    let vault_1 = Vault::new(params.clone()).fund(&mut actor, Amount::from_sat(amount))?;
+    let vault_2 = Vault::new(params.clone()).fund(&mut actor, Amount::from_sat(amount))?;
+
+    let ctv_template = vec![(
+        Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?.assume_checked(),
+        Amount::from_sat(2 * amount),
+    )];
+    let ctv_hash = create_ctv_template(&ctv_template, bitcoin::Sequence(10)).ctv_hash();
+
+    // The observer must track the instances before they are spent, so the
+    // funding outpoints are still around to verify.
+    let mut observer =
+        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let vault_contract = Vault::new(params.clone()).as_erased();
+    let tracked_1 = observer.track_instance(
+        vault_contract.clone(),
+        None,
+        vault_1.handle().outpoint().unwrap(),
+    )?;
+    let tracked_2 = observer.track_instance(
+        vault_contract.clone(),
+        None,
+        vault_2.handle().outpoint().unwrap(),
+    )?;
+
+    // An unspent instance times out within the polling window...
+    let err = observer
+        .wait_for_spend_within(&tracked_1, Some(std::time::Duration::from_millis(300)))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        mattrs::manager::ManagerError::SpendNotFound(_)
+    ));
+
+    // ...until the actor batch-triggers both vaults into one merged output.
+    let children = actor.spend_batch(&[
+        vault_1
+            .trigger(ctv_hash, 0)
+            .sign(HotSigner::new(alice_xpriv())),
+        vault_2
+            .trigger(ctv_hash, 0)
+            .sign(HotSigner::new(alice_xpriv())),
+    ])?;
+    assert_eq!(children.len(), 1);
+    actor.mine_blocks(1)?;
+
+    let observed = observer.wait_for_spends(&[tracked_1.clone(), tracked_2.clone()])?;
+    assert_eq!(observed.len(), 1);
+    assert_eq!(tracked_1.clause_name().as_deref(), Some("trigger"));
+    assert_eq!(tracked_2.clause_name().as_deref(), Some("trigger"));
+    assert_eq!(tracked_1.spending_vin(), Some(0));
+    assert_eq!(tracked_2.spending_vin(), Some(1));
+
+    // The merged child matches the actor's, holding both stakes.
+    let unvaulting: UnvaultingHandle = observed[0].clone().try_into().unwrap();
+    assert_eq!(unvaulting.handle().outpoint(), children[0].outpoint());
+    assert_eq!(
+        unvaulting.handle().prevout().unwrap().value,
+        Amount::from_sat(2 * amount)
+    );
+    assert_eq!(unvaulting.state().unwrap().ctv_hash, ctv_hash);
 
     Ok(())
 }

@@ -132,7 +132,7 @@ fn test_ram_write_commits_updated_root() {
     ));
 
     let client = offline_client();
-    let manager = ContractManager::new(client);
+    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // Prove cell 2 and write a new value into it.
     let tree = MerkleTree::new(leaves.clone());
@@ -177,7 +177,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     use support::testkit::{regtest_client, report_spend};
 
     let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(client);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     let mut report = Report::new();
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
@@ -202,7 +202,6 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
         &mut report,
         "RAM",
         "write (update cell 2)",
-        &manager,
         ram.handle(),
     );
 
@@ -225,7 +224,6 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
         &mut report,
         "RAM",
         "withdraw (prove cell 2)",
-        &manager,
         child.handle(),
     );
 

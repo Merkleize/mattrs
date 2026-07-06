@@ -34,7 +34,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     let n = 8usize;
 
     let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(client);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     let mut report = Report::new();
     let params = G256Params {
         alice_pk: alice_pk(),
@@ -63,9 +63,9 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         .sign(HotSigner::new(bob_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
-    report_spend(&mut report, "Game setup", "choose (Bob picks x)", &manager, s0.handle());
-    report_spend(&mut report, "Game setup", "reveal (Alice claims y)", &manager, s1.handle());
-    report_spend(&mut report, "Game setup", "start_challenge (Bob disputes)", &manager, s2.handle());
+    report_spend(&mut report, "Game setup", "choose (Bob picks x)", s0.handle());
+    report_spend(&mut report, "Game setup", "reveal (Alice claims y)", s1.handle());
+    report_spend(&mut report, "Game setup", "start_challenge (Bob disputes)", s2.handle());
 
     // The bisection rounds: at range [i, j], Alice reveals her midstate and
     // sub-traces (checked against her committed trace); Bob then recurses into
@@ -104,7 +104,6 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
             &mut report,
             "Bisection",
             &format!("alice_reveal [{i}..{j}]"),
-            &manager,
             b1.handle(),
         );
         report_spend(
@@ -114,7 +113,6 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
                 "bob_reveal_{} [{i}..{j}]",
                 if go_left { "left" } else { "right" }
             ),
-            &manager,
             b2.handle(),
         );
 
@@ -148,7 +146,6 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         &mut report,
         "Leaf",
         &format!("bob_reveal (re-run step {i} on-chain)"),
-        &manager,
         leaf.handle(),
     );
 

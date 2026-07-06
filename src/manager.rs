@@ -29,13 +29,10 @@ use bitcoincore_rpc::{Client, RpcApi};
 use crate::{
     contracts::{
         ClauseError, ClauseOutput, ClauseOutputAmountBehaviour, ContractError, ContractInstance,
-        ContractState, ErasedContract, ErasedState, InstanceStatus, NextOutputs, OutputIndex,
+        ContractState, ErasedContract, ErasedState, InstanceStatus, NextOutputs,
     },
     signer::Signer,
 };
-
-/// Type alias for a map of signers keyed by public key.
-pub type SignerMap = HashMap<XOnlyPublicKey, Box<dyn Signer>>;
 
 /// The interval between chain polls.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -97,6 +94,13 @@ pub enum ManagerError {
     NoOutputs,
     /// Two spends of a batch set a different amount for the same output index.
     ConflictingOutputAmount { index: u32 },
+    /// An output index receives both `PreserveOutput` and `DeductOutput`
+    /// contributions (from the same or different inputs); the two amount
+    /// semantics cannot hold for one output.
+    MixedOutputSemantics { index: u32 },
+    /// An amount was supplied via [`SpendBuilder::output_amount`] for an output
+    /// index that no `DeductOutput` uses.
+    UnusedOutputAmount { index: u32 },
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
@@ -155,6 +159,16 @@ impl std::fmt::Display for ManagerError {
                 "Conflicting amounts were set for output index {}",
                 index
             ),
+            ManagerError::MixedOutputSemantics { index } => write!(
+                f,
+                "Output index {} mixes PreserveOutput and DeductOutput contributions",
+                index
+            ),
+            ManagerError::UnusedOutputAmount { index } => write!(
+                f,
+                "An amount was set for output index {}, but no DeductOutput uses it",
+                index
+            ),
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
             }
@@ -196,6 +210,9 @@ pub struct ContractManager {
     /// RPC client for blockchain interaction.
     rpc: Client,
 
+    /// The network the node runs on (used to derive contract addresses).
+    network: bitcoin::Network,
+
     /// All instances managed by this manager.
     instances: Vec<Rc<RefCell<ContractInstance>>>,
 
@@ -209,10 +226,12 @@ pub struct ContractManager {
 
 impl ContractManager {
     /// Create a new contract manager owning the RPC client (use
-    /// [`rpc`](Self::rpc) for direct access to it).
-    pub fn new(rpc: Client) -> Self {
+    /// [`rpc`](Self::rpc) for direct access to it) and talking to a node on
+    /// `network` (used to derive contract addresses).
+    pub fn new(rpc: Client, network: bitcoin::Network) -> Self {
         Self {
             rpc,
+            network,
             instances: Vec::new(),
             #[cfg(feature = "inspector")]
             inspector_state: None,
@@ -242,12 +261,6 @@ impl ContractManager {
         self.inspector_notify = Some(notify);
     }
 
-    /// [`enable_inspector`](Self::enable_inspector) on the default port (34443).
-    #[cfg(feature = "inspector")]
-    pub fn enable_inspector_default(&mut self) {
-        self.enable_inspector(34443);
-    }
-
     #[cfg(feature = "inspector")]
     fn build_snapshot(&self) -> crate::inspector::ManagerSnapshot {
         crate::inspector::ManagerSnapshot {
@@ -256,7 +269,9 @@ impl ContractManager {
                 .instances
                 .iter()
                 .enumerate()
-                .map(|(i, inst)| crate::inspector::snapshot_instance(i, &inst.borrow()))
+                .map(|(i, inst)| {
+                    crate::inspector::snapshot_instance(i, &inst.borrow(), self.network)
+                })
                 .collect(),
         }
     }
@@ -281,13 +296,10 @@ impl ContractManager {
     ) -> Result<InstanceHandle, ManagerError> {
         // Create the instance (its committed bytes derive from the logical state).
         let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state)));
-
-        // Get the script pubkey for this instance
-        let script_pubkey = self.get_instance_script_pubkey(&instance)?;
+        let script_pubkey = instance.borrow().script_pubkey()?;
 
         // Fund it using RPC
-        let params = bitcoin::Network::Regtest.params();
-        let address = bitcoin::Address::from_script(&script_pubkey, params)
+        let address = bitcoin::Address::from_script(&script_pubkey, self.network.params())
             .map_err(|e| ManagerError::Other(format!("Failed to create address: {}", e)))?;
 
         let txid = self
@@ -309,16 +321,19 @@ impl ContractManager {
             vout: vout as u32,
         };
 
-        // Mark as funded
         instance.borrow_mut().mark_funded(outpoint, tx);
+        Ok(self.register_instance(instance))
+    }
 
-        // Add to managed instances
+    /// Register a freshly funded instance with the manager (and the inspector,
+    /// if enabled), handing out its handle.
+    fn register_instance(&mut self, instance: Rc<RefCell<ContractInstance>>) -> InstanceHandle {
         self.instances.push(instance.clone());
 
         #[cfg(feature = "inspector")]
         self.notify_inspector();
 
-        Ok(InstanceHandle { instance })
+        InstanceHandle { instance }
     }
 
     /// Mine blocks (for regtest).
@@ -343,35 +358,9 @@ impl ContractManager {
     }
 
     /// Execute a spend: build, sign, broadcast, and materialize child instances.
+    /// A single spend is a batch of one.
     fn execute_spend(&mut self, builder: SpendBuilder) -> Result<Vec<InstanceHandle>, ManagerError> {
-        let (tx, next) = self.build_spend_tx(&builder)?;
-
-        // Broadcast
-        let txid = self.rpc.send_raw_transaction(&tx)?;
-
-        // Mark the spent instance
-        builder.instance.borrow_mut().mark_spent(
-            txid,
-            0,
-            builder.clause_name.to_string(),
-            builder.witness_args.clone(),
-        );
-
-        // Materialize children (a CTV template spend is terminal).
-        let child_instances = match &next {
-            NextOutputs::Contracts(outputs) => {
-                self.materialize_outputs(&builder.instance, outputs, &tx, 0)?
-            }
-            NextOutputs::Template(_) => Vec::new(),
-        };
-
-        #[cfg(feature = "inspector")]
-        self.notify_inspector();
-
-        Ok(child_instances
-            .into_iter()
-            .map(|instance| InstanceHandle { instance })
-            .collect())
+        self.spend_batch(std::slice::from_ref(&builder))
     }
 
     /// Build (without broadcasting) a single transaction that spends several
@@ -395,10 +384,10 @@ impl ContractManager {
     ) -> Result<Vec<InstanceHandle>, ManagerError> {
         let (tx, nexts) = self.assemble(builders)?;
 
-        let txid = self.rpc.send_raw_transaction(&tx)?;
+        self.rpc.send_raw_transaction(&tx)?;
         for (vin, builder) in builders.iter().enumerate() {
             builder.instance.borrow_mut().mark_spent(
-                txid,
+                tx.clone(),
                 vin,
                 builder.clause_name.to_string(),
                 builder.witness_args.clone(),
@@ -407,16 +396,13 @@ impl ContractManager {
 
         // Materialize the children; outputs merged across inputs (a shared
         // `PreserveOutput` index) yield one child instance, linked to each parent.
-        let mut handles = Vec::new();
+        let mut handles: Vec<InstanceHandle> = Vec::new();
         for (vin, (builder, next)) in builders.iter().zip(&nexts).enumerate() {
             if let NextOutputs::Contracts(outputs) = next {
-                let children = self.materialize_outputs(&builder.instance, outputs, &tx, vin)?;
-                for child in children {
-                    if !handles
-                        .iter()
-                        .any(|h: &InstanceHandle| Rc::ptr_eq(&h.instance, &child))
-                    {
-                        handles.push(InstanceHandle { instance: child });
+                for child in self.materialize_outputs(&builder.instance, outputs, &tx, vin)? {
+                    let handle = InstanceHandle { instance: child };
+                    if !handles.contains(&handle) {
+                        handles.push(handle);
                     }
                 }
             }
@@ -452,6 +438,15 @@ impl ContractManager {
                 return Err(ManagerError::NotFunded);
             }
             let outpoint = inst.outpoint().ok_or(ManagerError::NotFunded)?;
+            if tx_inputs
+                .iter()
+                .any(|input: &TxIn| input.previous_output == outpoint)
+            {
+                return Err(ManagerError::TransactionBuildError(format!(
+                    "duplicate input: {} is spent twice in the batch",
+                    outpoint
+                )));
+            }
             let prevout = inst.prevout().ok_or(ManagerError::NotFunded)?;
             prevouts.push(prevout);
             tx_inputs.push(TxIn {
@@ -493,17 +488,25 @@ impl ContractManager {
     /// Derive the transaction outputs for a spend, and the `nSequence` a CTV
     /// template fixes, if any.
     ///
-    /// Caller-supplied explicit outputs win; otherwise a CTV template fixes the
-    /// whole transaction; otherwise the covenant outputs are merged by index
-    /// across all inputs (each `PreserveOutput` accumulates its input's amount
-    /// net of that input's earlier `DeductOutput`s). Explicit outputs and CTV
-    /// templates are single-input only.
+    /// Caller-supplied explicit outputs and CTV templates fix the outputs (each
+    /// single-input only, and mutually exclusive); otherwise the covenant outputs
+    /// are merged by index across all inputs, mirroring the CCV deferred amount
+    /// checks: each `PreserveOutput` moves its input's whole remaining amount
+    /// (net of that input's earlier `DeductOutput`s) into its output, and a
+    /// `DeductOutput` sets its output to the caller-supplied amount. An output
+    /// index must not mix the two semantics. Note that an `IgnoreOutput` index
+    /// no other input funds ends up as a zero-value output.
     fn derive_tx_outputs(
         builders: &[SpendBuilder],
         nexts: &[NextOutputs],
         prevouts: &[TxOut],
     ) -> Result<(Vec<TxOut>, Option<Sequence>), ManagerError> {
         let single = builders.len() == 1;
+
+        let template = nexts.iter().find_map(|next| match next {
+            NextOutputs::Template(template) => Some(template),
+            NextOutputs::Contracts(_) => None,
+        });
 
         if let Some(explicit) = builders.iter().find_map(|b| b.explicit_outputs.as_ref()) {
             if !single {
@@ -512,18 +515,32 @@ impl ContractManager {
                         .to_string(),
                 ));
             }
+            if template.is_some() {
+                return Err(ManagerError::TransactionBuildError(
+                    "a CTV template clause fixes the whole transaction; explicit outputs \
+                     cannot override it"
+                        .to_string(),
+                ));
+            }
             return Ok((explicit.clone(), None));
         }
 
-        if let Some(template) = nexts.iter().find_map(|next| match next {
-            NextOutputs::Template(template) => Some(template),
-            NextOutputs::Contracts(_) => None,
-        }) {
+        if let Some(template) = template {
             if !single {
                 return Err(ManagerError::TransactionBuildError(
                     "CTV template clauses are single-input only; not supported in a batch"
                         .to_string(),
                 ));
+            }
+            match builders[0].sequence {
+                Some(sequence) if sequence != template.sequence => {
+                    return Err(ManagerError::TransactionBuildError(format!(
+                        "the CTV template commits to nSequence {}, conflicting with the \
+                         caller's {}",
+                        template.sequence, sequence
+                    )));
+                }
+                _ => {}
             }
             return Ok((template.outputs.clone(), Some(template.sequence)));
         }
@@ -542,7 +559,15 @@ impl ContractManager {
             }
         }
 
-        // Merge clause outputs by index across all inputs.
+        // Merge clause outputs by index across all inputs. Each index must
+        // stick to one amount semantics: preserves accumulate, a deduct sets
+        // the caller-supplied amount — mixing them cannot satisfy both.
+        #[derive(PartialEq, Clone, Copy)]
+        enum Semantics {
+            Preserve,
+            Deduct,
+        }
+        let mut semantics: BTreeMap<u32, Semantics> = BTreeMap::new();
         let mut outputs_map: BTreeMap<u32, TxOut> = BTreeMap::new();
         for (input_index, next) in nexts.iter().enumerate() {
             let clause_outputs = match next {
@@ -553,10 +578,7 @@ impl ContractManager {
             let mut remaining = prevouts[input_index].value;
             let mut preserve_used = false;
             for clause_output in clause_outputs {
-                let idx = match clause_output.index {
-                    OutputIndex::Same => input_index as u32,
-                    OutputIndex::Explicit(n) => n,
-                };
+                let idx = clause_output.index.resolve(input_index);
                 let script_pubkey = clause_output
                     .next_contract
                     .script_pubkey(clause_output.committed_state_bytes().as_deref())?;
@@ -572,6 +594,16 @@ impl ContractManager {
                 }
                 match clause_output.next_amount {
                     ClauseOutputAmountBehaviour::PreserveOutput => {
+                        if preserve_used {
+                            return Err(ManagerError::TransactionBuildError(
+                                "multiple PreserveOutput outputs in one input (its remaining \
+                                 amount can only be preserved once)"
+                                    .to_string(),
+                            ));
+                        }
+                        if semantics.insert(idx, Semantics::Preserve) == Some(Semantics::Deduct) {
+                            return Err(ManagerError::MixedOutputSemantics { index: idx });
+                        }
                         entry.value += remaining;
                         preserve_used = true;
                     }
@@ -580,6 +612,9 @@ impl ContractManager {
                             return Err(ManagerError::TransactionBuildError(
                                 "DeductOutput must be declared before PreserveOutput".to_string(),
                             ));
+                        }
+                        if semantics.insert(idx, Semantics::Deduct) == Some(Semantics::Preserve) {
+                            return Err(ManagerError::MixedOutputSemantics { index: idx });
                         }
                         let amount = *output_amounts
                             .get(&idx)
@@ -592,6 +627,15 @@ impl ContractManager {
                     ClauseOutputAmountBehaviour::IgnoreOutput => {}
                 }
             }
+        }
+
+        // Every caller-supplied amount must have been used by a DeductOutput;
+        // a stray index would silently change the transaction.
+        if let Some(idx) = output_amounts
+            .keys()
+            .find(|idx| semantics.get(idx) != Some(&Semantics::Deduct))
+        {
+            return Err(ManagerError::UnusedOutputAmount { index: *idx });
         }
 
         // A transaction with no outputs is never valid: the clause is terminal
@@ -613,21 +657,12 @@ impl ContractManager {
 
     // Helper methods
 
-    fn get_instance_script_pubkey(
-        &self,
-        instance: &Rc<RefCell<ContractInstance>>,
-    ) -> Result<bitcoin::ScriptBuf, ManagerError> {
-        let inst = instance.borrow();
-        Ok(inst
-            .contract()
-            .script_pubkey(inst.committed_state_bytes().as_deref())?)
-    }
-
     fn wait_for_transaction(&self, txid: Txid) -> Result<Transaction, ManagerError> {
         poll_until(Some(DEFAULT_POLL_WINDOW), || {
             match self.rpc.get_raw_transaction(&txid, None) {
                 Ok(tx) => Ok(Some(tx)),
-                Err(_) => Ok(None), // not (yet) known to the node
+                Err(e) if is_tx_not_found(&e) => Ok(None), // not (yet) known to the node
+                Err(e) => Err(e.into()),
             }
         })?
         .ok_or(ManagerError::TransactionNotFound(txid))
@@ -749,10 +784,7 @@ impl ContractManager {
         let mut children = Vec::new();
 
         for clause_out in outputs {
-            let vout = match clause_out.index {
-                OutputIndex::Same => vin as u32,
-                OutputIndex::Explicit(n) => n,
-            };
+            let vout = clause_out.index.resolve(vin);
             let outpoint = OutPoint { txid, vout };
 
             let child = match self.find_instance_by_outpoint(outpoint) {
@@ -800,7 +832,7 @@ impl ContractManager {
     ) -> Result<InstanceHandle, ManagerError> {
         let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state)));
 
-        let expected_spk = self.get_instance_script_pubkey(&instance)?;
+        let expected_spk = instance.borrow().script_pubkey()?;
         let funding_tx = self.rpc.get_raw_transaction(&outpoint.txid, None)?;
         let paid = funding_tx
             .output
@@ -811,12 +843,7 @@ impl ContractManager {
         }
 
         instance.borrow_mut().mark_funded(outpoint, funding_tx);
-        self.instances.push(instance.clone());
-
-        #[cfg(feature = "inspector")]
-        self.notify_inspector();
-
-        Ok(InstanceHandle { instance })
+        Ok(self.register_instance(instance))
     }
 
     /// Decode an already-known transaction that spends `handle`'s instance:
@@ -912,7 +939,7 @@ impl ContractManager {
         handle
             .instance
             .borrow_mut()
-            .mark_spent(txid, vin, clause_name, witness_args);
+            .mark_spent(spending_tx.clone(), vin, clause_name, witness_args);
 
         let children = match &next {
             NextOutputs::Contracts(outputs) => {
@@ -972,10 +999,7 @@ impl ContractManager {
         let mut result: Vec<InstanceHandle> = Vec::new();
         for handle in handles {
             for child in self.wait_for_spend(handle)? {
-                if !result
-                    .iter()
-                    .any(|h| Rc::ptr_eq(&h.instance, &child.instance))
-                {
+                if !result.contains(&child) {
                     result.push(child);
                 }
             }
@@ -1074,6 +1098,17 @@ pub fn regtest_rpc_client(wallet_name: &str) -> Client {
     Client::new(&rpc_url_full, auth).expect("Failed to create RPC client")
 }
 
+/// Whether an RPC error is Core's "No such mempool or blockchain transaction"
+/// (code -5), i.e. the transaction is not (yet) known to the node — as opposed
+/// to a real failure (node unreachable, bad credentials, ...).
+fn is_tx_not_found(e: &bitcoincore_rpc::Error) -> bool {
+    matches!(
+        e,
+        bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::error::Error::Rpc(rpc_err))
+            if rpc_err.code == -5
+    )
+}
+
 /// Split a taproot script-path witness into its clause arguments and the leaf
 /// script, dropping the annex (if present) and the control block.
 fn parse_script_path_witness(
@@ -1127,6 +1162,22 @@ pub struct InstanceHandle {
     instance: Rc<RefCell<ContractInstance>>,
 }
 
+impl std::fmt::Debug for InstanceHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.instance.borrow().fmt(f)
+    }
+}
+
+/// Handles compare by *instance identity* — two handles are equal when they
+/// point to the same tracked instance, regardless of its contents.
+impl PartialEq for InstanceHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.instance, &other.instance)
+    }
+}
+
+impl Eq for InstanceHandle {}
+
 impl InstanceHandle {
     /// Wrap a raw instance pointer.
     pub fn new(instance: Rc<RefCell<ContractInstance>>) -> Self {
@@ -1162,6 +1213,16 @@ impl InstanceHandle {
     /// The name of the clause that spent this instance (None until spent).
     pub fn clause_name(&self) -> Option<String> {
         self.instance.borrow().clause_name().map(str::to_string)
+    }
+
+    /// The transaction that funded this instance (None until funded).
+    pub fn funding_tx(&self) -> Option<Transaction> {
+        self.instance.borrow().funding_tx().cloned()
+    }
+
+    /// The transaction that spent this instance (None until spent).
+    pub fn spending_tx(&self) -> Option<Transaction> {
+        self.instance.borrow().spending_tx().cloned()
     }
 
     /// Transaction ID that spent this instance (None until spent).
@@ -1238,7 +1299,7 @@ pub struct SpendBuilder {
     instance: Rc<RefCell<ContractInstance>>,
     clause_name: &'static str,
     witness_args: Vec<Vec<u8>>,
-    signers: SignerMap,
+    signers: HashMap<XOnlyPublicKey, Box<dyn Signer>>,
     explicit_outputs: Option<Vec<TxOut>>,
     output_amounts: BTreeMap<u32, Amount>,
     sequence: Option<Sequence>,
@@ -1246,14 +1307,9 @@ pub struct SpendBuilder {
 
 impl SpendBuilder {
     /// Register a signer (matched to the clause's signature args by public key).
+    /// A `Box<dyn Signer>` works too, via the blanket [`Signer`] impl for boxes.
     pub fn sign(mut self, signer: impl Signer + 'static) -> Self {
         self.signers.insert(signer.public_key(), Box::new(signer));
-        self
-    }
-
-    /// Register a boxed signer.
-    pub fn signer(mut self, signer: Box<dyn Signer>) -> Self {
-        self.signers.insert(signer.public_key(), signer);
         self
     }
 
@@ -1308,5 +1364,425 @@ impl SpendBuilder {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contracts::{
+        ClauseOutput, ClauseTree, CtvTemplate, NextOutputsFn, RawArgs, StandardClause,
+        StandardP2TR,
+    };
+    use crate::testutil::{fund_fake, offline_client};
+    use bitcoin::ScriptBuf;
+    use std::sync::Arc;
+
+    fn offline_manager() -> ContractManager {
+        ContractManager::new(offline_client(), bitcoin::Network::Regtest)
+    }
+
+    fn sat(n: u64) -> Amount {
+        Amount::from_sat(n)
+    }
+
+    /// A single-clause (`"spend"`) contract for exercising the output derivation:
+    /// the clause takes no arguments and yields `next_outputs_fn`'s result when
+    /// spent (terminal when `None`). `tag` differentiates the script — and thus
+    /// the address — of otherwise identical contracts.
+    fn test_contract(
+        tag: i64,
+        next_outputs_fn: Option<NextOutputsFn<(), (), RawArgs>>,
+    ) -> Arc<dyn ErasedContract> {
+        let script = bitcoin::script::Builder::new()
+            .push_int(tag)
+            .push_opcode(bitcoin::opcodes::all::OP_DROP)
+            .push_opcode(bitcoin::opcodes::all::OP_PUSHNUM_1)
+            .into_script();
+        let clause = StandardClause::<(), (), RawArgs>::new(
+            "spend".to_string(),
+            script,
+            vec![],
+            next_outputs_fn,
+        );
+        Arc::new(StandardP2TR::new(
+            "Test",
+            crate::nums_key(),
+            &(),
+            ClauseTree::leaf(Arc::new(clause)),
+        ))
+    }
+
+    /// A contract whose clause produces exactly `outputs` when spent.
+    fn contract_yielding(tag: i64, outputs: Vec<ClauseOutput>) -> Arc<dyn ErasedContract> {
+        test_contract(
+            tag,
+            Some(Arc::new(move |_: &(), _: &RawArgs, _: Option<&()>| {
+                Ok(NextOutputs::Contracts(outputs.clone()))
+            })),
+        )
+    }
+
+    /// A contract whose clause fixes the spending transaction via a CTV template.
+    fn contract_with_template(tag: i64, template: CtvTemplate) -> Arc<dyn ErasedContract> {
+        test_contract(
+            tag,
+            Some(Arc::new(move |_: &(), _: &RawArgs, _: Option<&()>| {
+                Ok(NextOutputs::Template(template.clone()))
+            })),
+        )
+    }
+
+    /// Begin a spend of the (only) clause of a [`test_contract`] instance.
+    fn spend(handle: &InstanceHandle) -> SpendBuilder {
+        handle.spend_clause("spend", vec![])
+    }
+
+    fn spk_of(contract: &Arc<dyn ErasedContract>) -> ScriptBuf {
+        contract.script_pubkey(None).unwrap()
+    }
+
+    // ------------------------------------------------------------------
+    // Output derivation (merging preserves/deducts across batch inputs)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn merges_preserves_and_deducts_across_inputs() {
+        let unvault = test_contract(90, None);
+        let revault = test_contract(91, None);
+        // Input 0 revaults 30k (deduct at index 1) and preserves the rest into
+        // index 0; input 1 preserves its whole amount into the same index 0.
+        let c1 = contract_yielding(
+            1,
+            vec![
+                ClauseOutput::at(1).to(revault.clone()).deduct_amount().build(),
+                ClauseOutput::at(0).to(unvault.clone()).preserve_amount().build(),
+            ],
+        );
+        let c2 = contract_yielding(
+            2,
+            vec![ClauseOutput::at(0).to(unvault.clone()).preserve_amount().build()],
+        );
+        let h1 = fund_fake(c1, None, sat(100_000), 1);
+        let h2 = fund_fake(c2, None, sat(60_000), 2);
+
+        let tx = offline_manager()
+            .build_batch_tx(&[spend(&h1).output_amount(1, sat(30_000)), spend(&h2)])
+            .unwrap();
+
+        assert_eq!(tx.input.len(), 2);
+        assert_eq!(tx.output.len(), 2);
+        // index 0: (100k - 30k) + 60k merged; index 1: the deducted revault.
+        assert_eq!(tx.output[0].value, sat(130_000));
+        assert_eq!(tx.output[0].script_pubkey, spk_of(&unvault));
+        assert_eq!(tx.output[1].value, sat(30_000));
+        assert_eq!(tx.output[1].script_pubkey, spk_of(&revault));
+    }
+
+    #[test]
+    fn second_preserve_in_one_input_errors() {
+        let dest_a = test_contract(90, None);
+        let dest_b = test_contract(91, None);
+        // One input cannot preserve its remaining amount into two outputs.
+        let c = contract_yielding(
+            1,
+            vec![
+                ClauseOutput::at(0).to(dest_a).preserve_amount().build(),
+                ClauseOutput::at(1).to(dest_b).preserve_amount().build(),
+            ],
+        );
+        let h = fund_fake(c, None, sat(100_000), 1);
+
+        let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+        assert!(
+            matches!(&err, ManagerError::TransactionBuildError(msg) if msg.contains("PreserveOutput")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn mixing_preserve_and_deduct_at_same_index_errors() {
+        let dest = test_contract(90, None);
+        let preserving = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(dest.clone()).preserve_amount().build()],
+        );
+        let deducting = contract_yielding(
+            2,
+            vec![ClauseOutput::at(0).to(dest.clone()).deduct_amount().build()],
+        );
+        let hp = fund_fake(preserving, None, sat(100_000), 1);
+        let hd = fund_fake(deducting, None, sat(50_000), 2);
+
+        // Preserve first, deduct second — and the other way around.
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&hp), spend(&hd).output_amount(0, sat(10_000))])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::MixedOutputSemantics { index: 0 }));
+
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hp)])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::MixedOutputSemantics { index: 0 }));
+    }
+
+    #[test]
+    fn unused_output_amount_errors() {
+        let dest = test_contract(90, None);
+        let c = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(dest).preserve_amount().build()],
+        );
+        let h = fund_fake(c, None, sat(100_000), 1);
+
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&h).output_amount(1, sat(10_000))])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::UnusedOutputAmount { index: 1 }));
+    }
+
+    #[test]
+    fn missing_deduct_amount_errors() {
+        let dest = test_contract(90, None);
+        let c = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(dest).deduct_amount().build()],
+        );
+        let h = fund_fake(c, None, sat(100_000), 1);
+
+        let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+        assert!(matches!(err, ManagerError::MissingDeductAmount { index: 0 }));
+    }
+
+    #[test]
+    fn deduct_exceeding_input_errors() {
+        let dest = test_contract(90, None);
+        let c = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(dest).deduct_amount().build()],
+        );
+        let h = fund_fake(c, None, sat(50_000), 1);
+
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&h).output_amount(0, sat(60_000))])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::DeductExceedsInput));
+    }
+
+    #[test]
+    fn conflicting_output_amounts_error() {
+        let dest = test_contract(90, None);
+        let deducting = |tag, seed| {
+            let c = contract_yielding(
+                tag,
+                vec![ClauseOutput::at(0).to(dest.clone()).deduct_amount().build()],
+            );
+            fund_fake(c, None, sat(100_000), seed)
+        };
+        let h1 = deducting(1, 1);
+        let h2 = deducting(2, 2);
+
+        let err = offline_manager()
+            .build_batch_tx(&[
+                spend(&h1).output_amount(0, sat(10_000)),
+                spend(&h2).output_amount(0, sat(20_000)),
+            ])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::ConflictingOutputAmount { index: 0 }));
+    }
+
+    #[test]
+    fn non_contiguous_outputs_error() {
+        let dest = test_contract(90, None);
+        let c = contract_yielding(
+            1,
+            vec![ClauseOutput::at(1).to(dest).preserve_amount().build()],
+        );
+        let h = fund_fake(c, None, sat(100_000), 1);
+
+        let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+        assert!(matches!(
+            err,
+            ManagerError::NonContiguousOutputs { missing_index: 0 }
+        ));
+    }
+
+    #[test]
+    fn terminal_clause_without_explicit_outputs_errors() {
+        let c = test_contract(1, None);
+        let h = fund_fake(c, None, sat(100_000), 1);
+
+        let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+        assert!(matches!(err, ManagerError::NoOutputs));
+    }
+
+    // ------------------------------------------------------------------
+    // CTV templates and explicit outputs
+    // ------------------------------------------------------------------
+
+    fn template_to(dest: &Arc<dyn ErasedContract>, amount: Amount, sequence: u32) -> CtvTemplate {
+        CtvTemplate::new(
+            vec![TxOut {
+                script_pubkey: spk_of(dest),
+                value: amount,
+            }],
+            Sequence(sequence),
+        )
+    }
+
+    #[test]
+    fn template_fixes_outputs_and_sequence() {
+        let dest = test_contract(90, None);
+        let template = template_to(&dest, sat(50_000), 5);
+        let c = contract_with_template(1, template.clone());
+        let h = fund_fake(c, None, sat(50_000), 1);
+        let manager = offline_manager();
+
+        let tx = spend(&h).build_tx(&manager).unwrap();
+        assert_eq!(tx.output, template.outputs);
+        assert_eq!(tx.input[0].sequence, Sequence(5));
+
+        // A caller-set sequence must agree with the template's...
+        let tx = spend(&h).sequence(5).build_tx(&manager).unwrap();
+        assert_eq!(tx.input[0].sequence, Sequence(5));
+
+        // ...or the build is rejected.
+        let err = spend(&h).sequence(6).build_tx(&manager).unwrap_err();
+        assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    }
+
+    #[test]
+    fn template_in_batch_errors() {
+        let dest = test_contract(90, None);
+        let templated = contract_with_template(1, template_to(&dest, sat(50_000), 0));
+        let preserving = contract_yielding(
+            2,
+            vec![ClauseOutput::at(0).to(dest.clone()).preserve_amount().build()],
+        );
+        let h1 = fund_fake(templated, None, sat(50_000), 1);
+        let h2 = fund_fake(preserving, None, sat(60_000), 2);
+
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&h1), spend(&h2)])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    }
+
+    #[test]
+    fn explicit_outputs_in_batch_error() {
+        let dest = test_contract(90, None);
+        let preserving = |tag, seed| {
+            let c = contract_yielding(
+                tag,
+                vec![ClauseOutput::at(0).to(dest.clone()).preserve_amount().build()],
+            );
+            fund_fake(c, None, sat(100_000), seed)
+        };
+        let h1 = preserving(1, 1);
+        let h2 = preserving(2, 2);
+        let outputs = vec![TxOut {
+            script_pubkey: spk_of(&dest),
+            value: sat(100_000),
+        }];
+
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&h1).outputs(outputs), spend(&h2)])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    }
+
+    #[test]
+    fn explicit_outputs_cannot_override_a_template() {
+        let dest = test_contract(90, None);
+        let c = contract_with_template(1, template_to(&dest, sat(50_000), 0));
+        let h = fund_fake(c, None, sat(50_000), 1);
+
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&h).outputs(vec![TxOut {
+                script_pubkey: spk_of(&dest),
+                value: sat(40_000),
+            }])])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    }
+
+    #[test]
+    fn duplicate_instance_in_batch_errors() {
+        let dest = test_contract(90, None);
+        let c = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(dest).preserve_amount().build()],
+        );
+        let h = fund_fake(c, None, sat(100_000), 1);
+
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&h), spend(&h)])
+            .unwrap_err();
+        assert!(
+            matches!(&err, ManagerError::TransactionBuildError(msg) if msg.contains("duplicate")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Witness parsing and polling
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parses_script_path_witness() {
+        let arg = vec![1u8, 2, 3];
+        let script = vec![0x51u8];
+        let control_block = vec![0xc0u8; 33];
+
+        // args + script + control block
+        let witness =
+            bitcoin::Witness::from_slice(&[arg.clone(), script.clone(), control_block.clone()]);
+        let (args, leaf) = parse_script_path_witness(&witness).unwrap();
+        assert_eq!(args, vec![arg.clone()]);
+        assert_eq!(leaf, script);
+
+        // ... with a trailing annex: the annex is dropped.
+        let annex = vec![0x50u8, 0xff];
+        let witness = bitcoin::Witness::from_slice(&[
+            arg.clone(),
+            script.clone(),
+            control_block.clone(),
+            annex.clone(),
+        ]);
+        let (args, leaf) = parse_script_path_witness(&witness).unwrap();
+        assert_eq!(args, vec![arg]);
+        assert_eq!(leaf, script);
+
+        // a zero-argument clause: just script + control block.
+        let witness = bitcoin::Witness::from_slice(&[script.clone(), control_block]);
+        let (args, leaf) = parse_script_path_witness(&witness).unwrap();
+        assert!(args.is_empty());
+        assert_eq!(leaf, script);
+
+        // Key-path spends (with or without an annex) carry no tapscript.
+        let sig = vec![0xaau8; 64];
+        for elements in [vec![sig.clone()], vec![sig, annex]] {
+            let witness = bitcoin::Witness::from_slice(&elements);
+            let err = parse_script_path_witness(&witness).unwrap_err();
+            assert!(matches!(err, ManagerError::UnrecognizedSpend(_)));
+        }
+    }
+
+    #[test]
+    fn poll_until_returns_hit_or_times_out() {
+        // An immediate hit is returned without waiting for the window.
+        let hit = poll_until(Some(Duration::ZERO), || Ok(Some(42))).unwrap();
+        assert_eq!(hit, Some(42));
+
+        // A never-satisfied check times out with Ok(None).
+        let miss = poll_until(Some(Duration::ZERO), || Ok(None::<i32>)).unwrap();
+        assert_eq!(miss, None);
+
+        // Errors from the check propagate immediately.
+        let err = poll_until(Some(Duration::ZERO), || {
+            Err::<Option<i32>, _>(ManagerError::Other("boom".to_string()))
+        })
+        .unwrap_err();
+        assert!(matches!(err, ManagerError::Other(_)));
     }
 }
