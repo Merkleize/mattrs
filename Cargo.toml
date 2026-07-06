@@ -1,11 +1,24 @@
+[workspace]
+members = [
+    ".",
+    "inspector",
+]
+
 [package]
 name = "mattrs"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Live-inspection support: a TCP server pushing JSON manager snapshots on every
+# state change (see `mattrs::inspector` and the `mattrs-inspector` TUI client).
+inspector = ["dep:serde"]
+
 [dependencies]
 bitcoin = "0.32.2"
 bitcoincore-rpc = "0.19.0"
+serde = { version = "1", features = ["derive"], optional = true }
 serde_json = "1"
 bitcoin-script = { path = "./bitcoin-script"}
 mattrs-derive = { path = "./mattrs-derive" }

@@ -13,6 +13,14 @@
 //! cargo run --example vault -- --script examples/vault/scripts/normal.txt
 //! ```
 //!
+//! With `--inspector` (and a build with `--features inspector`) the manager
+//! also serves live state snapshots for the `mattrs-inspector` TUI:
+//!
+//! ```sh
+//! cargo run --example vault --features inspector -- --inspector
+//! cargo run -p mattrs-inspector
+//! ```
+//!
 //! Commands:
 //!
 //! ```text
@@ -319,15 +327,38 @@ impl Repl {
     }
 }
 
+/// Start the manager's inspector server when `--inspector` was given (and the
+/// binary was built with the `inspector` feature).
+#[cfg(feature = "inspector")]
+fn maybe_enable_inspector(manager: &mut ContractManager, port: Option<u16>) {
+    if let Some(port) = port {
+        manager.enable_inspector(port);
+        println!("Inspector server on 127.0.0.1:{port} (run `cargo run -p mattrs-inspector`)");
+    }
+}
+
+#[cfg(not(feature = "inspector"))]
+fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) {
+    if port.is_some() {
+        eprintln!("warning: built without the `inspector` feature; --inspector is ignored");
+        eprintln!("         (rebuild with `--features inspector`)");
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut script: Option<String> = None;
     let mut wallet = "testwallet".to_string();
+    let mut inspector: Option<u16> = None;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--script" | "-s" => script = Some(it.next().ok_or("--script needs a file")?.clone()),
             "--wallet" => wallet = it.next().ok_or("--wallet needs a value")?.clone(),
+            "--inspector" => inspector = inspector.or(Some(34443)),
+            "--inspector-port" => {
+                inspector = Some(it.next().ok_or("--inspector-port needs a value")?.parse()?)
+            }
             other => return Err(format!("unknown argument `{other}`").into()),
         }
     }
@@ -352,8 +383,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let client = regtest_rpc_client(&wallet);
+    let mut manager = ContractManager::new(client);
+    maybe_enable_inspector(&mut manager, inspector);
     let mut repl = Repl {
-        manager: ContractManager::new(client),
+        manager,
         params,
         unvault_xpriv,
         items: Vec::new(),

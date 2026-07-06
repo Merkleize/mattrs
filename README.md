@@ -204,6 +204,17 @@ cargo run --example vault                                    # interactive
 cargo run --example vault -- --script examples/vault/scripts/revault.txt
 ```
 
+**Live inspector** — both demos take `--inspector` (or `--inspector-port <P>`)
+when built with the `inspector` feature: the manager then serves a JSON snapshot
+of every tracked instance over TCP on each state change, and the
+`mattrs-inspector` workspace crate renders it as a live TUI (instance table +
+detail pane). In two terminals:
+
+```sh
+cargo run --example vault --features inspector -- --inspector
+cargo run -p mattrs-inspector       # or: nc localhost 34443
+```
+
 ## Spend-API features
 
 - **CTV templates as clause outputs** — a clause's `next` may return a

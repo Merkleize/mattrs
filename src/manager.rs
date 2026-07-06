@@ -198,6 +198,13 @@ pub struct ContractManager {
 
     /// All instances managed by this manager.
     instances: Vec<Rc<RefCell<ContractInstance>>>,
+
+    /// The snapshot shared with the inspector server, if enabled.
+    #[cfg(feature = "inspector")]
+    inspector_state: Option<std::sync::Arc<std::sync::Mutex<crate::inspector::ManagerSnapshot>>>,
+    /// Wakes the inspector server's client threads after a snapshot update.
+    #[cfg(feature = "inspector")]
+    inspector_notify: Option<std::sync::Arc<std::sync::Condvar>>,
 }
 
 impl ContractManager {
@@ -207,12 +214,61 @@ impl ContractManager {
         Self {
             rpc,
             instances: Vec::new(),
+            #[cfg(feature = "inspector")]
+            inspector_state: None,
+            #[cfg(feature = "inspector")]
+            inspector_notify: None,
         }
     }
 
     /// The RPC client, for callers that need direct access (e.g. mining or funding).
     pub fn rpc(&self) -> &Client {
         &self.rpc
+    }
+
+    /// Start the inspector server on `127.0.0.1:port` (see [`crate::inspector`]):
+    /// it pushes a JSON snapshot of every managed instance to each connected
+    /// client on every state change.
+    #[cfg(feature = "inspector")]
+    pub fn enable_inspector(&mut self, port: u16) {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(self.build_snapshot()));
+        let notify = std::sync::Arc::new(std::sync::Condvar::new());
+        crate::inspector::start_inspector_server(
+            std::sync::Arc::clone(&state),
+            std::sync::Arc::clone(&notify),
+            port,
+        );
+        self.inspector_state = Some(state);
+        self.inspector_notify = Some(notify);
+    }
+
+    /// [`enable_inspector`](Self::enable_inspector) on the default port (34443).
+    #[cfg(feature = "inspector")]
+    pub fn enable_inspector_default(&mut self) {
+        self.enable_inspector(34443);
+    }
+
+    #[cfg(feature = "inspector")]
+    fn build_snapshot(&self) -> crate::inspector::ManagerSnapshot {
+        crate::inspector::ManagerSnapshot {
+            timestamp_ms: crate::inspector::now_ms(),
+            instances: self
+                .instances
+                .iter()
+                .enumerate()
+                .map(|(i, inst)| crate::inspector::snapshot_instance(i, &inst.borrow()))
+                .collect(),
+        }
+    }
+
+    /// Refresh the shared snapshot and wake the inspector's client threads.
+    /// Called after every instance-state mutation; a no-op unless enabled.
+    #[cfg(feature = "inspector")]
+    fn notify_inspector(&self) {
+        if let (Some(state), Some(notify)) = (&self.inspector_state, &self.inspector_notify) {
+            *state.lock().unwrap() = self.build_snapshot();
+            notify.notify_all();
+        }
     }
 
     /// Create and fund a new contract instance. Params are taken from the
@@ -258,6 +314,9 @@ impl ContractManager {
 
         // Add to managed instances
         self.instances.push(instance.clone());
+
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
 
         Ok(InstanceHandle { instance })
     }
@@ -305,6 +364,9 @@ impl ContractManager {
             }
             NextOutputs::Template(_) => Vec::new(),
         };
+
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
 
         Ok(child_instances
             .into_iter()
@@ -359,6 +421,9 @@ impl ContractManager {
                 }
             }
         }
+
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
 
         Ok(handles)
     }
@@ -747,6 +812,10 @@ impl ContractManager {
 
         instance.borrow_mut().mark_funded(outpoint, funding_tx);
         self.instances.push(instance.clone());
+
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
+
         Ok(InstanceHandle { instance })
     }
 
@@ -851,6 +920,9 @@ impl ContractManager {
             }
             NextOutputs::Template(_) => Vec::new(),
         };
+
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
 
         Ok(children
             .into_iter()

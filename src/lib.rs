@@ -49,6 +49,8 @@ pub mod argtypes;
 pub mod contracts;
 pub mod ctv;
 pub mod fraud;
+#[cfg(feature = "inspector")]
+pub mod inspector;
 #[macro_use]
 pub mod macros;
 pub mod manager;
