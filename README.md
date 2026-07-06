@@ -9,6 +9,10 @@ dispatch, P2TR / augmented-P2TR contract templates, a taproot tree, derive macro
 method per clause, a generic bisection fraud-proof module (`mattrs::fraud`), and
 an RPC-driven `ContractManager` for funding and spending instances on regtest.
 
+For the conceptual model behind all of this — programs, clauses, merkleized
+state, and the `Contract{params}[vars]` notation used to specify protocols as
+finite state machines — see [Designing contracts](docs/README.md).
+
 ## Getting started
 
 The crate is unpublished; use it as a path dependency:
