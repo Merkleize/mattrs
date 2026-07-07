@@ -99,14 +99,14 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     let mut b_out = None;
     for _ in 0..600 {
         if a_out.is_none()
-            && let Progress::Done(o) = alice.step()?
+            && let Progress::Done(os) = alice.step()?
         {
-            a_out = Some(o);
+            a_out = os.into_iter().next();
         }
         if b_out.is_none()
-            && let Progress::Done(o) = bob.step()?
+            && let Progress::Done(os) = bob.step()?
         {
-            b_out = Some(o);
+            b_out = os.into_iter().next();
         }
         if a_out.is_some() && b_out.is_some() {
             break;

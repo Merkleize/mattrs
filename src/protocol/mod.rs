@@ -15,15 +15,20 @@
 //! states — see [`crate::fraud::roles`] for the bisection fraud proof packaged
 //! this way.
 //!
-//! v1 scope: a role follows a single live token (one UTXO at a time). Protocols
-//! that fork into several concurrently-live UTXOs per party, or that batch
-//! several inputs into one transaction, are future extensions.
+//! Protocols may *fork*: a spend can produce several covenant children (e.g. the
+//! vault's `trigger_and_revault`), and the runner then follows each as its own
+//! token, resolving one outcome per token. Every child must be either handled
+//! ([`Role::on`]) or explicitly declared irrelevant ([`Role::ignore`]) — an
+//! unexpected child is a loud error, never a silently orphaned branch.
+//!
+//! Scope: each action spends a single token; transactions batching several
+//! tokens' UTXOs as inputs are a future extension.
 
 pub mod chain;
 mod runner;
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::contracts::WitnessError;
@@ -125,16 +130,10 @@ pub enum ProtocolError {
     WrongContract(WrongContractType),
     /// A typed spend needed instance state that is not there.
     MissingState(MissingStateError),
-    /// The token reached a contract this role has no handler for.
+    /// The token reached a contract this role neither handles nor ignores.
     NoHandler {
         /// The name of the unhandled contract.
         contract: String,
-    },
-    /// A spend produced several children this role has handlers for, so there
-    /// is no single token to follow.
-    AmbiguousChildren {
-        /// The names of the candidate child contracts.
-        contracts: Vec<&'static str>,
     },
     /// A timeout fallback was a `Wait`-family action; it must send or finish.
     InvalidTimeoutAction,
@@ -155,11 +154,6 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::NoHandler { contract } => {
                 write!(f, "the role has no handler for contract `{}`", contract)
             }
-            ProtocolError::AmbiguousChildren { contracts } => write!(
-                f,
-                "a spend produced several children the role could follow: {}",
-                contracts.join(", ")
-            ),
             ProtocolError::InvalidTimeoutAction => {
                 write!(f, "a timeout fallback must send or finish, not wait")
             }
@@ -212,6 +206,7 @@ type OutcomeMapFn<D, O2, O> = dyn Fn(&mut D, O2) -> Result<O, ProtocolError>;
 pub struct Role<D, O> {
     arrivals: HashMap<ContractKey, ArrivalFn<D, O>>,
     settlements: HashMap<ContractKey, SettledFn<D, O>>,
+    ignored: HashSet<ContractKey>,
 }
 
 impl<D: 'static, O: 'static> Default for Role<D, O> {
@@ -227,6 +222,7 @@ impl<D: 'static, O: 'static> Role<D, O> {
         Role {
             arrivals: HashMap::new(),
             settlements: HashMap::new(),
+            ignored: HashSet::new(),
         }
     }
 
@@ -236,7 +232,7 @@ impl<D: 'static, O: 'static> Role<D, O> {
     /// # Panics
     ///
     /// Panics if the role already handles `C` arrivals (a role maps each state
-    /// to one reaction).
+    /// to one reaction), or already ignores `C`.
     pub fn on<C, F>(mut self, f: F) -> Self
     where
         C: TypedContract,
@@ -246,6 +242,11 @@ impl<D: 'static, O: 'static> Role<D, O> {
         assert!(
             !self.arrivals.contains_key(&key),
             "role already has an arrival handler for contract `{}`",
+            C::NAME
+        );
+        assert!(
+            !self.ignored.contains(&key),
+            "role already ignores contract `{}`",
             C::NAME
         );
         self.arrivals.insert(
@@ -288,6 +289,30 @@ impl<D: 'static, O: 'static> Role<D, O> {
         self
     }
 
+    /// Declare `C` children as not this party's business: when a spend forks,
+    /// `C` children are dropped instead of followed (any child neither handled
+    /// nor ignored is a [`NoHandler`](ProtocolError::NoHandler) error). A token
+    /// *all* of whose children are ignored resolves silently, contributing no
+    /// outcome.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the role already handles or ignores `C`.
+    pub fn ignore<C: TypedContract>(mut self) -> Self {
+        let key = C::kind();
+        assert!(
+            !self.arrivals.contains_key(&key),
+            "role already has an arrival handler for contract `{}`",
+            C::NAME
+        );
+        assert!(
+            self.ignored.insert(key),
+            "role already ignores contract `{}`",
+            C::NAME
+        );
+        self
+    }
+
     /// Mount a sub-protocol: merge `sub`'s handlers into this role, viewing the
     /// sub-protocol's party data through `lens` and mapping its outcomes into
     /// this protocol's through `map`.
@@ -299,7 +324,8 @@ impl<D: 'static, O: 'static> Role<D, O> {
     ///
     /// # Panics
     ///
-    /// Panics if `sub` handles a contract this role already handles.
+    /// Panics if `sub` handles a contract this role already handles, or if one
+    /// side ignores a contract the other handles.
     pub fn embed<D2: 'static, O2: 'static>(
         mut self,
         sub: Role<D2, O2>,
@@ -307,10 +333,23 @@ impl<D: 'static, O: 'static> Role<D, O> {
         map: impl Fn(&mut D, O2) -> Result<O, ProtocolError> + 'static,
     ) -> Self {
         let map: Rc<OutcomeMapFn<D, O2, O>> = Rc::new(map);
+        for key in sub.ignored {
+            assert!(
+                !self.arrivals.contains_key(&key),
+                "embedded role ignores contract `{}`, which this role handles",
+                key.name
+            );
+            self.ignored.insert(key);
+        }
         for (key, sub_handler) in sub.arrivals {
             assert!(
                 !self.arrivals.contains_key(&key),
                 "embedded role clashes on arrival handler for contract `{}`",
+                key.name
+            );
+            assert!(
+                !self.ignored.contains(&key),
+                "embedded role handles contract `{}`, which this role ignores",
                 key.name
             );
             let map = map.clone();
@@ -353,6 +392,11 @@ impl<D: 'static, O: 'static> Role<D, O> {
     /// Whether the role can follow the token into `key` (has an arrival handler).
     pub(crate) fn handles_arrival(&self, key: &ContractKey) -> bool {
         self.arrivals.contains_key(key)
+    }
+
+    /// Whether the role explicitly ignores `key` children.
+    pub(crate) fn ignores(&self, key: &ContractKey) -> bool {
+        self.ignored.contains(key)
     }
 }
 
@@ -505,5 +549,49 @@ mod tests {
         let _ = Role::<(), ()>::new()
             .on::<KeyA, _>(|_, _, _| Ok(Action::Wait))
             .on::<KeyA, _>(|_, _, _| Ok(Action::Wait));
+    }
+
+    #[test]
+    #[should_panic(expected = "already has an arrival handler")]
+    fn ignoring_a_handled_contract_panics() {
+        let _ = Role::<(), ()>::new()
+            .on::<KeyA, _>(|_, _, _| Ok(Action::Wait))
+            .ignore::<KeyA>();
+    }
+
+    #[test]
+    #[should_panic(expected = "already ignores")]
+    fn handling_an_ignored_contract_panics() {
+        let _ = Role::<(), ()>::new()
+            .ignore::<KeyA>()
+            .on::<KeyA, _>(|_, _, _| Ok(Action::Wait));
+    }
+
+    #[test]
+    fn embed_merges_ignores() {
+        let sub: Role<(), ()> = Role::new().ignore::<KeyB>();
+        let outer: Role<(), ()> = Role::new()
+            .on::<KeyA, _>(|_, _, _| Ok(Action::Wait))
+            .embed(sub, |d: &mut ()| d, |_d, o| Ok(o));
+        assert!(outer.ignores(&KeyB::kind()));
+        assert!(!outer.ignores(&KeyA::kind()));
+    }
+
+    #[test]
+    #[should_panic(expected = "which this role ignores")]
+    fn embedded_handler_for_an_ignored_contract_panics() {
+        let sub: Role<(), ()> = Role::new().on::<KeyB, _>(|_, _, _| Ok(Action::Wait));
+        let _ = Role::<(), ()>::new()
+            .ignore::<KeyB>()
+            .embed(sub, |d: &mut ()| d, |_d, o| Ok(o));
+    }
+
+    #[test]
+    #[should_panic(expected = "which this role handles")]
+    fn embedded_ignore_of_a_handled_contract_panics() {
+        let sub: Role<(), ()> = Role::new().ignore::<KeyA>();
+        let _ = Role::<(), ()>::new()
+            .on::<KeyA, _>(|_, _, _| Ok(Action::Wait))
+            .embed(sub, |d: &mut ()| d, |_d, o| Ok(o));
     }
 }

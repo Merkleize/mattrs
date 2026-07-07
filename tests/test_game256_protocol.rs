@@ -111,14 +111,14 @@ fn drive(
     let mut b_out = None;
     for _ in 0..max_steps {
         if a_out.is_none()
-            && let Progress::Done(o) = alice.step().expect("alice steps")
+            && let Progress::Done(os) = alice.step().expect("alice steps")
         {
-            a_out = Some(o);
+            a_out = os.into_iter().next();
         }
         if b_out.is_none()
-            && let Progress::Done(o) = bob.step().expect("bob steps")
+            && let Progress::Done(os) = bob.step().expect("bob steps")
         {
-            b_out = Some(o);
+            b_out = os.into_iter().next();
         }
         if a_out.is_some() && b_out.is_some() {
             break;
@@ -167,8 +167,8 @@ fn forfait_collects_when_alice_abandons_the_challenge() {
         ) {
             alice.step().expect("alice steps");
         }
-        if let Progress::Done(o) = bob.step().expect("bob steps") {
-            b_out = Some(o);
+        if let Progress::Done(os) = bob.step().expect("bob steps") {
+            b_out = os.into_iter().next();
             break;
         }
     }
@@ -184,11 +184,7 @@ fn forfait_collects_when_alice_abandons_the_challenge() {
     chain.mine(FORFAIT_TIMEOUT + 1);
 
     // ...then Bob's timeout fallback fires and collects the pot.
-    let outcome = loop {
-        if let Progress::Done(o) = bob.step().expect("bob steps") {
-            break o;
-        }
-    };
+    let outcome = bob.run_one().expect("bob resolves");
     assert_eq!(
         outcome,
         GameOutcome::Fraud(FraudOutcome {
@@ -218,11 +214,7 @@ fn honest_claim_withdraws_after_the_timeout() {
 
     chain.mine(FORFAIT_TIMEOUT + 1);
 
-    let outcome = loop {
-        if let Progress::Done(o) = alice.step().expect("alice steps") {
-            break o;
-        }
-    };
+    let outcome = alice.run_one().expect("alice resolves");
     assert_eq!(outcome, GameOutcome::AliceWithdrew);
 
     // Alice's withdraw spent S2, paying her the pot.

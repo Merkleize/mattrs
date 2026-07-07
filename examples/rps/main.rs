@@ -179,7 +179,7 @@ fn run_alice(
     };
     let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
     // Run with no time limit: a human counterparty takes their time.
-    let outcome = Runner::new(manager, chain, alice_role(), data, entry).run()?;
+    let outcome = Runner::new(manager, chain, alice_role(), data, entry).run_one()?;
     println!(
         "Game over: {} (pot: {} sats)",
         clause_of(outcome.result),
@@ -244,7 +244,7 @@ fn run_bob(
     println!("Then waiting for Alice's adjudication on-chain...");
     let data = BobData { m_b, c_a, xpriv };
     let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
-    let outcome = Runner::new(manager, chain, bob_role(), data, entry).run()?;
+    let outcome = Runner::new(manager, chain, bob_role(), data, entry).run_one()?;
     println!("Alice played {}", move_str(outcome.m_a));
     println!(
         "Game over: {} (pot: {} sats)",

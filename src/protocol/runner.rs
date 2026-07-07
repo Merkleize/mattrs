@@ -14,14 +14,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 pub enum Progress<O> {
     /// Nothing happened (waiting on the counterparty); poll again later.
     Waiting,
-    /// A transition happened (a spend was sent or observed); step again
-    /// promptly.
+    /// Something happened (a spend was sent or observed, a token forked or
+    /// resolved); step again promptly.
     Advanced,
-    /// The protocol resolved with this outcome (returned exactly once).
-    Done(O),
+    /// Every token resolved; the outcomes, in resolution order (returned
+    /// exactly once).
+    Done(Vec<O>),
 }
 
-/// The runner's view of the protocol's live UTXO (its *token*).
+/// The runner's view of one live UTXO it follows (a *token*).
 enum TokenState<O> {
     /// The token sits at `current`; dispatch the role's arrival handler next.
     Arrived {
@@ -35,14 +36,36 @@ enum TokenState<O> {
         parent: Option<InstanceHandle>,
         timeout: Option<(u32, Box<Action<O>>)>,
     },
-    /// The protocol resolved; stepping again is an error.
-    Finished,
+}
+
+impl<O> TokenState<O> {
+    fn current(&self) -> &InstanceHandle {
+        match self {
+            TokenState::Arrived { current, .. } | TokenState::Waiting { current, .. } => current,
+        }
+    }
+}
+
+/// What stepping one token once did to it.
+enum TokenStep<O> {
+    /// The token is still live (`advanced` says whether it moved).
+    Keep(TokenState<O>, bool),
+    /// A spend was followed into several handled children: the token forked.
+    Fork(Vec<TokenState<O>>),
+    /// The token resolved — with an outcome, or silently (`None`) when every
+    /// child of its final spend was ignored.
+    Resolved(Option<O>),
 }
 
 /// Drives one party's [`Role`] from an entry instance to the protocol's
-/// outcome: dispatches the role's handlers as the token moves, builds and
+/// outcomes: dispatches the role's handlers as tokens move, builds and
 /// broadcasts the spends they return, and follows the counterparty's spends
 /// by watching the chain.
+///
+/// The runner starts with a single token (the entry instance). A spend forking
+/// into several handled children splits the token, and each child is followed
+/// independently — with its own turn-taking and timeout deadline — until it
+/// resolves an outcome. The protocol is done when no token is left.
 ///
 /// The runner owns the party's [`ContractManager`] (its local model of every
 /// instance) and performs all chain I/O through a shared [`ChainView`], so the
@@ -53,7 +76,9 @@ pub struct Runner<D, O> {
     data: D,
     manager: ContractManager,
     chain: Rc<dyn ChainView>,
-    state: TokenState<O>,
+    tokens: Vec<TokenState<O>>,
+    outcomes: Vec<O>,
+    done: bool,
 }
 
 impl<D: 'static, O: 'static> Runner<D, O> {
@@ -71,10 +96,12 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             data,
             manager,
             chain,
-            state: TokenState::Arrived {
+            tokens: vec![TokenState::Arrived {
                 current: entry,
                 parent: None,
-            },
+            }],
+            outcomes: Vec::new(),
+            done: false,
         }
     }
 
@@ -98,21 +125,124 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         &mut self.manager
     }
 
-    /// The instance the token currently sits at (`None` once finished).
+    /// The instances the live tokens currently sit at (empty once done).
+    pub fn tokens(&self) -> Vec<&InstanceHandle> {
+        self.tokens.iter().map(|t| t.current()).collect()
+    }
+
+    /// The instance the token sits at, when exactly one token is live (`None`
+    /// once finished or while several tokens are in flight).
     pub fn current(&self) -> Option<&InstanceHandle> {
-        match &self.state {
-            TokenState::Arrived { current, .. } | TokenState::Waiting { current, .. } => {
-                Some(current)
-            }
-            TokenState::Finished => None,
+        match &self.tokens[..] {
+            [only] => Some(only.current()),
+            _ => None,
         }
     }
 
-    /// Make at most one protocol step, without blocking: dispatch the pending
-    /// arrival handler, or poll once for the counterparty's spend (and any
-    /// timeout deadline).
+    /// The outcomes resolved so far (in resolution order). [`Progress::Done`]
+    /// hands them over when the last token resolves; until then this peeks at
+    /// the partial list — useful for long-lived roles (e.g. a watchtower)
+    /// whose remaining tokens may outlive the interesting resolution.
+    pub fn outcomes(&self) -> &[O] {
+        &self.outcomes
+    }
+
+    /// Step every live token at most once, without blocking: dispatch pending
+    /// arrival handlers, or poll once for counterparty spends (and timeout
+    /// deadlines).
+    ///
+    /// An error poisons the runner: the failing step is not retried, and
+    /// stepping again returns [`ProtocolError::Finished`].
     pub fn step(&mut self) -> Result<Progress<O>, ProtocolError> {
-        match std::mem::replace(&mut self.state, TokenState::Finished) {
+        if self.done {
+            return Err(ProtocolError::Finished);
+        }
+        let mut advanced = false;
+        let mut kept = Vec::new();
+        for token in std::mem::take(&mut self.tokens) {
+            match self.step_token(token) {
+                Ok(TokenStep::Keep(t, adv)) => {
+                    advanced |= adv;
+                    kept.push(t);
+                }
+                Ok(TokenStep::Fork(ts)) => {
+                    advanced = true;
+                    kept.extend(ts);
+                }
+                Ok(TokenStep::Resolved(o)) => {
+                    advanced = true;
+                    self.outcomes.extend(o);
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Err(e);
+                }
+            }
+        }
+        self.tokens = kept;
+        if self.tokens.is_empty() {
+            self.done = true;
+            return Ok(Progress::Done(std::mem::take(&mut self.outcomes)));
+        }
+        Ok(if advanced {
+            Progress::Advanced
+        } else {
+            Progress::Waiting
+        })
+    }
+
+    /// Drive the protocol to its outcomes, polling every 100ms while waiting.
+    /// Give up with an error after `window` without progress (`None` = poll
+    /// forever, e.g. waiting on a human counterparty).
+    pub fn run_within(&mut self, window: Option<Duration>) -> Result<Vec<O>, ProtocolError> {
+        let mut last_progress = Instant::now();
+        loop {
+            match self.step()? {
+                Progress::Done(outcomes) => return Ok(outcomes),
+                Progress::Advanced => last_progress = Instant::now(),
+                Progress::Waiting => {
+                    if let Some(window) = window
+                        && last_progress.elapsed() >= window
+                    {
+                        let outpoint = self
+                            .tokens
+                            .first()
+                            .and_then(|t| t.current().outpoint())
+                            .ok_or(ManagerError::NotFunded)?;
+                        return Err(ManagerError::SpendNotFound(outpoint).into());
+                    }
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+            }
+        }
+    }
+
+    /// [`run_within`](Runner::run_within) with no time limit.
+    pub fn run(&mut self) -> Result<Vec<O>, ProtocolError> {
+        self.run_within(None)
+    }
+
+    /// [`run_within`](Runner::run_within) for a protocol expected not to fork:
+    /// the single outcome, or an error if the tokens resolved any other number.
+    pub fn run_one_within(&mut self, window: Option<Duration>) -> Result<O, ProtocolError> {
+        let mut outcomes = self.run_within(window)?;
+        if outcomes.len() != 1 {
+            return Err(ProtocolError::Other(format!(
+                "the protocol resolved {} outcomes where exactly one was expected",
+                outcomes.len()
+            )));
+        }
+        Ok(outcomes.remove(0))
+    }
+
+    /// [`run_one_within`](Runner::run_one_within) with no time limit.
+    pub fn run_one(&mut self) -> Result<O, ProtocolError> {
+        self.run_one_within(None)
+    }
+
+    /// Step one token once.
+    fn step_token(&mut self, token: TokenState<O>) -> Result<TokenStep<O>, ProtocolError> {
+        match token {
             TokenState::Arrived { current, parent } => {
                 let key = ContractKey::of_handle(&current);
                 let handler = self.role.arrival(&key).ok_or(ProtocolError::NoHandler {
@@ -132,38 +262,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 parent,
                 timeout,
             } => self.poll_waiting(current, parent, timeout),
-            TokenState::Finished => Err(ProtocolError::Finished),
         }
-    }
-
-    /// Drive the protocol to its outcome, polling every 100ms while waiting.
-    /// Give up with an error after `window` without progress (`None` = poll
-    /// forever, e.g. waiting on a human counterparty).
-    pub fn run_within(&mut self, window: Option<Duration>) -> Result<O, ProtocolError> {
-        let mut last_progress = Instant::now();
-        loop {
-            match self.step()? {
-                Progress::Done(outcome) => return Ok(outcome),
-                Progress::Advanced => last_progress = Instant::now(),
-                Progress::Waiting => {
-                    if let Some(window) = window
-                        && last_progress.elapsed() >= window
-                    {
-                        let outpoint = self
-                            .current()
-                            .and_then(|h| h.outpoint())
-                            .ok_or(ManagerError::NotFunded)?;
-                        return Err(ManagerError::SpendNotFound(outpoint).into());
-                    }
-                    std::thread::sleep(POLL_INTERVAL);
-                }
-            }
-        }
-    }
-
-    /// [`run_within`](Runner::run_within) with no time limit.
-    pub fn run(&mut self) -> Result<O, ProtocolError> {
-        self.run_within(None)
     }
 
     /// Carry out a handler's decision for the token at `current`.
@@ -172,7 +271,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         action: Action<O>,
         current: InstanceHandle,
         parent: Option<InstanceHandle>,
-    ) -> Result<Progress<O>, ProtocolError> {
+    ) -> Result<TokenStep<O>, ProtocolError> {
         match action {
             Action::Send(builder) => {
                 let tx = builder.build_tx(&self.manager)?;
@@ -184,31 +283,15 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 let tx = builder.build_tx(&self.manager)?;
                 self.chain.broadcast(&tx)?;
                 self.manager.observe_spend(&current, &tx)?;
-                self.state = TokenState::Finished;
-                Ok(Progress::Done(outcome))
+                Ok(TokenStep::Resolved(Some(outcome)))
             }
-            Action::Wait => {
-                self.state = TokenState::Waiting {
-                    current,
-                    parent,
-                    timeout: None,
-                };
-                // Poll right away: the spend may already be there (e.g. an
-                // observer catching up on an old game).
-                self.step()
-            }
+            // Poll right away: the spend may already be there (e.g. an
+            // observer catching up on an old game).
+            Action::Wait => self.poll_waiting(current, parent, None),
             Action::WaitWithTimeout { blocks, on_timeout } => {
-                self.state = TokenState::Waiting {
-                    current,
-                    parent,
-                    timeout: Some((blocks, on_timeout)),
-                };
-                self.step()
+                self.poll_waiting(current, parent, Some((blocks, on_timeout)))
             }
-            Action::Finish(outcome) => {
-                self.state = TokenState::Finished;
-                Ok(Progress::Done(outcome))
-            }
+            Action::Finish(outcome) => Ok(TokenStep::Resolved(Some(outcome))),
         }
     }
 
@@ -219,7 +302,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         current: InstanceHandle,
         parent: Option<InstanceHandle>,
         timeout: Option<(u32, Box<Action<O>>)>,
-    ) -> Result<Progress<O>, ProtocolError> {
+    ) -> Result<TokenStep<O>, ProtocolError> {
         let outpoint = current.outpoint().ok_or(ManagerError::NotFunded)?;
 
         if let Some(tx) = self.chain.find_spending_tx(outpoint)? {
@@ -229,8 +312,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
 
         if let Some((blocks, on_timeout)) = timeout {
             let confirmed = self.chain.confirmation_height(outpoint.txid)?;
-            let deadline =
-                confirmed.map(|conf| conf.saturating_add(blocks).saturating_sub(1));
+            let deadline = confirmed.map(|conf| conf.saturating_add(blocks).saturating_sub(1));
             if deadline.is_some_and(|d| self.chain.height().is_ok_and(|h| h >= d)) {
                 return match *on_timeout {
                     Action::Wait | Action::WaitWithTimeout { .. } => {
@@ -239,30 +321,36 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                     action => self.execute_action(action, current, parent),
                 };
             }
-            self.state = TokenState::Waiting {
-                current,
-                parent,
-                timeout: Some((blocks, on_timeout)),
-            };
+            Ok(TokenStep::Keep(
+                TokenState::Waiting {
+                    current,
+                    parent,
+                    timeout: Some((blocks, on_timeout)),
+                },
+                false,
+            ))
         } else {
-            self.state = TokenState::Waiting {
-                current,
-                parent,
-                timeout: None,
-            };
+            Ok(TokenStep::Keep(
+                TokenState::Waiting {
+                    current,
+                    parent,
+                    timeout: None,
+                },
+                false,
+            ))
         }
-        Ok(Progress::Waiting)
     }
 
     /// Move the token along an observed (or just-sent) spend of `current`:
-    /// follow the child the role can handle, or — when the spend is terminal —
-    /// classify it through the role's settlement handler.
+    /// follow every child the role handles (forking the token if there are
+    /// several), or — when the spend is terminal — classify it through the
+    /// role's settlement handler.
     fn follow_spend(
         &mut self,
         children: Vec<InstanceHandle>,
         current: InstanceHandle,
         parent: Option<InstanceHandle>,
-    ) -> Result<Progress<O>, ProtocolError> {
+    ) -> Result<TokenStep<O>, ProtocolError> {
         if children.is_empty() {
             let key = ContractKey::of_handle(&current);
             let settler = self.role.settlement(&key).ok_or(ProtocolError::NoHandler {
@@ -273,32 +361,28 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 chain: self.chain.as_ref(),
             };
             let outcome = settler(&mut self.data, current.clone(), &cx)?;
-            self.state = TokenState::Finished;
-            return Ok(Progress::Done(outcome));
+            return Ok(TokenStep::Resolved(Some(outcome)));
         }
 
-        let followable: Vec<&InstanceHandle> = children
-            .iter()
-            .filter(|c| self.role.handles_arrival(&ContractKey::of_handle(c)))
-            .collect();
-        match followable[..] {
-            [next] => {
-                self.state = TokenState::Arrived {
-                    current: next.clone(),
-                    parent: Some(current),
-                };
-                Ok(Progress::Advanced)
+        let mut followed = Vec::new();
+        for child in children {
+            let key = ContractKey::of_handle(&child);
+            if self.role.handles_arrival(&key) {
+                followed.push(TokenState::Arrived {
+                    current: child,
+                    parent: Some(current.clone()),
+                });
+            } else if !self.role.ignores(&key) {
+                return Err(ProtocolError::NoHandler {
+                    contract: key.name.to_string(),
+                });
             }
-            [] => Err(ProtocolError::NoHandler {
-                contract: children
-                    .iter()
-                    .map(|c| c.contract_name())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            }),
-            _ => Err(ProtocolError::AmbiguousChildren {
-                contracts: followable.iter().map(|c| c.contract_name()).collect(),
-            }),
         }
+        Ok(match followed.len() {
+            // Every child ignored: this branch is not our business.
+            0 => TokenStep::Resolved(None),
+            1 => TokenStep::Keep(followed.pop().expect("len 1"), true),
+            _ => TokenStep::Fork(followed),
+        })
     }
 }

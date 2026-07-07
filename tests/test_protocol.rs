@@ -75,14 +75,14 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
     let mut b_out = None;
     for _ in 0..20 {
         if a_out.is_none()
-            && let Progress::Done(o) = alice.step().expect("alice steps")
+            && let Progress::Done(os) = alice.step().expect("alice steps")
         {
-            a_out = Some(o);
+            a_out = os.into_iter().next();
         }
         if b_out.is_none()
-            && let Progress::Done(o) = bob.step().expect("bob steps")
+            && let Progress::Done(os) = bob.step().expect("bob steps")
         {
-            b_out = Some(o);
+            b_out = os.into_iter().next();
         }
         if a_out.is_some() && b_out.is_some() {
             break;
