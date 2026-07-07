@@ -246,17 +246,13 @@ contract! {
             script G256S2::start_challenge_script;
             next(p, a) {
                 let commit = mattrs::script_utils::commit_int;
-                Ok(vec![ClauseOutput::at_same_index()
-                    .to(bisect1(p.bisect()).as_erased())
-                    .with_state(&Bisect1State {
-                        h_start: commit(a.x),
-                        h_end_a: commit(a.y),
-                        h_end_b: commit(a.z),
-                        trace_a: a.t_a,
-                        trace_b: a.t_b,
-                    })
-                    .preserve_amount()
-                    .build()])
+                Ok(vec![bisect1(p.bisect()).entry_output(
+                    commit(a.x),
+                    commit(a.y),
+                    commit(a.z),
+                    a.t_a,
+                    a.t_b,
+                )])
             }
         }
 
@@ -270,7 +266,6 @@ impl G256S2 {
     }
 
     fn start_challenge_script(p: &G256Params) -> ScriptBuf {
-        let bisect_root = bisect1(p.bisect()).taptree_root();
         script! {
             OP_TOALTSTACK
             // y != z
@@ -284,9 +279,8 @@ impl G256S2 {
             OP_FROMALTSTACK OP_SHA256
             OP_SWAP
             OP_FROMALTSTACK
-            // commit [sha256(x), sha256(y), sha256(z), t_a, t_b] as Bisect_1 state
-            { merkle_root(5) }
-            { check_output_contract(bisect_root, -1, None) }
+            // hand [sha256(x), sha256(y), sha256(z), t_a, t_b] off to Bisect_1
+            { bisect1(p.bisect()).state_output_script(-1) }
             { p.bob_pk }
             OP_CHECKSIG
         }

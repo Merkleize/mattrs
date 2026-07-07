@@ -391,6 +391,44 @@ contract! {
 }
 
 impl Bisect1 {
+    /// Script fragment handing a spend off into this bisection: consumes the
+    /// five entry-state leaves from the stack (`h_start`, `h_end_alice`,
+    /// `h_end_bob`, `trace_alice`, `trace_bob`, with `trace_bob` on top) and
+    /// verifies that output `index` (`-1` = same as the input) pays this
+    /// [`Bisect1`] committing to them. The `next`-side counterpart is
+    /// [`entry_output`](Bisect1::entry_output); embedding contracts use the
+    /// pair without knowing the bisection state's layout.
+    pub fn state_output_script(&self, index: i64) -> ScriptBuf {
+        concat(&[
+            merkle_root(5),
+            check_output_contract(self.taptree_root(), index, None),
+        ])
+    }
+
+    /// The [`ClauseOutput`] entering this bisection with the given endpoint
+    /// and trace commitments (the `next`-side counterpart of
+    /// [`state_output_script`](Bisect1::state_output_script)).
+    pub fn entry_output(
+        &self,
+        h_start: [u8; 32],
+        h_end_alice: [u8; 32],
+        h_end_bob: [u8; 32],
+        trace_alice: [u8; 32],
+        trace_bob: [u8; 32],
+    ) -> ClauseOutput {
+        ClauseOutput::at_same_index()
+            .to(self.as_erased())
+            .with_state(&Bisect1State {
+                h_start,
+                h_end_a: h_end_alice,
+                h_end_b: h_end_bob,
+                trace_a: trace_alice,
+                trace_b: trace_bob,
+            })
+            .preserve_amount()
+            .build()
+    }
+
     // witness: <alice_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b>
     // <h_mid_a> <trace_left_a> <trace_right_a>
     fn alice_reveal_script(alice_pk: XOnlyPublicKey, bisect2_root: [u8; 32]) -> ScriptBuf {
