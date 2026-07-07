@@ -5,7 +5,7 @@
 //! a state is reached. Each party is described by a [`Role`] — a table mapping
 //! contract types to handlers that return an [`Action`] (send this spend, wait
 //! for the counterparty, wait with a timeout fallback, or finish with an
-//! outcome). A `Runner` (see [`runner`]) drives a role against the chain,
+//! outcome). A [`Runner`] drives a role against the chain (a [`ChainView`]),
 //! following the protocol's live UTXO (its *token*) from state to state until
 //! the role resolves an outcome.
 //!
@@ -20,6 +20,7 @@
 //! several inputs into one transaction, are future extensions.
 
 pub mod chain;
+mod runner;
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -30,7 +31,8 @@ use crate::manager::{
     InstanceHandle, ManagerError, MissingStateError, SpendBuilder, WrongContractType,
 };
 
-pub use chain::ChainView;
+pub use chain::{ChainView, LocalChain, RpcChain};
+pub use runner::{Progress, Runner};
 
 /// Bridge from a `contract!`-generated contract type to its typed handle and
 /// dispatch key. Implemented by the `contract!` macro; never by hand.
