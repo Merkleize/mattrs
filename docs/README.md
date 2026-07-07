@@ -57,6 +57,30 @@ graph LR
 
 > **Note**: This diagram represents a _single UTXO's_ possible states and transitions. Some protocols span multiple UTXOs that interact through shared transaction inputs.
 
+## Protocols and roles
+
+A contract's state machine defines what the chain *allows*; a **protocol** defines what each party *does* with it — which transaction to send when a state is reached, what to watch for, and when to fall back to a timeout path. In this framework that strategy layer lives in [`mattrs::protocol`](../src/protocol/mod.rs), separate from the contracts themselves (so one contract can be played by different strategies: honest party, watchtower, test adversary).
+
+Each party is declared as a **role**: a table mapping contract types to handlers. When the protocol's live UTXO (its *token*) arrives at a state, the party's handler decides an **action**:
+
+| Action | Meaning |
+|--------|---------|
+| `Send(spend)` | My turn: broadcast this spend and follow its child |
+| `SendFinal(spend, outcome)` | My terminal spend; the protocol resolves |
+| `Wait` | Counterparty's turn: watch the UTXO for its spend |
+| `WaitWithTimeout{blocks, fallback}` | Watch, but act (e.g. `forfait`) once the UTXO sits unspent for `blocks` |
+| `Finish(outcome)` | Resolved with no transaction from us |
+
+A separate `on_settled` handler classifies *terminal* spends made by the counterparty (e.g. a CTV payout) into the protocol's outcome type.
+
+A **runner** drives a role from an entry instance to its outcome: it dispatches handlers, builds and broadcasts the spends they return, follows the counterparty by observing the chain, and fires timeout fallbacks. All chain I/O goes through one seam (`ChainView`), so the same roles run unchanged against a real node (`RpcChain`) or the deterministic in-memory chain used by offline tests (`LocalChain`), where timeout paths are exercised by mining explicitly.
+
+**Protocols compose.** A whole protocol — its contracts, roles, and outcome type — is a reusable component: `Role::embed` mounts a sub-protocol's role inside a larger protocol's, mapping its outcomes into the outer outcome type. The embedder never handles the sub-protocol's internal states. The bisection fraud proof ([`mattrs::fraud::roles`](../src/fraud/roles.rs)) ships this way: the game256 protocol ([`tests/support/game256_roles.rs`](../tests/support/game256_roles.rs)) hands off on-chain with `Bisect1::state_output_script` / `entry_output` and mounts `fraud::roles::{alice,bob}_role` — the whole dispute below `start_challenge` runs without the game code naming a single bisection state.
+
+A complete two-party example is the RPS demo ([`examples/rps/`](../examples/rps/)): the roles live next to the contracts, the demo drives them over RPC, and the offline tests replay the very same roles over a `LocalChain`.
+
+> **Scope**: a role currently follows a single live token (one UTXO at a time). Protocols that fork into several concurrently-live UTXOs per party, or batch several inputs into one transaction, are future extensions of the runner.
+
 ## Notation
 
 We represent a contract as:

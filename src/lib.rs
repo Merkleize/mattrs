@@ -26,8 +26,19 @@
 //! and the [`clause_tree!`](macro@clause_tree) macro) — see [`fraud`] for a worked
 //! example (the generic bisection fraud proof).
 //!
+//! # Defining a protocol
+//!
+//! Contracts define what the chain *allows*; the [`protocol`] layer defines what
+//! each party *does*: a [`Role`](protocol::Role) maps every contract state to the
+//! transaction the party sends there (or watches for, with an optional timeout
+//! fallback), and a [`Runner`](protocol::Runner) drives it against the chain.
+//! Whole protocols compose: [`Role::embed`](protocol::Role::embed) mounts a
+//! sub-protocol's roles (e.g. [`fraud::roles`]) inside a larger one, mapping its
+//! outcomes — see `tests/support/game256_roles.rs`.
+//!
 //! Start with `examples/getting_started.rs` (runs offline); `tests/support/vault.rs`
-//! is a complete two-stage vault.
+//! is a complete two-stage vault, and `examples/rps/` a complete two-party
+//! protocol on roles.
 
 // Lets the `mattrs-derive` macros refer to this crate as `::mattrs::...` even when
 // the deriving type lives inside this crate (e.g. examples/tests), so the derives
