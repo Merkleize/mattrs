@@ -222,3 +222,150 @@ impl RpsGameS1 {
         Self::make_script(p, 2, Self::tmpl_alice_wins(p).ctv_hash())
     }
 }
+
+// ============================================================================
+// The parties, as protocol roles
+// ============================================================================
+
+/// The two players as declarative [`Role`]s: what each sends (or watches for)
+/// at every game state. A [`Runner`](mattrs::protocol::Runner) drives them —
+/// the same roles work against a regtest node (see `main.rs`) and the offline
+/// `LocalChain` (see `tests/test_protocol.rs`).
+pub mod roles {
+    use bitcoin::bip32::Xpriv;
+
+    use mattrs::contracts::ClauseArgs;
+    use mattrs::protocol::{Action, ProtocolError, Role};
+    use mattrs::signer::HotSigner;
+
+    use super::{
+        alice_move_commitment, RpsGameS0, RpsGameS0BobMoveArgs, RpsGameS0Handle, RpsGameS1,
+        RpsGameS1Handle, RpsGameS1TieArgs,
+    };
+
+    /// Who takes the pot.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RpsResult {
+        AliceWins,
+        BobWins,
+        Tie,
+    }
+
+    /// The adjudicated game, with both revealed moves.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RpsOutcome {
+        pub result: RpsResult,
+        pub m_a: i64,
+        pub m_b: i64,
+    }
+
+    /// The game rule, off-chain — the single mirror of the scripts'
+    /// `diff = (m_b - m_a) mod 3`: 0 = tie, 1 = Bob wins, 2 = Alice wins.
+    pub fn outcome_of(m_a: i64, m_b: i64) -> RpsResult {
+        match (m_b - m_a).rem_euclid(3) {
+            0 => RpsResult::Tie,
+            1 => RpsResult::BobWins,
+            _ => RpsResult::AliceWins,
+        }
+    }
+
+    /// The adjudication clause satisfied by `result`.
+    pub fn clause_of(result: RpsResult) -> &'static str {
+        match result {
+            RpsResult::Tie => "tie",
+            RpsResult::BobWins => "bob_wins",
+            RpsResult::AliceWins => "alice_wins",
+        }
+    }
+
+    /// Alice's secrets: her move and the nonce blinding its commitment.
+    pub struct AliceData {
+        pub m_a: i64,
+        pub r_a: [u8; 32],
+        /// Demo pacing hook, called with Bob's revealed move and the outcome
+        /// just before the adjudication is broadcast.
+        pub before_adjudicating: Option<Box<dyn Fn(i64, RpsResult)>>,
+    }
+
+    /// Alice funds the game, so her role starts watching: Bob moves first.
+    /// Her adjudication reveals `(m_a, r_a)`; the true outcome's clause is the
+    /// only one that validates, and its CTV template pays the pot.
+    pub fn alice_role() -> Role<AliceData, RpsOutcome> {
+        Role::new()
+            .on::<RpsGameS0, _>(|_d: &mut AliceData, _h: RpsGameS0Handle, _cx| Ok(Action::Wait))
+            .on::<RpsGameS1, _>(|d, h: RpsGameS1Handle, cx| {
+                // Bob's move travels in the witness of the spend that got us here.
+                let parent = cx.parent.ok_or_else(|| {
+                    ProtocolError::Other("S1 arises from S0's bob_move".into())
+                })?;
+                let witness = parent
+                    .spending_args()
+                    .ok_or_else(|| ProtocolError::Other("the parent S0 is spent".into()))?;
+                let m_b = RpsGameS0BobMoveArgs::decode_from_witness(&witness)?.m_b;
+
+                let result = outcome_of(d.m_a, m_b);
+                if let Some(pace) = &d.before_adjudicating {
+                    pace(m_b, result);
+                }
+                let builder = match result {
+                    RpsResult::Tie => h.tie(m_b, d.m_a, d.r_a),
+                    RpsResult::BobWins => h.bob_wins(m_b, d.m_a, d.r_a),
+                    RpsResult::AliceWins => h.alice_wins(m_b, d.m_a, d.r_a),
+                };
+                let outcome = RpsOutcome {
+                    result,
+                    m_a: d.m_a,
+                    m_b,
+                };
+                Ok(Action::SendFinal(builder, outcome))
+            })
+    }
+
+    /// Bob's view: Alice's commitment and his own move.
+    pub struct BobData {
+        pub m_b: i64,
+        pub c_a: [u8; 32],
+        pub xpriv: Xpriv,
+    }
+
+    /// Bob reveals his move on-chain, then watches the adjudication and checks
+    /// Alice's revealed move against her commitment and the game rule.
+    pub fn bob_role() -> Role<BobData, RpsOutcome> {
+        Role::new()
+            .on::<RpsGameS0, _>(|d: &mut BobData, h: RpsGameS0Handle, _cx| {
+                Ok(Action::Send(
+                    h.bob_move(d.m_b).sign(HotSigner::new(d.xpriv)),
+                ))
+            })
+            .on::<RpsGameS1, _>(|_d, _h: RpsGameS1Handle, _cx| Ok(Action::Wait))
+            .on_settled::<RpsGameS1, _>(|d, h: RpsGameS1Handle, _cx| {
+                let clause = h
+                    .handle()
+                    .clause_name()
+                    .ok_or_else(|| ProtocolError::Other("the S1 instance is spent".into()))?;
+                // The three adjudication clauses share one witness layout.
+                let witness = h
+                    .handle()
+                    .spending_args()
+                    .ok_or_else(|| ProtocolError::Other("the S1 instance is spent".into()))?;
+                let args = RpsGameS1TieArgs::decode_from_witness(&witness)?;
+
+                if alice_move_commitment(args.m_a, &args.r_a) != d.c_a {
+                    return Err(ProtocolError::Other(
+                        "Alice's revealed move breaks her commitment".into(),
+                    ));
+                }
+                let result = outcome_of(args.m_a, d.m_b);
+                if clause != clause_of(result) {
+                    return Err(ProtocolError::Other(format!(
+                        "adjudicated clause `{clause}` does not match the moves"
+                    )));
+                }
+                Ok(RpsOutcome {
+                    result,
+                    m_a: args.m_a,
+                    m_b: d.m_b,
+                })
+            })
+    }
+}

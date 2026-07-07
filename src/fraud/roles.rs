@@ -57,18 +57,23 @@ pub struct FraudOutcome {
     pub resolution: FraudResolution,
 }
 
+/// A step value, as the witness elements one
+/// [`Computer`](super::Computer) spec consumes.
+pub type StepValue = Vec<Vec<u8>>;
+
 /// The off-chain mirror of a [`Computer`](super::Computer)'s script fragments,
 /// used by a role to derive its commitments and to decide whether its own
 /// reveal wins the disputed step. Must agree with the on-chain fragments on
 /// every protocol-valid value.
 #[derive(Clone)]
+#[allow(clippy::type_complexity)] // the closure signatures ARE the documentation
 pub struct OffChainComputer {
     /// Maps a step value (its witness elements) to the next value —
     /// [`Computer::func`](super::Computer::func) off-chain.
-    pub func: Rc<dyn Fn(&[Vec<u8>]) -> Vec<Vec<u8>>>,
+    pub func: Rc<dyn Fn(&StepValue) -> StepValue>,
     /// Maps a step value to its commitment —
     /// [`Computer::encoder`](super::Computer::encoder) off-chain.
-    pub encode: Rc<dyn Fn(&[Vec<u8>]) -> [u8; 32]>,
+    pub encode: Rc<dyn Fn(&StepValue) -> [u8; 32]>,
 }
 
 /// One party's view of the disputed computation, plus its spending config.
@@ -79,9 +84,8 @@ pub struct OffChainComputer {
 pub struct FraudPartyData {
     /// The claimed step commitments `h_0 ..= h_n` (`n + 1` entries).
     pub hs: Vec<[u8; 32]>,
-    /// The claimed step values `x_0 .. x_{n-1}`, each as the witness elements
-    /// one [`Computer`](super::Computer) spec consumes.
-    pub xs: Vec<Vec<Vec<u8>>>,
+    /// The claimed step values `x_0 .. x_{n-1}`.
+    pub xs: Vec<StepValue>,
     /// The step function and commitment, off-chain.
     pub computer: OffChainComputer,
     /// This party's signing key.

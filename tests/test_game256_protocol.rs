@@ -102,7 +102,6 @@ fn setup(
 }
 
 /// Interleave the two runners until both resolve (or `max_steps` runs out).
-#[allow(clippy::collapsible_if)] // the two party branches read better symmetric
 fn drive(
     alice: &mut Runner<AliceGameData, GameOutcome>,
     bob: &mut Runner<BobGameData, GameOutcome>,
@@ -111,15 +110,15 @@ fn drive(
     let mut a_out = None;
     let mut b_out = None;
     for _ in 0..max_steps {
-        if a_out.is_none() {
-            if let Progress::Done(o) = alice.step().expect("alice steps") {
-                a_out = Some(o);
-            }
+        if a_out.is_none()
+            && let Progress::Done(o) = alice.step().expect("alice steps")
+        {
+            a_out = Some(o);
         }
-        if b_out.is_none() {
-            if let Progress::Done(o) = bob.step().expect("bob steps") {
-                b_out = Some(o);
-            }
+        if b_out.is_none()
+            && let Progress::Done(o) = bob.step().expect("bob steps")
+        {
+            b_out = Some(o);
         }
         if a_out.is_some() && b_out.is_some() {
             break;

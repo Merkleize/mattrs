@@ -1,9 +1,10 @@
 //! Two-player Rock-Paper-Scissors over a MATT covenant (regtest).
 //!
 //! Ports pymatt's `examples/rps/rps.py`: two processes negotiate a game over a
-//! TCP socket, then play it entirely on-chain — each side drives its own turn
-//! with the typed spend API and follows the counterparty's turn with chain
-//! observation (`track_instance` / `wait_for_spend`).
+//! TCP socket, then play it entirely on-chain. Each side is a declarative
+//! protocol role (see `contracts::roles`) — a table of "at this game state,
+//! send this transaction / watch for the counterparty's" — driven by a
+//! [`Runner`] that builds, broadcasts, and observes the spends.
 //!
 //! Protocol (see `contracts.rs` for the two on-chain stages):
 //! 1. Alice picks a move `m_a` and a random nonce `r_a`, and sends Bob the
@@ -40,20 +41,18 @@ mod contracts;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::rc::Rc;
 use std::str::FromStr;
 
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
-use mattrs::contracts::ClauseArgs;
 use mattrs::manager::ContractManager;
-use mattrs::signer::HotSigner;
+use mattrs::protocol::{RpcChain, Runner};
 
-use contracts::{
-    alice_move_commitment, RpsGameS0, RpsGameS0BobMoveArgs, RpsGameS0Handle, RpsGameS1Handle,
-    RpsGameS1TieArgs, RpsParams, DEFAULT_STAKE,
-};
+use contracts::roles::{alice_role, bob_role, clause_of, AliceData, BobData};
+use contracts::{alice_move_commitment, RpsGameS0, RpsParams, DEFAULT_STAKE};
 
 // Demo keys (the pymatt reference fixtures; never use on mainnet).
 const ALICE_XPRIV: &str = "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN";
@@ -65,16 +64,6 @@ fn move_str(m: i64) -> &'static str {
         1 => "paper",
         2 => "scissors",
         _ => unreachable!("moves are 0..=2"),
-    }
-}
-
-/// The adjudication clause satisfied by `(m_a, m_b)`, per the contract's rule
-/// `diff = (m_b - m_a) mod 3`: 0 = tie, 1 = Bob wins, 2 = Alice wins.
-fn outcome_clause(m_a: i64, m_b: i64) -> &'static str {
-    match (m_b - m_a).rem_euclid(3) {
-        0 => "tie",
-        1 => "bob_wins",
-        _ => "alice_wins",
     }
 }
 
@@ -167,38 +156,35 @@ fn run_alice(
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
     let s0 = RpsGameS0::new(params).fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
-    let outpoint = s0.handle().outpoint().expect("just funded");
+    let entry = s0.handle().clone();
+    let outpoint = entry.outpoint().expect("just funded");
     println!("Game funded at {outpoint}");
     send_json(
         &mut stream,
         serde_json::json!({ "txid": outpoint.txid.to_string(), "vout": outpoint.vout }),
     )?;
 
-    // Follow Bob's turn: his spend reveals m_b in the witness.
+    // Alice's role does the rest: watch S0 for Bob's move (revealed in his
+    // spend's witness), then adjudicate by revealing (m_a, r_a) — only the
+    // true outcome's clause validates, and its CTV template pays the pot.
     println!("Waiting for Bob's move on-chain...");
-    // Wait with no time limit: a human counterparty takes their time.
-    let children = manager.wait_for_spend_within(s0.handle(), None)?;
-    let s1: RpsGameS1Handle = children
-        .into_iter()
-        .next()
-        .expect("bob_move creates the S1 instance")
-        .try_into()?;
-    let bob_args =
-        RpsGameS0BobMoveArgs::decode_from_witness(&s0.handle().spending_args().expect("spent"))?;
-    let m_b = bob_args.m_b;
-    println!("Bob played {}", move_str(m_b));
-
-    // Adjudicate: reveal (m_a, r_a); only the true outcome's clause validates.
-    let clause = outcome_clause(m_a, m_b);
-    println!("Outcome: {clause}");
-    wait_for_enter("Press ENTER to broadcast the adjudication transaction...");
-    let builder = match clause {
-        "tie" => s1.tie(m_b, m_a, r_a),
-        "bob_wins" => s1.bob_wins(m_b, m_a, r_a),
-        _ => s1.alice_wins(m_b, m_a, r_a),
+    let data = AliceData {
+        m_a,
+        r_a,
+        before_adjudicating: Some(Box::new(|m_b, result| {
+            println!("Bob played {}", move_str(m_b));
+            println!("Outcome: {}", clause_of(result));
+            wait_for_enter("Press ENTER to broadcast the adjudication transaction...");
+        })),
     };
-    builder.exec_none(&mut manager)?;
-    println!("Game over: {clause} (pot: {} sats)", 2 * DEFAULT_STAKE);
+    let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
+    // Run with no time limit: a human counterparty takes their time.
+    let outcome = Runner::new(manager, chain, alice_role(), data, entry).run()?;
+    println!(
+        "Game over: {} (pot: {} sats)",
+        clause_of(outcome.result),
+        2 * DEFAULT_STAKE
+    );
     Ok(())
 }
 
@@ -248,34 +234,23 @@ fn run_bob(
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
-    let s0: RpsGameS0Handle = manager
-        .track_instance(RpsGameS0::new(params).as_erased(), None, outpoint)?
-        .try_into()?;
+    let entry = manager.track_instance(RpsGameS0::new(params).as_erased(), None, outpoint)?;
     println!("Tracking the game at {outpoint}");
 
-    // Bob's turn: reveal the move on-chain (signed).
+    // Bob's role does the rest: reveal the move on-chain (signed), then follow
+    // Alice's adjudication — checking her revealed move against her commitment
+    // and the outcome against the game rule.
     println!("Bob plays {} — broadcasting the move", move_str(m_b));
-    let s1: RpsGameS1Handle = s0
-        .bob_move(m_b)
-        .sign(HotSigner::new(xpriv))
-        .exec_one(&mut manager)?
-        .try_into()?;
-
-    // Follow Alice's adjudication and check her revealed commitment.
-    println!("Waiting for Alice's adjudication on-chain...");
-    manager.wait_for_spend_within(s1.handle(), None)?;
-    let clause = s1.handle().clause_name().expect("spent");
-    // The three adjudication clauses share one witness layout (m_b, m_a, r_a).
-    let args =
-        RpsGameS1TieArgs::decode_from_witness(&s1.handle().spending_args().expect("spent"))?;
-    println!("Alice played {}", move_str(args.m_a));
-    assert_eq!(
-        alice_move_commitment(args.m_a, &args.r_a),
-        c_a,
-        "Alice's revealed move must match her commitment",
+    println!("Then waiting for Alice's adjudication on-chain...");
+    let data = BobData { m_b, c_a, xpriv };
+    let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
+    let outcome = Runner::new(manager, chain, bob_role(), data, entry).run()?;
+    println!("Alice played {}", move_str(outcome.m_a));
+    println!(
+        "Game over: {} (pot: {} sats)",
+        clause_of(outcome.result),
+        2 * DEFAULT_STAKE
     );
-    assert_eq!(clause, outcome_clause(args.m_a, m_b));
-    println!("Game over: {clause} (pot: {} sats)", 2 * DEFAULT_STAKE);
     Ok(())
 }
 

@@ -98,15 +98,15 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     let mut a_out = None;
     let mut b_out = None;
     for _ in 0..600 {
-        if a_out.is_none() {
-            if let Progress::Done(o) = alice.step()? {
-                a_out = Some(o);
-            }
+        if a_out.is_none()
+            && let Progress::Done(o) = alice.step()?
+        {
+            a_out = Some(o);
         }
-        if b_out.is_none() {
-            if let Progress::Done(o) = bob.step()? {
-                b_out = Some(o);
-            }
+        if b_out.is_none()
+            && let Progress::Done(o) = bob.step()?
+        {
+            b_out = Some(o);
         }
         if a_out.is_some() && b_out.is_some() {
             break;
@@ -128,10 +128,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     let mut path = Vec::new();
     let mut report = Report::new();
     let mut current = bob_entry;
-    loop {
-        let Some(clause) = current.clause_name() else {
-            break;
-        };
+    while let Some(clause) = current.clause_name() {
         let section = match current.contract_name() {
             "G256S0" | "G256S1" | "G256S2" => "Game setup",
             "Leaf" => "Leaf",

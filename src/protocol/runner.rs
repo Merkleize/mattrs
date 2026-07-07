@@ -146,14 +146,14 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 Progress::Done(outcome) => return Ok(outcome),
                 Progress::Advanced => last_progress = Instant::now(),
                 Progress::Waiting => {
-                    if let Some(window) = window {
-                        if last_progress.elapsed() >= window {
-                            let outpoint = self
-                                .current()
-                                .and_then(|h| h.outpoint())
-                                .ok_or(ManagerError::NotFunded)?;
-                            return Err(ManagerError::SpendNotFound(outpoint).into());
-                        }
+                    if let Some(window) = window
+                        && last_progress.elapsed() >= window
+                    {
+                        let outpoint = self
+                            .current()
+                            .and_then(|h| h.outpoint())
+                            .ok_or(ManagerError::NotFunded)?;
+                        return Err(ManagerError::SpendNotFound(outpoint).into());
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
