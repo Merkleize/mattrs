@@ -40,6 +40,28 @@ mod contract;
 ///     }
 /// }
 /// ```
+///
+/// Three optional forms cover contracts whose shape is only known at runtime
+/// (see `mattrs::fraud` for a worked example of all three):
+///
+/// - **`ctx <Type>;`** — non-encodable construction context (script fragments,
+///   factories, timeouts...). `new` becomes `new(params, ctx)` and stores the
+///   ctx on the contract struct (`Type` must be `Clone`). Script/spec builder
+///   exprs are then called with `(&params, &ctx)`, and `next` bodies (as well
+///   as a dynamic `tree |p| ..` body) can reference the context as `ctx`.
+///   Unlike params, the ctx never round-trips through `ParamEncodable`.
+///
+/// - **`args raw <expr>;`** — a clause whose witness layout is only known at
+///   runtime. `<expr>` is called like a script builder and evaluates to the
+///   clause's `Vec<ArgSpec>`; the clause uses `RawArgs`, and no `*Args` struct
+///   or handle method is generated (add ergonomic spend methods in a plain
+///   `impl NameHandle` block).
+///
+/// - **`#[from_state]`** on an `args` field — the generated handle method omits
+///   the argument and fills it from the instance's typed state (the same-named
+///   state field), returning `Result<SpendBuilder, MissingStateError>`. For
+///   clauses that re-reveal state committed on-chain, this keeps the method's
+///   parameters down to the genuinely new values. Requires a `state` section.
 #[proc_macro]
 pub fn contract(input: TokenStream) -> TokenStream {
     contract::expand(input)

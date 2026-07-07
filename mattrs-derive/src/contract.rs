@@ -16,8 +16,16 @@ use syn::{
 
 /// A parsed `contract! { contract Name { .. } }` definition.
 struct ContractDef {
+    /// Outer attributes (doc comments, ...) before the `contract` keyword,
+    /// forwarded onto the generated contract struct.
+    attrs: Vec<Attribute>,
     name: Ident,
     params_ty: Type,
+    /// The optional `ctx <Type>;` section: non-encodable construction context
+    /// (script fragments, factories, timeouts...) passed to `new` alongside the
+    /// params. Unlike params it never round-trips through `ParamEncodable`:
+    /// scripts receive it as a second argument and `next` bodies capture a clone.
+    ctx_ty: Option<Type>,
     state_ty: Option<Type>,
     /// The `internal_key |p| ..` closure; `None` defaults to the NUMS key.
     ikey: Option<(Ident, Expr)>,
@@ -38,14 +46,30 @@ enum TreeDef {
 
 struct ClauseDef {
     name: Ident,
-    fields: Vec<ClauseField>,
+    args: ClauseArgsDef,
     script_expr: Expr,
     next: Option<NextDef>,
+}
+
+/// A clause's `args` section.
+enum ClauseArgsDef {
+    /// `args { name: Ty, .. }` — a typed `*Args` struct is generated, plus a
+    /// handle method taking the non-signer (and non-`#[from_state]`) fields.
+    Typed(Vec<ClauseField>),
+    /// `args raw <expr>;` — for witness layouts only known at runtime. `<expr>`
+    /// is called with `&params` (and `&ctx`, when the contract has one) and
+    /// evaluates to the clause's `Vec<ArgSpec>`. The clause uses `RawArgs` and
+    /// no handle method is generated; the module owner adds ergonomic spend
+    /// methods in a plain `impl NameHandle` block.
+    Raw(Expr),
 }
 
 struct ClauseField {
     attrs: Vec<Attribute>,
     is_signer: bool,
+    /// `#[from_state]`: the generated handle method omits this argument and
+    /// fills it from the instance's typed state (same-named state field).
+    is_from_state: bool,
     name: Ident,
     ty: Type,
 }
@@ -59,6 +83,7 @@ struct NextDef {
 
 impl Parse for ContractDef {
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        let attrs = input.call(Attribute::parse_outer)?;
         let kw: Ident = input.parse()?;
         if kw != "contract" {
             return Err(syn::Error::new(kw.span(), "expected `contract`"));
@@ -70,6 +95,7 @@ impl Parse for ContractDef {
         braced!(body in input);
 
         let mut params_ty: Option<Type> = None;
+        let mut ctx_ty: Option<Type> = None;
         let mut state_ty: Option<Type> = None;
         let mut ikey: Option<(Ident, Expr)> = None;
         let mut clauses: Vec<ClauseDef> = Vec::new();
@@ -80,6 +106,10 @@ impl Parse for ContractDef {
             match section.to_string().as_str() {
                 "params" => {
                     params_ty = Some(body.parse()?);
+                    body.parse::<Token![;]>()?;
+                }
+                "ctx" => {
+                    ctx_ty = Some(body.parse()?);
                     body.parse::<Token![;]>()?;
                 }
                 "state" => {
@@ -130,10 +160,27 @@ impl Parse for ContractDef {
             validate_tree_names(tree_tokens, &clauses)?;
         }
 
+        // `#[from_state]` fills args from the instance's typed state, so it needs
+        // a `state` section to read from.
+        if state_ty.is_none() {
+            for clause in &clauses {
+                if let ClauseArgsDef::Typed(fields) = &clause.args {
+                    if let Some(f) = fields.iter().find(|f| f.is_from_state) {
+                        return Err(syn::Error::new(
+                            f.name.span(),
+                            "#[from_state] requires a `state <Type>;` section",
+                        ));
+                    }
+                }
+            }
+        }
+
         Ok(ContractDef {
+            attrs,
             name,
             params_ty: params_ty
                 .ok_or_else(|| syn::Error::new(name_span, "missing `params <Type>;`"))?,
+            ctx_ty,
             state_ty,
             ikey,
             clauses,
@@ -207,31 +254,45 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
     let body;
     braced!(body in input);
 
-    let mut fields: Vec<ClauseField> = Vec::new();
+    let mut args: Option<ClauseArgsDef> = None;
     let mut script_expr: Option<Expr> = None;
     let mut next: Option<NextDef> = None;
 
     while !body.is_empty() {
         let section: Ident = body.parse()?;
         match section.to_string().as_str() {
-            "args" => {
+            "args" if body.peek(syn::token::Brace) => {
                 let args_body;
                 braced!(args_body in body);
+                let mut fields: Vec<ClauseField> = Vec::new();
                 while !args_body.is_empty() {
                     let field = args_body.call(Field::parse_named)?;
                     let is_signer = field.attrs.iter().any(|a| a.path().is_ident("signer"));
+                    let is_from_state =
+                        field.attrs.iter().any(|a| a.path().is_ident("from_state"));
+                    if is_signer && is_from_state {
+                        return Err(syn::Error::new_spanned(
+                            &field,
+                            "#[signer(..)] and #[from_state] cannot both be applied to one \
+                             field (signatures are already filled at spend time)",
+                        ));
+                    }
                     let ident = field
                         .ident
                         .clone()
                         .ok_or_else(|| syn::Error::new_spanned(&field, "clause args need names"))?;
+                    // `#[from_state]` only drives handle-method codegen; strip it so
+                    // the emitted struct (and the ClauseArgs derive) never sees it.
                     let attrs = field
                         .attrs
                         .iter()
+                        .filter(|a| !a.path().is_ident("from_state"))
                         .map(expand_signer_shorthand)
                         .collect::<syn::Result<Vec<_>>>()?;
                     fields.push(ClauseField {
                         attrs,
                         is_signer,
+                        is_from_state,
                         name: ident,
                         ty: field.ty.clone(),
                     });
@@ -239,6 +300,19 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                         args_body.parse::<Token![,]>()?;
                     }
                 }
+                args = Some(ClauseArgsDef::Typed(fields));
+            }
+            "args" => {
+                // Raw form: `args raw <expr>;`.
+                let kw: Ident = body.parse()?;
+                if kw != "raw" {
+                    return Err(syn::Error::new(
+                        kw.span(),
+                        "expected `args { .. }` or `args raw <specs-expr>;`",
+                    ));
+                }
+                args = Some(ClauseArgsDef::Raw(body.parse()?));
+                body.parse::<Token![;]>()?;
             }
             "script" => {
                 script_expr = Some(body.parse()?);
@@ -271,7 +345,7 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
 
     Ok(ClauseDef {
         name,
-        fields,
+        args: args.unwrap_or(ClauseArgsDef::Typed(Vec::new())),
         script_expr: script_expr
             .ok_or_else(|| syn::Error::new(name_span, "clause is missing `script <fn>;`"))?,
         next,
@@ -306,6 +380,68 @@ fn to_camel(s: &str) -> String {
 pub fn expand(input: TokenStream) -> TokenStream {
     let def = syn::parse_macro_input!(input as ContractDef);
     codegen(def).into()
+}
+
+/// The `Option<NextOutputsFn>` tokens for one clause: `None` for terminal
+/// clauses, otherwise the typed closure wrapping the user's `next` body. With a
+/// `ctx` section the closure is `move` and captures a clone of the ctx, rebound
+/// as `ctx` inside the body.
+fn next_fn_tokens(
+    clause: &ClauseDef,
+    params_ty: &Type,
+    state_ty: &Type,
+    ctx_ty: Option<&Type>,
+    args_ty: &TokenStream2,
+) -> TokenStream2 {
+    let Some(nd) = &clause.next else {
+        return quote! { ::core::option::Option::None };
+    };
+    let p = &nd.p;
+    let a = &nd.a;
+    let s = nd.s.clone().unwrap_or_else(|| format_ident!("_state"));
+    let block = &nd.body;
+    // The body may evaluate to a Result of Vec<ClauseOutput>, a CtvTemplate, or
+    // a NextOutputs; convert whatever it yields into NextOutputs (all three
+    // implement Into<NextOutputs>). The error type is pinned so a bare `Ok(..)`
+    // body isn't ambiguous between the identity and WitnessError `From`s.
+    let body = quote! {
+        let __result: ::core::result::Result<
+            _,
+            ::mattrs::contracts::ClauseError,
+        > = #block;
+        let __next: ::mattrs::contracts::NextOutputs =
+            ::core::convert::Into::into(__result?);
+        ::core::result::Result::Ok(__next)
+    };
+    let ret = quote! {
+        ::core::result::Result<
+            ::mattrs::contracts::NextOutputs,
+            ::mattrs::contracts::ClauseError,
+        >
+    };
+    match ctx_ty {
+        Some(ctx_ty) => quote! {
+            ::core::option::Option::Some({
+                let __ctx = ctx.clone();
+                ::std::sync::Arc::new(
+                    move |#p: &#params_ty, #a: &#args_ty, #s: ::core::option::Option<&#state_ty>|
+                    -> #ret {
+                        #[allow(unused_variables)]
+                        let ctx: &#ctx_ty = &__ctx;
+                        #body
+                    }
+                )
+            })
+        },
+        None => quote! {
+            ::core::option::Option::Some(::std::sync::Arc::new(
+                |#p: &#params_ty, #a: &#args_ty, #s: ::core::option::Option<&#state_ty>|
+                -> #ret {
+                    #body
+                }
+            ))
+        },
+    }
 }
 
 fn codegen(def: ContractDef) -> TokenStream2 {
@@ -352,16 +488,70 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         },
     };
 
+    // The optional construction context: an extra `new` argument whose value is
+    // handed to the script/spec builder exprs and captured (cloned) by `next`
+    // closures; unlike params it never round-trips through `ParamEncodable`.
+    let ctx_ty = def.ctx_ty.as_ref();
+    // Invoke a script (or raw-args spec) builder expr inside `new`. The `&dyn Fn`
+    // coercion pins the expected type, so closure exprs infer their parameter
+    // types (a bare `(#expr)(&params, ..)` call would not).
+    let call_builder = |expr: &Expr, ret: TokenStream2| -> TokenStream2 {
+        match ctx_ty {
+            Some(c) => quote! {{
+                let __f: &dyn ::core::ops::Fn(&#params_ty, &#c) -> #ret = &(#expr);
+                __f(&params, &ctx)
+            }},
+            None => quote! {{
+                let __f: &dyn ::core::ops::Fn(&#params_ty) -> #ret = &(#expr);
+                __f(&params)
+            }},
+        }
+    };
+
     let mut args_structs: Vec<TokenStream2> = Vec::new();
     let mut clause_locals: Vec<TokenStream2> = Vec::new();
     let mut methods: Vec<TokenStream2> = Vec::new();
 
     for clause in &def.clauses {
         let cname = &clause.name;
+        let script_expr = &clause.script_expr;
+
+        let fields = match &clause.args {
+            // A raw-args clause: runtime witness layout via `RawArgs`, no *Args
+            // struct and no handle method (the module owner writes ergonomic
+            // spend methods on the generated handle instead).
+            ClauseArgsDef::Raw(specs_expr) => {
+                let raw_ty = quote! { ::mattrs::contracts::RawArgs };
+                let next_fn = next_fn_tokens(clause, params_ty, &state_ty, ctx_ty, &raw_ty);
+                let script_call = call_builder(script_expr, quote! { ::bitcoin::ScriptBuf });
+                let specs_call = call_builder(
+                    specs_expr,
+                    quote! { ::std::vec::Vec<::mattrs::contracts::ArgSpec> },
+                );
+                clause_locals.push(quote! {
+                    let #cname: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> =
+                        ::std::sync::Arc::new(
+                            ::mattrs::contracts::StandardClause::<
+                                #params_ty,
+                                #state_ty,
+                                ::mattrs::contracts::RawArgs,
+                            >::new(
+                                ::core::stringify!(#cname).to_string(),
+                                #script_call,
+                                #specs_call,
+                                #next_fn,
+                            ),
+                        );
+                });
+                continue;
+            }
+            ClauseArgsDef::Typed(fields) => fields,
+        };
+
         let args_ident = format_ident!("{}{}Args", name, to_camel(&cname.to_string()));
 
         // --- The typed *Args struct (ClauseArgs is derived) ---
-        let struct_fields = clause.fields.iter().map(|f| {
+        let struct_fields = fields.iter().map(|f| {
             let attrs = &f.attrs;
             let fname = &f.name;
             let fty = &f.ty;
@@ -376,44 +566,15 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         });
 
         // --- The clause object, built inside `Name::new` ---
-        let next_fn = match &clause.next {
-            Some(nd) => {
-                let p = &nd.p;
-                let a = &nd.a;
-                let s = nd.s.clone().unwrap_or_else(|| format_ident!("_state"));
-                let block = &nd.body;
-                // The body may evaluate to a Result of Vec<ClauseOutput>, a
-                // CtvTemplate, or a NextOutputs; convert whatever it yields into
-                // NextOutputs (all three implement Into<NextOutputs>).
-                quote! {
-                    ::core::option::Option::Some(::std::sync::Arc::new(
-                        |#p: &#params_ty, #a: &#args_ident, #s: ::core::option::Option<&#state_ty>|
-                        -> ::core::result::Result<
-                            ::mattrs::contracts::NextOutputs,
-                            ::mattrs::contracts::ClauseError,
-                        > {
-                            // Pin the error type so a bare `Ok(..)` body isn't
-                            // ambiguous between the identity and WitnessError `From`s.
-                            let __result: ::core::result::Result<
-                                _,
-                                ::mattrs::contracts::ClauseError,
-                            > = #block;
-                            let __next: ::mattrs::contracts::NextOutputs =
-                                ::core::convert::Into::into(__result?);
-                            ::core::result::Result::Ok(__next)
-                        }
-                    ))
-                }
-            }
-            None => quote! { ::core::option::Option::None },
-        };
-        let script_expr = &clause.script_expr;
+        let args_ty = quote! { #args_ident };
+        let next_fn = next_fn_tokens(clause, params_ty, &state_ty, ctx_ty, &args_ty);
+        let script_call = call_builder(script_expr, quote! { ::bitcoin::ScriptBuf });
         clause_locals.push(quote! {
             let #cname: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> =
                 ::std::sync::Arc::new(
                     ::mattrs::contracts::StandardClause::<#params_ty, #state_ty, #args_ident>::new(
                         ::core::stringify!(#cname).to_string(),
-                        (#script_expr)(&params),
+                        #script_call,
                         <#args_ident>::arg_specs_for_params(&params),
                         #next_fn,
                     ),
@@ -421,26 +582,59 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         });
 
         // --- The per-clause method on the typed handle ---
-        let method_params = clause.fields.iter().filter(|f| !f.is_signer).map(|f| {
+        // Signer args are filled by the manager at spend time and `#[from_state]`
+        // args from the instance's typed state; the method takes the rest.
+        let method_params = fields
+            .iter()
+            .filter(|f| !f.is_signer && !f.is_from_state)
+            .map(|f| {
+                let fname = &f.name;
+                let fty = &f.ty;
+                quote! { #fname: #fty }
+            });
+        // `Args::new` takes the non-signer fields, in declaration order.
+        let ctor_args = fields.iter().filter(|f| !f.is_signer).map(|f| {
             let fname = &f.name;
-            let fty = &f.ty;
-            quote! { #fname: #fty }
-        });
-        let ctor_args = clause.fields.iter().filter(|f| !f.is_signer).map(|f| {
-            let fname = &f.name;
-            quote! { #fname }
-        });
-        methods.push(quote! {
-            // A clause can have many arguments; the generated method mirrors them.
-            #[allow(clippy::too_many_arguments)]
-            pub fn #cname(&self, #(#method_params),*) -> ::mattrs::manager::SpendBuilder {
-                let args = #args_ident::new(#(#ctor_args),*);
-                self.0.spend_clause(
-                    ::core::stringify!(#cname),
-                    <#args_ident as ::mattrs::contracts::ClauseArgs>::encode_to_witness(&args),
-                )
+            if f.is_from_state {
+                quote! { __state.#fname }
+            } else {
+                quote! { #fname }
             }
         });
+        if fields.iter().any(|f| f.is_from_state) {
+            methods.push(quote! {
+                // A clause can have many arguments; the generated method mirrors them.
+                #[allow(clippy::too_many_arguments)]
+                pub fn #cname(
+                    &self,
+                    #(#method_params),*
+                ) -> ::core::result::Result<
+                    ::mattrs::manager::SpendBuilder,
+                    ::mattrs::manager::MissingStateError,
+                > {
+                    let __state = self.state().ok_or(::mattrs::manager::MissingStateError {
+                        contract: ::core::stringify!(#name),
+                    })?;
+                    let args = #args_ident::new(#(#ctor_args),*);
+                    ::core::result::Result::Ok(self.0.spend_clause(
+                        ::core::stringify!(#cname),
+                        <#args_ident as ::mattrs::contracts::ClauseArgs>::encode_to_witness(&args),
+                    ))
+                }
+            });
+        } else {
+            methods.push(quote! {
+                // A clause can have many arguments; the generated method mirrors them.
+                #[allow(clippy::too_many_arguments)]
+                pub fn #cname(&self, #(#method_params),*) -> ::mattrs::manager::SpendBuilder {
+                    let args = #args_ident::new(#(#ctor_args),*);
+                    self.0.spend_clause(
+                        ::core::stringify!(#cname),
+                        <#args_ident as ::mattrs::contracts::ClauseArgs>::encode_to_witness(&args),
+                    )
+                }
+            });
+        }
     }
 
     // `fund` and `address` differ: augmented contracts need the state.
@@ -521,18 +715,33 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         }
     };
 
+    // The ctx-dependent pieces of the contract struct and its `new`.
+    let (ctx_struct_field, ctx_new_param, ctx_self_field) = match ctx_ty {
+        Some(c) => (
+            quote! { pub ctx: #c, },
+            quote! { , ctx: #c },
+            quote! { ctx, },
+        ),
+        None => (quote! {}, quote! {}, quote! {}),
+    };
+
+    let attrs = &def.attrs;
+
     quote! {
         #(#args_structs)*
 
+        #(#attrs)*
         /// Contract template (params + built taproot contract), generated by `contract!`.
         pub struct #name {
             pub params: #params_ty,
+            #ctx_struct_field
             pub contract: #contract_ty,
         }
 
         impl #name {
-            /// Build the contract from its params.
-            pub fn new(params: #params_ty) -> Self {
+            /// Build the contract from its params (and, if the contract declares
+            /// one, its construction context).
+            pub fn new(params: #params_ty #ctx_new_param) -> Self {
                 #ikey_init
                 #(#clause_locals)*
                 #tree_init
@@ -542,7 +751,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                     &params,
                     tree,
                 );
-                Self { params, contract }
+                Self { params, #ctx_self_field contract }
             }
 
             /// The contract as a type-erased `ErasedContract`.

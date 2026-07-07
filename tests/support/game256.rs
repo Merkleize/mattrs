@@ -26,8 +26,8 @@ use mattrs_derive::{ContractParams, ContractState};
 // binary uses a subset, so per-binary "unused import" warnings are structural.
 #[allow(unused_imports)]
 pub use mattrs::fraud::{
-    Bisect1, Bisect1Handle, Bisect1State, Bisect2, Bisect2Handle, Bisect2State, BisectParams,
-    Computer, Leaf, LeafFactory, LeafHandle, LeafParams, LeafState,
+    Bisect1, Bisect1Handle, Bisect1State, Bisect2, Bisect2Handle, Bisect2State, BisectCtx,
+    BisectParams, Computer, Leaf, LeafFactory, LeafHandle, LeafParams, LeafState,
 };
 use mattrs::script_helpers::{
     check_input_contract, check_output_contract, dup, merkle_root, timeout_sig_script,
@@ -53,24 +53,32 @@ pub fn compute2x() -> Computer {
 /// The per-step [`Leaf`] contract: every step re-runs [`compute2x`], so the step
 /// index is ignored.
 pub fn leaf_factory(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> LeafFactory {
-    Arc::new(move |_i| Leaf::new(LeafParams { alice_pk, bob_pk }, &compute2x()))
+    Arc::new(move |_i| Leaf::new(LeafParams { alice_pk, bob_pk }, compute2x()))
 }
 
 /// A game256 [`Leaf`] (the single disputed step).
 pub fn leaf(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> Leaf {
-    Leaf::new(LeafParams { alice_pk, bob_pk }, &compute2x())
+    Leaf::new(LeafParams { alice_pk, bob_pk }, compute2x())
+}
+
+/// The game256 [`BisectCtx`]: [`leaf_factory`] leaves and the standard timeout.
+fn bisect_ctx(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> BisectCtx {
+    BisectCtx {
+        leaf_factory: leaf_factory(alice_pk, bob_pk),
+        forfait_timeout: FORFAIT_TIMEOUT,
+    }
 }
 
 /// A game256 [`Bisect1`] over the given step range.
 pub fn bisect1(params: BisectParams) -> Bisect1 {
-    let lf = leaf_factory(params.alice_pk, params.bob_pk);
-    Bisect1::new(params, &lf, FORFAIT_TIMEOUT)
+    let ctx = bisect_ctx(params.alice_pk, params.bob_pk);
+    Bisect1::new(params, ctx)
 }
 
 /// A game256 [`Bisect2`] over the given step range.
 pub fn bisect2(params: BisectParams) -> Bisect2 {
-    let lf = leaf_factory(params.alice_pk, params.bob_pk);
-    Bisect2::new(params, &lf, FORFAIT_TIMEOUT)
+    let ctx = bisect_ctx(params.alice_pk, params.bob_pk);
+    Bisect2::new(params, ctx)
 }
 
 // ============================================================================

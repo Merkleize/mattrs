@@ -1151,6 +1151,32 @@ impl std::fmt::Display for WrongContractType {
 
 impl std::error::Error for WrongContractType {}
 
+/// A spend's state-bound witness fields could not be derived because the
+/// instance carries no (or a differently-typed) logical state.
+///
+/// Returned by typed-handle methods that fill part of their clause's witness
+/// from the instance's expanded state (e.g. the `contract!` DSL's
+/// `#[from_state]` args) — which the framework materializes on every executed
+/// or observed transition — so this only occurs on instances that were
+/// constructed by hand without their state.
+#[derive(Debug, Clone)]
+pub struct MissingStateError {
+    /// The contract whose state was needed.
+    pub contract: &'static str,
+}
+
+impl std::fmt::Display for MissingStateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} instance carries no logical state to derive the spend from",
+            self.contract
+        )
+    }
+}
+
+impl std::error::Error for MissingStateError {}
+
 /// A handle to a contract instance.
 ///
 /// Cheap to clone (it is an `Rc` inside). Unlike the old design it does not borrow
