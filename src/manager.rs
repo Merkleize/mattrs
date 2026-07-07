@@ -1015,53 +1015,67 @@ impl ContractManager {
         outpoint: OutPoint,
         window: Option<Duration>,
     ) -> Result<Transaction, ManagerError> {
-        // Scan blocks starting where the funding transaction confirmed (or the
-        // next block, if it is still unconfirmed).
-        let mut next_height = {
-            let info = self.rpc.get_raw_transaction_info(&outpoint.txid, None)?;
-            match info.blockhash {
-                Some(hash) => self.rpc.get_block_header_info(&hash)?.height as u64,
-                None => self.rpc.get_block_count()? + 1,
-            }
-        };
-
+        let mut next_height = spend_scan_start(&self.rpc, outpoint)?;
         poll_until(window, || {
-            // 1. The mempool.
-            let query = serde_json::json!([{
-                "txid": outpoint.txid.to_string(),
-                "vout": outpoint.vout,
-            }]);
-            let res: serde_json::Value = self.rpc.call("gettxspendingprevout", &[query])?;
-            if let Some(txid_str) = res
-                .get(0)
-                .and_then(|entry| entry.get("spendingtxid"))
-                .and_then(|v| v.as_str())
-            {
-                let txid: Txid = txid_str
-                    .parse()
-                    .map_err(|e| ManagerError::Other(format!("bad spendingtxid: {}", e)))?;
-                return Ok(Some(self.rpc.get_raw_transaction(&txid, None)?));
-            }
-
-            // 2. Blocks mined since the last look.
-            let tip = self.rpc.get_block_count()?;
-            while next_height <= tip {
-                let hash = self.rpc.get_block_hash(next_height)?;
-                let block = self.rpc.get_block(&hash)?;
-                if let Some(tx) = block
-                    .txdata
-                    .iter()
-                    .find(|tx| tx.input.iter().any(|i| i.previous_output == outpoint))
-                {
-                    return Ok(Some(tx.clone()));
-                }
-                next_height += 1;
-            }
-
-            Ok(None)
+            find_spending_tx_once(&self.rpc, outpoint, &mut next_height)
         })?
         .ok_or(ManagerError::SpendNotFound(outpoint))
     }
+}
+
+/// The block height where a scan for spends of `outpoint` should start: where
+/// the funding transaction confirmed (or the next block, if it is still
+/// unconfirmed).
+pub(crate) fn spend_scan_start(rpc: &Client, outpoint: OutPoint) -> Result<u64, ManagerError> {
+    let info = rpc.get_raw_transaction_info(&outpoint.txid, None)?;
+    Ok(match info.blockhash {
+        Some(hash) => rpc.get_block_header_info(&hash)?.height as u64,
+        None => rpc.get_block_count()? + 1,
+    })
+}
+
+/// A single, non-blocking look for a transaction spending `outpoint`: the
+/// mempool first (`gettxspendingprevout`), then the blocks from `*next_height`
+/// to the tip (the cursor advances past the blocks already scanned; seed it
+/// with [`spend_scan_start`]).
+pub(crate) fn find_spending_tx_once(
+    rpc: &Client,
+    outpoint: OutPoint,
+    next_height: &mut u64,
+) -> Result<Option<Transaction>, ManagerError> {
+    // 1. The mempool.
+    let query = serde_json::json!([{
+        "txid": outpoint.txid.to_string(),
+        "vout": outpoint.vout,
+    }]);
+    let res: serde_json::Value = rpc.call("gettxspendingprevout", &[query])?;
+    if let Some(txid_str) = res
+        .get(0)
+        .and_then(|entry| entry.get("spendingtxid"))
+        .and_then(|v| v.as_str())
+    {
+        let txid: Txid = txid_str
+            .parse()
+            .map_err(|e| ManagerError::Other(format!("bad spendingtxid: {}", e)))?;
+        return Ok(Some(rpc.get_raw_transaction(&txid, None)?));
+    }
+
+    // 2. Blocks mined since the last look.
+    let tip = rpc.get_block_count()?;
+    while *next_height <= tip {
+        let hash = rpc.get_block_hash(*next_height)?;
+        let block = rpc.get_block(&hash)?;
+        if let Some(tx) = block
+            .txdata
+            .iter()
+            .find(|tx| tx.input.iter().any(|i| i.previous_output == outpoint))
+        {
+            return Ok(Some(tx.clone()));
+        }
+        *next_height += 1;
+    }
+
+    Ok(None)
 }
 
 /// An RPC client for a local regtest node, for tests, examples and demos. The
@@ -1234,6 +1248,14 @@ impl InstanceHandle {
     /// introspection and display.
     pub fn contract_name(&self) -> &'static str {
         self.instance.borrow().contract().contract_name()
+    }
+
+    /// The contract's encoded parameters (contracts are self-describing).
+    /// Decode them with the contract's typed params struct
+    /// ([`ContractParams::decode`](crate::contracts::ContractParams::decode));
+    /// the `contract!`-generated handles expose this as a typed `params()`.
+    pub fn params_bytes(&self) -> Vec<u8> {
+        self.instance.borrow().contract().params_bytes().to_vec()
     }
 
     /// The name of the clause that spent this instance (None until spent).
