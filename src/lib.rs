@@ -55,6 +55,7 @@ pub mod inspector;
 pub mod macros;
 pub mod manager;
 pub mod merkle;
+pub mod protocol;
 pub mod report;
 pub mod script_helpers;
 pub mod script_utils;

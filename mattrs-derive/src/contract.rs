@@ -783,6 +783,16 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 &self.0
             }
 
+            /// The instance's decoded contract parameters (contracts are
+            /// self-describing).
+            pub fn params(
+                &self,
+            ) -> ::core::result::Result<#params_ty, ::mattrs::contracts::WitnessError> {
+                <#params_ty as ::mattrs::contracts::ContractParams>::decode(
+                    &self.0.params_bytes(),
+                )
+            }
+
             #state_fn
 
             #(#methods)*
@@ -794,13 +804,26 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             fn try_from(
                 handle: ::mattrs::manager::InstanceHandle,
             ) -> ::core::result::Result<Self, Self::Error> {
-                if handle.contract_type_id() == ::core::any::TypeId::of::<#contract_ty>() {
+                // The name breaks ties between contracts erasing to the same
+                // `StandardP2TR`/`StandardAugmentedP2TR` instantiation.
+                if handle.contract_type_id() == ::core::any::TypeId::of::<#contract_ty>()
+                    && handle.contract_name() == ::core::stringify!(#name)
+                {
                     ::core::result::Result::Ok(#handle_ident(handle))
                 } else {
                     ::core::result::Result::Err(::mattrs::manager::WrongContractType {
                         expected: ::core::stringify!(#name),
                     })
                 }
+            }
+        }
+
+        impl ::mattrs::protocol::TypedContract for #name {
+            type Handle = #handle_ident;
+            const NAME: &'static str = ::core::stringify!(#name);
+
+            fn kind_id() -> ::core::any::TypeId {
+                ::core::any::TypeId::of::<#contract_ty>()
             }
         }
     }
