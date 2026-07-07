@@ -40,6 +40,8 @@
 //!
 //! As in the pymatt reference, bonds/slashing are not implemented.
 
+pub mod roles;
+
 use std::sync::Arc;
 
 use bitcoin::hashes::{sha256, Hash};
