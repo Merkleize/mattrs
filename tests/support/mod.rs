@@ -9,6 +9,8 @@
 #[allow(dead_code)]
 pub mod game256;
 #[allow(dead_code)]
+pub mod game256_roles;
+#[allow(dead_code)]
 pub mod minivault;
 #[allow(dead_code)]
 pub mod ram;
