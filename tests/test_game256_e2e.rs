@@ -1,153 +1,166 @@
 //! game256 fraud-proof challenge, end to end on a regtest node.
 //!
-//! Ports pymatt's `tests/test_fraud.py::test_fraud_proof_full`: Alice claims a
-//! wrong result for the 8-step doubling computation, Bob challenges her, and
-//! the bisection protocol narrows the dispute — every transition validated by
-//! the node's script interpreter — down to the single step where Alice cheated,
-//! which Bob wins by re-running it on-chain.
+//! Ports pymatt's `tests/test_fraud.py::test_fraud_proof_full` onto the
+//! protocol layer: Alice claims a wrong result for the 8-step doubling
+//! computation, Bob challenges her, and the bisection narrows the dispute —
+//! every transition validated by the node's script interpreter — down to the
+//! single step where Alice cheated, which Bob wins by re-running it on-chain.
+//!
+//! Unlike the offline `test_game256_protocol` (same roles over a `LocalChain`),
+//! this runs the two parties as they would deploy: separate `ContractManager`s
+//! and `RpcChain`s against the node, Alice funding the game and Bob tracking
+//! the outpoint he learned out-of-band, each `Runner` following the other's
+//! transactions purely through chain observation. Neither party's code spells
+//! out a bisection step: the game roles mount `fraud::roles` via
+//! `Role::embed`, and the whole dispute below `start_challenge` is driven by
+//! the library component.
 
 mod support;
 
-use bitcoin::{Amount, TxOut};
-use bitcoincore_rpc::RpcApi;
-use mattrs::fraud::trace;
+use std::rc::Rc;
+use std::time::Duration;
+
+use bitcoin::key::Secp256k1;
+use bitcoin::{Amount, ScriptBuf, XOnlyPublicKey};
+use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
 use mattrs::manager::ContractManager;
-use mattrs::script_utils::{bn2vch, commit_int};
-use mattrs::signer::HotSigner;
-use support::game256::{
-    Bisect1Handle, Bisect2Handle, G256Params, G256S0, G256S1Handle, G256S2Handle, LeafHandle,
-};
+use mattrs::protocol::{Progress, RpcChain, Runner};
 use mattrs::report::Report;
+
+use support::game256::{G256Params, G256S0};
+use support::game256_roles::{
+    alice_game_role, bob_game_role, cheating_vals, fill_fraud_data, game_fraud_data, honest_vals,
+    AliceGameData, BobGameData, GameOutcome,
+};
 use support::testkit::{alice_pk, alice_xpriv, bob_pk, bob_xpriv, regtest_client, report_spend};
 
 const AMOUNT: u64 = 20_000;
 
+fn p2tr(pk: XOnlyPublicKey) -> ScriptBuf {
+    ScriptBuf::new_p2tr(&Secp256k1::new(), pk, None)
+}
+
 #[test]
 #[ignore = "requires a running regtest bitcoind"]
 fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
-    // The claimed step values (x_0 .. x_8). Bob doubles honestly; Alice goes
-    // wrong at step 6 (64 -> 127) and doubles consistently from there.
-    let alice_vals: [i64; 9] = [2, 4, 8, 16, 32, 64, 127, 254, 508];
-    let bob_vals: [i64; 9] = [2, 4, 8, 16, 32, 64, 128, 256, 512];
-    let h_a: Vec<[u8; 32]> = alice_vals.iter().map(|&v| commit_int(v)).collect();
-    let h_b: Vec<[u8; 32]> = bob_vals.iter().map(|&v| commit_int(v)).collect();
-    let n = 8usize;
-
-    let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
-    let mut report = Report::new();
     let params = G256Params {
         alice_pk: alice_pk(),
         bob_pk: bob_pk(),
     };
 
-    // The game stages: Bob picks x, Alice claims y (fraudulently), Bob starts
-    // the challenge with his own result z and trace commitment.
-    let s0 = G256S0::new(params).fund(&mut manager, Amount::from_sat(AMOUNT))?;
-    let s1: G256S1Handle = s0
-        .choose(alice_vals[0])
-        .sign(HotSigner::new(bob_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+    // Alice funds the game with the pot...
+    let mut alice_manager =
+        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let s0 = G256S0::new(params.clone()).fund(&mut alice_manager, Amount::from_sat(AMOUNT))?;
+    let alice_entry = s0.handle().clone();
+    let outpoint = alice_entry.outpoint().expect("just funded");
 
-    let t_a = trace(&h_a, 0, n - 1);
-    let t_b = trace(&h_b, 0, n - 1);
-    let s2: G256S2Handle = s1
-        .reveal(t_a, alice_vals[n], alice_vals[0])
-        .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+    // ...and Bob, given the outpoint out-of-band, verifies and tracks it.
+    let mut bob_manager =
+        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let bob_entry =
+        bob_manager.track_instance(G256S0::new(params).as_erased(), None, outpoint)?;
 
-    let mut b1: Bisect1Handle = s2
-        .start_challenge(t_a, alice_vals[n], alice_vals[0], bob_vals[n], t_b)
-        .sign(HotSigner::new(bob_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
-    report_spend(&mut report, "Game setup", "choose (Bob picks x)", s0.handle());
-    report_spend(&mut report, "Game setup", "reveal (Alice claims y)", s1.handle());
-    report_spend(&mut report, "Game setup", "start_challenge (Bob disputes)", s2.handle());
-
-    // The bisection rounds: at range [i, j], Alice reveals her midstate and
-    // sub-traces (checked against her committed trace); Bob then recurses into
-    // the half whose midstate they disagree on, until a single step remains.
-    let (mut i, mut j) = (0usize, 7usize);
-    let mut path = Vec::new();
-    let leaf: LeafHandle = loop {
-        // Half the (power-of-two) range size: the children cover [i, i+m-1]
-        // and [i+m, j], and h[i+m] is the disputed midstate commitment.
-        let size = j - i + 1;
-        let m = size / 2;
-
-        // The committed range endpoints and traces come from the instance
-        // state; Alice only supplies her midstate and sub-traces.
-        let b2: Bisect2Handle = b1
-            .alice_reveal(
-                h_a[i + m],
-                trace(&h_a, i, i + m - 1),
-                trace(&h_a, i + m, j),
-            )?
-            .sign(HotSigner::new(alice_xpriv()))
-            .exec_one(&mut manager)?
-            .try_into()?;
-
-        let go_left = h_a[i + m] != h_b[i + m];
-        path.push(if go_left { 'L' } else { 'R' });
-        let builder = if go_left {
-            b2.bob_reveal_left(h_b[i + m], trace(&h_b, i, i + m - 1), trace(&h_b, i + m, j))?
-        } else {
-            b2.bob_reveal_right(h_b[i + m], trace(&h_b, i, i + m - 1), trace(&h_b, i + m, j))?
-        };
-        let child = builder
-            .sign(HotSigner::new(bob_xpriv()))
-            .exec_one(&mut manager)?;
-        report_spend(
-            &mut report,
-            "Bisection",
-            &format!("alice_reveal [{i}..{j}]"),
-            b1.handle(),
-        );
-        report_spend(
-            &mut report,
-            "Bisection",
-            &format!(
-                "bob_reveal_{} [{i}..{j}]",
-                if go_left { "left" } else { "right" }
-            ),
-            b2.handle(),
-        );
-
-        if go_left {
-            j = i + m - 1;
-        } else {
-            i += m;
-        }
-        if i == j {
-            break child.try_into()?;
-        }
-        b1 = child.try_into()?;
+    // The parties: Alice will cheat at step 5, Bob doubles honestly.
+    let alice_data = AliceGameData {
+        claim: Box::new(cheating_vals),
+        fraud: game_fraud_data(alice_xpriv(), p2tr(alice_pk())),
+        xpriv: alice_xpriv(),
+    };
+    let x = 2;
+    let vals = honest_vals(x);
+    let mut fraud = game_fraud_data(bob_xpriv(), p2tr(bob_pk()));
+    fill_fraud_data(&mut fraud, &vals);
+    let bob_data = BobGameData {
+        x,
+        vals,
+        fraud,
+        xpriv: bob_xpriv(),
     };
 
-    // The dispute honed in on exactly the step where Alice cheated.
-    assert_eq!(path, ['R', 'L', 'R']);
-    assert_eq!((i, j), (5, 5));
-    assert_eq!(alice_vals[i], bob_vals[i]);
-    assert_ne!(alice_vals[i + 1], bob_vals[i + 1]);
-
-    // Only honest Bob can re-run step 5 (64 -> 128) and take the pot.
-    let dest = manager.rpc().get_new_address(None, None)?.assume_checked();
-    leaf.bob_reveal(vec![bn2vch(bob_vals[i])])?
-        .sign(HotSigner::new(bob_xpriv()))
-        .outputs(vec![TxOut {
-            script_pubkey: dest.script_pubkey(),
-            value: Amount::from_sat(AMOUNT),
-        }])
-        .exec_none(&mut manager)?;
-    report_spend(
-        &mut report,
-        "Leaf",
-        &format!("bob_reveal (re-run step {i} on-chain)"),
-        leaf.handle(),
+    let mut alice = Runner::new(
+        alice_manager,
+        Rc::new(RpcChain::new(regtest_client("testwallet"))),
+        alice_game_role(),
+        alice_data,
+        alice_entry,
     );
+    let mut bob = Runner::new(
+        bob_manager,
+        Rc::new(RpcChain::new(regtest_client("testwallet"))),
+        bob_game_role(),
+        bob_data,
+        bob_entry.clone(),
+    );
+
+    // Interleave the two parties until both resolve (the happy path lives in
+    // the mempool; nothing needs mining).
+    let mut a_out = None;
+    let mut b_out = None;
+    for _ in 0..600 {
+        if a_out.is_none() {
+            if let Progress::Done(o) = alice.step()? {
+                a_out = Some(o);
+            }
+        }
+        if b_out.is_none() {
+            if let Progress::Done(o) = bob.step()? {
+                b_out = Some(o);
+            }
+        }
+        if a_out.is_some() && b_out.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Both parties independently conclude: Bob won the on-chain re-run of
+    // exactly the step where Alice cheated (64 -> 128, step 5).
+    let expected = GameOutcome::Fraud(FraudOutcome {
+        winner: FraudWinner::Bob,
+        resolution: FraudResolution::LeafAdjudicated { step: 5 },
+    });
+    assert_eq!(a_out, Some(expected));
+    assert_eq!(b_out, Some(expected));
+
+    // The dispute honed in through the expected bisection path (R, L, R), and
+    // the pot went to Bob.
+    let mut path = Vec::new();
+    let mut report = Report::new();
+    let mut current = bob_entry;
+    loop {
+        let Some(clause) = current.clause_name() else {
+            break;
+        };
+        let section = match current.contract_name() {
+            "G256S0" | "G256S1" | "G256S2" => "Game setup",
+            "Leaf" => "Leaf",
+            _ => "Bisection",
+        };
+        report_spend(
+            &mut report,
+            section,
+            &format!("{} ({})", clause, current.contract_name()),
+            &current,
+        );
+        if current.contract_name() == "Bisect2" {
+            path.push(match clause.as_str() {
+                "bob_reveal_left" => 'L',
+                _ => 'R',
+            });
+        }
+        let mut outputs = current.outputs();
+        if outputs.is_empty() {
+            break;
+        }
+        current = outputs.remove(0);
+    }
+    assert_eq!(path, ['R', 'L', 'R']);
+    assert_eq!(current.contract_name(), "Leaf");
+    assert_eq!(current.clause_name().as_deref(), Some("bob_reveal"));
+    let payout = current.spending_tx().expect("leaf adjudicated");
+    assert_eq!(payout.output[0].script_pubkey, p2tr(bob_pk()));
+    assert_eq!(payout.output[0].value, Amount::from_sat(AMOUNT));
 
     report.finalize("reports/report_game256.md");
     Ok(())

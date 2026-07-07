@@ -26,28 +26,16 @@ use mattrs::testutil::{fund_fake, offline_client};
 
 use support::game256::{G256Params, G256S0, FORFAIT_TIMEOUT};
 use support::game256_roles::{
-    alice_game_role, bob_game_role, fill_fraud_data, game_fraud_data, honest_vals, AliceGameData,
-    BobGameData, GameOutcome,
+    alice_game_role, bob_game_role, cheating_vals, fill_fraud_data, game_fraud_data, honest_vals,
+    AliceGameData, BobGameData, GameOutcome,
 };
-use support::testkit::{alice_pk, alice_xpriv, bob_pk, bob_xpriv};
+use support::testkit::{alice_pk, alice_xpriv, bob_pk, bob_xpriv, walk_tip};
 
 const AMOUNT: u64 = 20_000;
 const SEED: u8 = 77;
 
 fn p2tr(pk: XOnlyPublicKey) -> ScriptBuf {
     ScriptBuf::new_p2tr(&Secp256k1::new(), pk, None)
-}
-
-/// Alice's claim in the fraud tests: honest doubling gone wrong at step 5
-/// (64 -> 127 instead of 128), then doubled consistently — the reference
-/// scenario of the regtest e2e test.
-fn cheating_vals(x: i64) -> Vec<i64> {
-    let mut vals = honest_vals(x);
-    vals[6] -= 1;
-    for k in 7..vals.len() {
-        vals[k] = vals[k - 1] * 2;
-    }
-    vals
 }
 
 /// Two runners over twin fake-funded `G256S0` entries and a shared chain.
@@ -138,19 +126,6 @@ fn drive(
         }
     }
     (a_out, b_out)
-}
-
-/// Follow the single-token spend chain from `entry` to its last instance.
-fn walk_tip(entry: &InstanceHandle) -> InstanceHandle {
-    let mut current = entry.clone();
-    loop {
-        let mut outputs = current.outputs();
-        if outputs.is_empty() {
-            return current;
-        }
-        assert_eq!(outputs.len(), 1, "game256 is a single-token protocol");
-        current = outputs.remove(0);
-    }
 }
 
 #[test]

@@ -88,3 +88,17 @@ pub fn report_spend(report: &mut Report, section: &str, title: &str, handle: &In
     let tx = handle.spending_tx().expect("instance not spent");
     report.write_tx(section, title, &tx);
 }
+
+/// Follow a single-token spend chain from `entry` to its last instance (the
+/// first one with no materialized children).
+pub fn walk_tip(entry: &InstanceHandle) -> InstanceHandle {
+    let mut current = entry.clone();
+    loop {
+        let mut outputs = current.outputs();
+        match outputs.len() {
+            0 => return current,
+            1 => current = outputs.remove(0),
+            n => panic!("walk_tip expects a single-token chain, found {n} children"),
+        }
+    }
+}

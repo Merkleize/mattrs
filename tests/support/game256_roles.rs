@@ -101,6 +101,18 @@ pub fn honest_vals(x: i64) -> Vec<i64> {
     vals
 }
 
+/// The reference fraud scenario (pymatt's `test_fraud_proof_full`): honest
+/// doubling gone wrong at step 5 (`64 -> 127` instead of `128`), doubled
+/// consistently from there.
+pub fn cheating_vals(x: i64) -> Vec<i64> {
+    let mut vals = honest_vals(x);
+    vals[6] -= 1;
+    for k in 7..vals.len() {
+        vals[k] = vals[k - 1] * 2;
+    }
+    vals
+}
+
 /// The whole pot, paid to `payout` (zero fee, as everywhere on regtest).
 fn pot(handle: &InstanceHandle, payout: &ScriptBuf) -> Result<Vec<TxOut>, ProtocolError> {
     let prevout = handle.prevout().ok_or(ManagerError::NotFunded)?;
