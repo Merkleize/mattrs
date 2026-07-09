@@ -77,9 +77,11 @@ A **runner** drives a role from an entry instance to its outcome: it dispatches 
 
 **Protocols compose.** A whole protocol — its contracts, roles, and outcome type — is a reusable component: `Role::embed` mounts a sub-protocol's role inside a larger protocol's, mapping its outcomes into the outer outcome type. The embedder never handles the sub-protocol's internal states. The bisection fraud proof ([`mattrs::fraud::roles`](../src/fraud/roles.rs)) ships this way: the game256 protocol ([`tests/support/game256_roles.rs`](../tests/support/game256_roles.rs)) hands off on-chain with `Bisect1::state_output_script` / `entry_output` and mounts `fraud::roles::{alice,bob}_role` — the whole dispute below `start_challenge` runs without the game code naming a single bisection state.
 
+**Protocols fork.** A clause can produce several covenant children — the vault's `trigger_and_revault` splits off a revaulted `Vault` next to the `Unvaulting` — and the runner then follows each child as its own token, with its own turn-taking and timeout deadline, resolving one outcome per token (`run()` returns them all; `outcomes()` peeks at partial results mid-run). Every child of a spend must be either handled or explicitly `ignore`d by the role: an unexpected contract is a loud error, never a silently orphaned branch. The vault roles ([`tests/support/vault_roles.rs`](../tests/support/vault_roles.rs)) drive this — an owner withdrawing both branches of a split, and a keyless watchtower sweeping unsanctioned unvaultings while its other tokens keep watching.
+
 A complete two-party example is the RPS demo ([`examples/rps/`](../examples/rps/)): the roles live next to the contracts, the demo drives them over RPC, and the offline tests replay the very same roles over a `LocalChain`.
 
-> **Scope**: a role currently follows a single live token (one UTXO at a time). Protocols that fork into several concurrently-live UTXOs per party, or batch several inputs into one transaction, are future extensions of the runner.
+> **Scope**: each action spends a single token's UTXO; transactions batching several tokens as inputs are a future extension of the runner.
 
 ## Notation
 

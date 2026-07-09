@@ -31,7 +31,9 @@
 //! Contracts define what the chain *allows*; the [`protocol`] layer defines what
 //! each party *does*: a [`Role`](protocol::Role) maps every contract state to the
 //! transaction the party sends there (or watches for, with an optional timeout
-//! fallback), and a [`Runner`](protocol::Runner) drives it against the chain.
+//! fallback), and a [`Runner`](protocol::Runner) drives it against the chain —
+//! following a spend that forks into several covenant children as concurrent
+//! tokens, one outcome per token (see `tests/support/vault_roles.rs`).
 //! Whole protocols compose: [`Role::embed`](protocol::Role::embed) mounts a
 //! sub-protocol's roles (e.g. [`fraud::roles`]) inside a larger one, mapping its
 //! outcomes — see `tests/support/game256_roles.rs`.
