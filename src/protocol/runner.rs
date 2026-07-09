@@ -11,6 +11,7 @@ use super::{Action, ChainView, ContractKey, ProtocolError, Role, StepCtx};
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What one [`Runner::step`] achieved.
+#[derive(Debug)]
 pub enum Progress<O> {
     /// Nothing happened (waiting on the counterparty); poll again later.
     Waiting,

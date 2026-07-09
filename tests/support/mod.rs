@@ -26,3 +26,5 @@ pub mod testkit;
 #[allow(dead_code)]
 #[path = "../../examples/vault/contracts.rs"]
 pub mod vault;
+#[allow(dead_code)]
+pub mod vault_roles;
