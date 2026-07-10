@@ -173,7 +173,7 @@ fn run_alice(
         r_a,
         before_adjudicating: Some(Box::new(|m_b, result| {
             println!("Bob played {}", move_str(m_b));
-            println!("Outcome: {}", clause_of(result));
+            println!("Outcome: {}", clause_of(result).name());
             wait_for_enter("Press ENTER to broadcast the adjudication transaction...");
         })),
     };
@@ -182,7 +182,7 @@ fn run_alice(
     let outcome = Runner::new(manager, chain, alice_role(), data, entry).run_one()?;
     println!(
         "Game over: {} (pot: {} sats)",
-        clause_of(outcome.result),
+        clause_of(outcome.result).name(),
         2 * DEFAULT_STAKE
     );
     Ok(())
@@ -248,7 +248,7 @@ fn run_bob(
     println!("Alice played {}", move_str(outcome.m_a));
     println!(
         "Game over: {} (pot: {} sats)",
-        clause_of(outcome.result),
+        clause_of(outcome.result).name(),
         2 * DEFAULT_STAKE
     );
     Ok(())

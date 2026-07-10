@@ -24,8 +24,10 @@ use mattrs::protocol::{Action, ProtocolError, Role};
 use mattrs::script_utils::{bn2vch, commit_int, vch2bn};
 use mattrs::signer::HotSigner;
 
-use super::game256::{G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Handle,
-    FORFAIT_TIMEOUT};
+use super::game256::{
+    G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Clause, G256S2Handle,
+    FORFAIT_TIMEOUT,
+};
 
 /// How the game ended, from one party's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,14 +188,12 @@ pub fn bob_game_role() -> Role<BobGameData, GameOutcome> {
                 .sign(HotSigner::new(d.xpriv));
             Ok(Action::Send(builder))
         })
-        .on_settled::<G256S2, _>(|_d, h: G256S2Handle, _cx| {
-            match h.handle().clause_name().as_deref() {
-                Some("withdraw") => Ok(GameOutcome::AliceWithdrew),
-                other => Err(ProtocolError::Other(format!(
-                    "unexpected terminal clause {:?} on G256S2",
-                    other
-                ))),
-            }
+        .on_settled::<G256S2, _>(|_d, h: G256S2Handle, _cx| match h.spent_clause() {
+            Some(G256S2Clause::Withdraw) => Ok(GameOutcome::AliceWithdrew),
+            other => Err(ProtocolError::Other(format!(
+                "unexpected terminal clause {:?} on G256S2",
+                other
+            ))),
         })
         .embed(
             fraud_bob_role(),

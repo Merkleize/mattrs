@@ -27,7 +27,8 @@ use crate::protocol::{Action, ProtocolError, Role, StepCtx};
 use crate::signer::HotSigner;
 
 use super::{
-    trace, Bisect1, Bisect1Handle, Bisect2, Bisect2Handle, BisectParams, Leaf, LeafHandle,
+    trace, Bisect1, Bisect1Clause, Bisect1Handle, Bisect2, Bisect2Clause, Bisect2Handle,
+    BisectParams, Leaf, LeafClause, LeafHandle,
 };
 
 /// The party a fraud-proof outcome favors.
@@ -125,77 +126,83 @@ impl FraudPartyData {
 /// Alice's (the claimant's) role: reveal at [`Bisect1`], watch [`Bisect2`]
 /// with a forfait fallback, re-run the disputed step at the [`Leaf`].
 pub fn alice_role() -> Role<FraudPartyData, FraudOutcome> {
-    Role::new()
-        .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
-            let (h_mid, t_left, t_right) = d.reveal_args(&h.params()?);
-            let builder = h
-                .alice_reveal(h_mid, t_left, t_right)?
-                .sign(HotSigner::new(d.xpriv));
-            Ok(Action::Send(builder))
-        })
-        .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
-            let p = h.params()?;
-            wait_or_forfait(d, h.forfait(), h.handle(), FraudWinner::Alice, &p)
-        })
-        .on::<Leaf, _>(|d, h: LeafHandle, cx| {
-            let step = leaf_step(cx)?;
-            if d.honest_at(step) {
-                let builder = h.alice_reveal(d.xs[step as usize].clone())?;
-                Ok(win_leaf(d, builder, h.handle(), FraudWinner::Alice, step)?)
-            } else {
-                // Our claim cannot survive this step; the counterparty's
-                // reveal will settle it.
-                Ok(Action::Wait)
-            }
-        })
-        .on_settled::<Leaf, _>(|_d, h: LeafHandle, cx| settled_leaf(h.handle(), cx))
-        .on_settled::<Bisect1, _>(|_d, h: Bisect1Handle, _cx| {
-            settled_forfait(h.handle(), &h.params()?, FraudWinner::Bob)
-        })
-        .on_settled::<Bisect2, _>(|_d, h: Bisect2Handle, _cx| {
-            settled_forfait(h.handle(), &h.params()?, FraudWinner::Alice)
-        })
+    with_settlements(
+        Role::new()
+            .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
+                let (h_mid, t_left, t_right) = d.reveal_args(&h.params()?);
+                let builder = h
+                    .alice_reveal(h_mid, t_left, t_right)?
+                    .sign(HotSigner::new(d.xpriv));
+                Ok(Action::Send(builder))
+            })
+            .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
+                let p = h.params()?;
+                wait_or_forfait(d, h.forfait(), h.handle(), FraudWinner::Alice, &p)
+            })
+            .on::<Leaf, _>(|d, h: LeafHandle, cx| {
+                let step = leaf_step(cx)?;
+                if d.honest_at(step) {
+                    let builder = h.alice_reveal(d.xs[step as usize].clone())?;
+                    Ok(win_leaf(d, builder, h.handle(), FraudWinner::Alice, step)?)
+                } else {
+                    // Our claim cannot survive this step; the counterparty's
+                    // reveal will settle it.
+                    Ok(Action::Wait)
+                }
+            }),
+    )
 }
 
 /// Bob's (the challenger's) role: watch [`Bisect1`] with a forfait fallback,
 /// recurse into the disputed half at [`Bisect2`], re-run the disputed step at
 /// the [`Leaf`].
 pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
-    Role::new()
-        .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
-            let p = h.params()?;
-            wait_or_forfait(d, h.forfait(), h.handle(), FraudWinner::Bob, &p)
+    with_settlements(
+        Role::new()
+            .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
+                let p = h.params()?;
+                wait_or_forfait(d, h.forfait(), h.handle(), FraudWinner::Bob, &p)
+            })
+            .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
+                let p = h.params()?;
+                let state = h.state().ok_or_else(|| {
+                    ProtocolError::Other("a Bisect2 instance carries its revealed state".into())
+                })?;
+                let (h_mid, t_left, t_right) = d.reveal_args(&p);
+                // Recurse into the left half when the midstates differ, the right
+                // when they agree (the same comparison the scripts enforce).
+                let builder = if state.h_mid_a != h_mid {
+                    h.bob_reveal_left(h_mid, t_left, t_right)?
+                } else {
+                    h.bob_reveal_right(h_mid, t_left, t_right)?
+                };
+                Ok(Action::Send(builder.sign(HotSigner::new(d.xpriv))))
+            })
+            .on::<Leaf, _>(|d, h: LeafHandle, cx| {
+                let step = leaf_step(cx)?;
+                if d.honest_at(step) {
+                    let builder = h.bob_reveal(d.xs[step as usize].clone())?;
+                    Ok(win_leaf(d, builder, h.handle(), FraudWinner::Bob, step)?)
+                } else {
+                    Ok(Action::Wait)
+                }
+            }),
+    )
+}
+
+/// The settlement classifiers both parties share: the counterparty's terminal
+/// reveal at a [`Leaf`], or its `forfait` collection on a stalled stage (a
+/// stalled [`Bisect1`] was Alice's turn, so it forfaits to Bob — and the other
+/// way around for [`Bisect2`]).
+fn with_settlements(role: Role<FraudPartyData, FraudOutcome>) -> Role<FraudPartyData, FraudOutcome> {
+    role.on_settled::<Leaf, _>(|_d, h: LeafHandle, cx| settled_leaf(&h, cx))
+        .on_settled::<Bisect1, _>(|_d, h: Bisect1Handle, _cx| match h.spent_clause() {
+            Some(Bisect1Clause::Forfait) => Ok(forfait_outcome(&h.params()?, FraudWinner::Bob)),
+            other => Err(unexpected_terminal(other, "Bisect1")),
         })
-        .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
-            let p = h.params()?;
-            let state = h.state().ok_or_else(|| {
-                ProtocolError::Other("a Bisect2 instance carries its revealed state".into())
-            })?;
-            let (h_mid, t_left, t_right) = d.reveal_args(&p);
-            // Recurse into the left half when the midstates differ, the right
-            // when they agree (the same comparison the scripts enforce).
-            let builder = if state.h_mid_a != h_mid {
-                h.bob_reveal_left(h_mid, t_left, t_right)?
-            } else {
-                h.bob_reveal_right(h_mid, t_left, t_right)?
-            };
-            Ok(Action::Send(builder.sign(HotSigner::new(d.xpriv))))
-        })
-        .on::<Leaf, _>(|d, h: LeafHandle, cx| {
-            let step = leaf_step(cx)?;
-            if d.honest_at(step) {
-                let builder = h.bob_reveal(d.xs[step as usize].clone())?;
-                Ok(win_leaf(d, builder, h.handle(), FraudWinner::Bob, step)?)
-            } else {
-                Ok(Action::Wait)
-            }
-        })
-        .on_settled::<Leaf, _>(|_d, h: LeafHandle, cx| settled_leaf(h.handle(), cx))
-        .on_settled::<Bisect1, _>(|_d, h: Bisect1Handle, _cx| {
-            settled_forfait(h.handle(), &h.params()?, FraudWinner::Bob)
-        })
-        .on_settled::<Bisect2, _>(|_d, h: Bisect2Handle, _cx| {
-            settled_forfait(h.handle(), &h.params()?, FraudWinner::Alice)
+        .on_settled::<Bisect2, _>(|_d, h: Bisect2Handle, _cx| match h.spent_clause() {
+            Some(Bisect2Clause::Forfait) => Ok(forfait_outcome(&h.params()?, FraudWinner::Alice)),
+            other => Err(unexpected_terminal(other, "Bisect2")),
         })
 }
 
@@ -207,9 +214,9 @@ fn leaf_step(cx: &StepCtx<'_>) -> Result<i64, ProtocolError> {
     })?;
     let b2: Bisect2Handle = parent.clone().try_into()?;
     let p = b2.params()?;
-    match parent.clause_name().as_deref() {
-        Some("bob_reveal_left") => Ok(p.i),
-        Some("bob_reveal_right") => Ok(p.i + p.m()),
+    match b2.spent_clause() {
+        Some(Bisect2Clause::BobRevealLeft) => Ok(p.i),
+        Some(Bisect2Clause::BobRevealRight) => Ok(p.i + p.m()),
         other => Err(ProtocolError::Other(format!(
             "unexpected clause {:?} produced a Leaf",
             other
@@ -267,16 +274,11 @@ fn win_leaf(
 }
 
 /// Classify the counterparty's terminal reveal of a [`Leaf`].
-fn settled_leaf(handle: &InstanceHandle, cx: &StepCtx<'_>) -> Result<FraudOutcome, ProtocolError> {
-    let winner = match handle.clause_name().as_deref() {
-        Some("alice_reveal") => FraudWinner::Alice,
-        Some("bob_reveal") => FraudWinner::Bob,
-        other => {
-            return Err(ProtocolError::Other(format!(
-                "unexpected terminal clause {:?} on a Leaf",
-                other
-            )))
-        }
+fn settled_leaf(h: &LeafHandle, cx: &StepCtx<'_>) -> Result<FraudOutcome, ProtocolError> {
+    let winner = match h.spent_clause() {
+        Some(LeafClause::AliceReveal) => FraudWinner::Alice,
+        Some(LeafClause::BobReveal) => FraudWinner::Bob,
+        other => return Err(unexpected_terminal(other, "Leaf")),
     };
     Ok(FraudOutcome {
         winner,
@@ -286,20 +288,16 @@ fn settled_leaf(handle: &InstanceHandle, cx: &StepCtx<'_>) -> Result<FraudOutcom
     })
 }
 
-/// Classify the counterparty's `forfait` collection on a stalled stage.
-fn settled_forfait(
-    handle: &InstanceHandle,
-    p: &BisectParams,
-    winner: FraudWinner,
-) -> Result<FraudOutcome, ProtocolError> {
-    match handle.clause_name().as_deref() {
-        Some("forfait") => Ok(FraudOutcome {
-            winner,
-            resolution: FraudResolution::Forfait { i: p.i, j: p.j },
-        }),
-        other => Err(ProtocolError::Other(format!(
-            "unexpected terminal clause {:?} on a Bisect stage",
-            other
-        ))),
+/// The outcome of a `forfait` collection on a stalled stage covering `[i, j]`.
+fn forfait_outcome(p: &BisectParams, winner: FraudWinner) -> FraudOutcome {
+    FraudOutcome {
+        winner,
+        resolution: FraudResolution::Forfait { i: p.i, j: p.j },
     }
+}
+
+fn unexpected_terminal(clause: impl std::fmt::Debug, contract: &str) -> ProtocolError {
+    ProtocolError::Other(format!(
+        "unexpected terminal clause {clause:?} on a {contract}"
+    ))
 }

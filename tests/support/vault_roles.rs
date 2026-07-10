@@ -18,11 +18,13 @@ use bitcoin::bip32::Xpriv;
 use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
 use mattrs::manager::{InstanceHandle, ManagerError};
-use mattrs::protocol::{Action, ProtocolError, Role};
+use mattrs::protocol::{Action, ProtocolError, Role, StepCtx};
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
-use super::vault::{Unvaulting, UnvaultingHandle, Vault, VaultHandle};
+use super::vault::{
+    Unvaulting, UnvaultingClause, UnvaultingHandle, Vault, VaultClause, VaultHandle,
+};
 
 /// How one branch (token) of the vault protocol resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,8 +115,8 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
                 VaultOutcome::Withdrawn { amount },
             ))
         })
-        .on_settled::<Vault, _>(|_d, h: VaultHandle, _cx| settled(h.handle()))
-        .on_settled::<Unvaulting, _>(|_d, h: UnvaultingHandle, _cx| settled(h.handle()))
+        .on_settled::<Vault, _>(settled_vault)
+        .on_settled::<Unvaulting, _>(settled_unvaulting)
 }
 
 /// The watchtower's private data.
@@ -146,19 +148,43 @@ pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
                 VaultOutcome::Recovered { amount },
             ))
         })
-        .on_settled::<Vault, _>(|_d, h: VaultHandle, _cx| settled(h.handle()))
-        .on_settled::<Unvaulting, _>(|_d, h: UnvaultingHandle, _cx| settled(h.handle()))
+        .on_settled::<Vault, _>(settled_vault)
+        .on_settled::<Unvaulting, _>(settled_unvaulting)
 }
 
-/// Classify a terminal spend of a vault-family instance made by someone else.
-fn settled(handle: &InstanceHandle) -> Result<VaultOutcome, ProtocolError> {
-    let amount = handle.prevout().ok_or(ManagerError::NotFunded)?.value;
-    match handle.clause_name().as_deref() {
-        Some("withdraw") => Ok(VaultOutcome::Withdrawn { amount }),
-        Some("recover") => Ok(VaultOutcome::Recovered { amount }),
+/// Classify someone else's terminal spend of a `Vault` (only `recover` is
+/// terminal there — the trigger clauses produce children).
+fn settled_vault(
+    _d: &mut impl Sized,
+    h: VaultHandle,
+    _cx: &StepCtx<'_>,
+) -> Result<VaultOutcome, ProtocolError> {
+    let amount = branch_amount(h.handle())?;
+    match h.spent_clause() {
+        Some(VaultClause::Recover) => Ok(VaultOutcome::Recovered { amount }),
         other => Err(ProtocolError::Other(format!(
-            "unexpected terminal clause {other:?} on {}",
-            handle.contract_name()
+            "unexpected terminal clause {other:?} on a Vault"
         ))),
     }
+}
+
+/// Classify someone else's terminal spend of an `Unvaulting`.
+fn settled_unvaulting(
+    _d: &mut impl Sized,
+    h: UnvaultingHandle,
+    _cx: &StepCtx<'_>,
+) -> Result<VaultOutcome, ProtocolError> {
+    let amount = branch_amount(h.handle())?;
+    match h.spent_clause() {
+        Some(UnvaultingClause::Withdraw) => Ok(VaultOutcome::Withdrawn { amount }),
+        Some(UnvaultingClause::Recover) => Ok(VaultOutcome::Recovered { amount }),
+        other => Err(ProtocolError::Other(format!(
+            "unexpected terminal clause {other:?} on an Unvaulting"
+        ))),
+    }
+}
+
+/// The branch's UTXO value.
+fn branch_amount(handle: &InstanceHandle) -> Result<Amount, ProtocolError> {
+    Ok(handle.prevout().ok_or(ManagerError::NotFunded)?.value)
 }

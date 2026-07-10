@@ -240,7 +240,7 @@ pub mod roles {
 
     use super::{
         alice_move_commitment, RpsGameS0, RpsGameS0BobMoveArgs, RpsGameS0Handle, RpsGameS1,
-        RpsGameS1Handle, RpsGameS1TieArgs,
+        RpsGameS1Clause, RpsGameS1Handle, RpsGameS1TieArgs,
     };
 
     /// Who takes the pot.
@@ -270,11 +270,11 @@ pub mod roles {
     }
 
     /// The adjudication clause satisfied by `result`.
-    pub fn clause_of(result: RpsResult) -> &'static str {
+    pub fn clause_of(result: RpsResult) -> RpsGameS1Clause {
         match result {
-            RpsResult::Tie => "tie",
-            RpsResult::BobWins => "bob_wins",
-            RpsResult::AliceWins => "alice_wins",
+            RpsResult::Tie => RpsGameS1Clause::Tie,
+            RpsResult::BobWins => RpsGameS1Clause::BobWins,
+            RpsResult::AliceWins => RpsGameS1Clause::AliceWins,
         }
     }
 
@@ -340,8 +340,7 @@ pub mod roles {
             .on::<RpsGameS1, _>(|_d, _h: RpsGameS1Handle, _cx| Ok(Action::Wait))
             .on_settled::<RpsGameS1, _>(|d, h: RpsGameS1Handle, _cx| {
                 let clause = h
-                    .handle()
-                    .clause_name()
+                    .spent_clause()
                     .ok_or_else(|| ProtocolError::Other("the S1 instance is spent".into()))?;
                 // The three adjudication clauses share one witness layout.
                 let witness = h
@@ -358,7 +357,8 @@ pub mod roles {
                 let result = outcome_of(args.m_a, d.m_b);
                 if clause != clause_of(result) {
                     return Err(ProtocolError::Other(format!(
-                        "adjudicated clause `{clause}` does not match the moves"
+                        "adjudicated clause `{}` does not match the moves",
+                        clause.name()
                     )));
                 }
                 Ok(RpsOutcome {
