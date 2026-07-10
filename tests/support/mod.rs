@@ -21,6 +21,11 @@ pub mod ram;
 pub mod rps;
 #[allow(dead_code)]
 pub mod testkit;
+// The tic-tac-toe contract lives with its two-player demo (examples/tictactoe/);
+// the tests compile the same single source.
+#[allow(dead_code)]
+#[path = "../../examples/tictactoe/contracts.rs"]
+pub mod tictactoe;
 // The vault contract lives with its REPL demo (examples/vault/); the tests
 // compile the same single source.
 #[allow(dead_code)]
