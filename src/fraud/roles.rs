@@ -237,17 +237,15 @@ fn wait_or_forfait(
     p: &BisectParams,
 ) -> Result<Action<FraudOutcome>, ProtocolError> {
     let builder = forfait
-        .sequence(d.forfait_timeout)
         .outputs(pot(handle, &d.payout)?)
         .sign(HotSigner::new(d.xpriv));
     let outcome = FraudOutcome {
         winner,
         resolution: FraudResolution::Forfait { i: p.i, j: p.j },
     };
-    Ok(Action::WaitWithTimeout {
-        blocks: d.forfait_timeout,
-        on_timeout: Box::new(Action::SendFinal(builder, outcome)),
-    })
+    // `wait_or_send_final` sets the builder's CSV sequence from the same
+    // timeout that drives the deadline.
+    Ok(Action::wait_or_send_final(d.forfait_timeout, builder, outcome))
 }
 
 /// Re-run the disputed step on-chain and take the pot.

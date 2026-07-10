@@ -145,13 +145,13 @@ pub fn alice_game_role() -> Role<AliceGameData, GameOutcome> {
         .on::<G256S2, _>(|d, h: G256S2Handle, _cx| {
             let builder = h
                 .withdraw()
-                .sequence(FORFAIT_TIMEOUT)
                 .outputs(pot(h.handle(), &d.fraud.payout)?)
                 .sign(HotSigner::new(d.xpriv));
-            Ok(Action::WaitWithTimeout {
-                blocks: FORFAIT_TIMEOUT,
-                on_timeout: Box::new(Action::SendFinal(builder, GameOutcome::AliceWithdrew)),
-            })
+            Ok(Action::wait_or_send_final(
+                FORFAIT_TIMEOUT,
+                builder,
+                GameOutcome::AliceWithdrew,
+            ))
         })
         .embed(
             fraud_alice_role(),

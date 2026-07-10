@@ -105,16 +105,13 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             })?;
             let amount = h.handle().prevout().ok_or(ManagerError::NotFunded)?.value;
             // Nobody should spend this branch before us; the CSV delay is what
-            // gates the withdrawal, so it rides the timeout fallback.
-            Ok(Action::WaitWithTimeout {
-                blocks: p.spend_delay,
-                on_timeout: Box::new(Action::SendFinal(
-                    h.withdraw(state.ctv_hash)
-                        .outputs(outputs)
-                        .sequence(p.spend_delay),
-                    VaultOutcome::Withdrawn { amount },
-                )),
-            })
+            // gates the withdrawal, so it rides the timeout fallback (which
+            // also sets the withdrawal's sequence to the same delay).
+            Ok(Action::wait_or_send_final(
+                p.spend_delay,
+                h.withdraw(state.ctv_hash).outputs(outputs),
+                VaultOutcome::Withdrawn { amount },
+            ))
         })
         .on_settled::<Vault, _>(|_d, h: VaultHandle, _cx| settled(h.handle()))
         .on_settled::<Unvaulting, _>(|_d, h: UnvaultingHandle, _cx| settled(h.handle()))

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::manager::{ContractManager, InstanceHandle, ManagerError};
 
-use super::{Action, ChainView, ContractKey, ProtocolError, Role, StepCtx};
+use super::{Action, ChainView, ContractKey, ProtocolError, Role, StepCtx, TimeoutAction};
 
 /// How often [`Runner::run`] polls while waiting on the counterparty.
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -35,7 +35,7 @@ enum TokenState<O> {
     Waiting {
         current: InstanceHandle,
         parent: Option<InstanceHandle>,
-        timeout: Option<(u32, Box<Action<O>>)>,
+        timeout: Option<(u32, TimeoutAction<O>)>,
     },
 }
 
@@ -302,7 +302,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         &mut self,
         current: InstanceHandle,
         parent: Option<InstanceHandle>,
-        timeout: Option<(u32, Box<Action<O>>)>,
+        timeout: Option<(u32, TimeoutAction<O>)>,
     ) -> Result<TokenStep<O>, ProtocolError> {
         let outpoint = current.outpoint().ok_or(ManagerError::NotFunded)?;
 
@@ -311,37 +311,24 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             return self.follow_spend(children, current, parent);
         }
 
-        if let Some((blocks, on_timeout)) = timeout {
+        if let Some((blocks, _)) = timeout {
             let confirmed = self.chain.confirmation_height(outpoint.txid)?;
             let deadline = confirmed.map(|conf| conf.saturating_add(blocks).saturating_sub(1));
             if let Some(d) = deadline
                 && self.chain.height()? >= d
             {
-                return match *on_timeout {
-                    Action::Wait | Action::WaitWithTimeout { .. } => {
-                        Err(ProtocolError::InvalidTimeoutAction)
-                    }
-                    action => self.execute_action(action, current, parent),
-                };
+                let (_, on_timeout) = timeout.expect("checked above");
+                return self.execute_action(on_timeout.into(), current, parent);
             }
-            Ok(TokenStep::Keep(
-                TokenState::Waiting {
-                    current,
-                    parent,
-                    timeout: Some((blocks, on_timeout)),
-                },
-                false,
-            ))
-        } else {
-            Ok(TokenStep::Keep(
-                TokenState::Waiting {
-                    current,
-                    parent,
-                    timeout: None,
-                },
-                false,
-            ))
         }
+        Ok(TokenStep::Keep(
+            TokenState::Waiting {
+                current,
+                parent,
+                timeout,
+            },
+            false,
+        ))
     }
 
     /// Move the token along an observed (or just-sent) spend of `current`:

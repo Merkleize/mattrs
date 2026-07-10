@@ -94,17 +94,62 @@ pub enum Action<O> {
     Wait,
     /// The counterparty's turn, with a deadline: once the current UTXO is
     /// `blocks` confirmations deep and still unspent, take the fallback action
-    /// (e.g. a `forfait` spend). A timeout clause is CSV-gated, so the fallback's
-    /// builder must set `.sequence(blocks)` itself (and, for a terminal clause,
-    /// `.outputs(..)`). The fallback must act — a nested `Wait` is an error.
+    /// (e.g. a `forfait` spend). Prefer the [`wait_or_send`](Action::wait_or_send)
+    /// / [`wait_or_send_final`](Action::wait_or_send_final) constructors, which
+    /// also set the fallback's CSV sequence from the same `blocks` value.
     WaitWithTimeout {
         /// Confirmations of the current UTXO after which the fallback fires.
         blocks: u32,
         /// The action taken when the deadline passes.
-        on_timeout: Box<Action<O>>,
+        on_timeout: TimeoutAction<O>,
     },
     /// The protocol is over for this party; no transaction from us.
     Finish(O),
+}
+
+/// The fallback of an [`Action::WaitWithTimeout`]. A deadline that passes
+/// demands an *act* — sending a spend or finishing — so waiting again is not
+/// representable here.
+pub enum TimeoutAction<O> {
+    /// Broadcast this spend and follow its child instance.
+    Send(SpendBuilder),
+    /// Broadcast this terminal spend and resolve with the outcome.
+    SendFinal(SpendBuilder, O),
+    /// Resolve with this outcome, sending nothing.
+    Finish(O),
+}
+
+impl<O> From<TimeoutAction<O>> for Action<O> {
+    fn from(t: TimeoutAction<O>) -> Self {
+        match t {
+            TimeoutAction::Send(b) => Action::Send(b),
+            TimeoutAction::SendFinal(b, o) => Action::SendFinal(b, o),
+            TimeoutAction::Finish(o) => Action::Finish(o),
+        }
+    }
+}
+
+impl<O> Action<O> {
+    /// Watch the UTXO; once it sits unspent for `blocks` confirmations, send
+    /// the CSV-gated fallback spend. The one `blocks` value drives both the
+    /// runner's deadline and the spend's input sequence
+    /// (`builder.sequence(blocks)`), so the clock the runner counts and the
+    /// `OP_CHECKSEQUENCEVERIFY` the script enforces cannot disagree.
+    pub fn wait_or_send(blocks: u32, builder: SpendBuilder) -> Self {
+        Action::WaitWithTimeout {
+            blocks,
+            on_timeout: TimeoutAction::Send(builder.sequence(blocks)),
+        }
+    }
+
+    /// [`wait_or_send`](Action::wait_or_send) for a terminal fallback:
+    /// broadcast the spend and resolve with `outcome`.
+    pub fn wait_or_send_final(blocks: u32, builder: SpendBuilder, outcome: O) -> Self {
+        Action::WaitWithTimeout {
+            blocks,
+            on_timeout: TimeoutAction::SendFinal(builder.sequence(blocks), outcome),
+        }
+    }
 }
 
 /// How the protocol token got to the state a handler runs at.
@@ -135,8 +180,6 @@ pub enum ProtocolError {
         /// The name of the unhandled contract.
         contract: String,
     },
-    /// A timeout fallback was a `Wait`-family action; it must send or finish.
-    InvalidTimeoutAction,
     /// The runner was stepped after the protocol already resolved.
     Finished,
     /// A protocol-specific failure raised by a role handler (e.g. the
@@ -153,9 +196,6 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::MissingState(e) => write!(f, "{}", e),
             ProtocolError::NoHandler { contract } => {
                 write!(f, "the role has no handler for contract `{}`", contract)
-            }
-            ProtocolError::InvalidTimeoutAction => {
-                write!(f, "a timeout fallback must send or finish, not wait")
             }
             ProtocolError::Finished => write!(f, "the protocol already resolved"),
             ProtocolError::Other(msg) => write!(f, "{}", msg),
@@ -401,7 +441,7 @@ impl<D: 'static, O: 'static> Role<D, O> {
 }
 
 /// Map a sub-protocol action into the outer protocol, converting outcomes
-/// through `map` (recursing into timeout fallbacks).
+/// through `map`.
 fn map_action<D, O2, O>(
     d: &mut D,
     action: Action<O2>,
@@ -413,7 +453,11 @@ fn map_action<D, O2, O>(
         Action::Wait => Action::Wait,
         Action::WaitWithTimeout { blocks, on_timeout } => Action::WaitWithTimeout {
             blocks,
-            on_timeout: Box::new(map_action(d, *on_timeout, map)?),
+            on_timeout: match on_timeout {
+                TimeoutAction::Send(b) => TimeoutAction::Send(b),
+                TimeoutAction::SendFinal(b, o2) => TimeoutAction::SendFinal(b, map(d, o2)?),
+                TimeoutAction::Finish(o2) => TimeoutAction::Finish(map(d, o2)?),
+            },
         },
         Action::Finish(o2) => Action::Finish(map(d, o2)?),
     })
@@ -505,7 +549,7 @@ mod tests {
             *d += 1;
             Ok(Action::WaitWithTimeout {
                 blocks: 5,
-                on_timeout: Box::new(Action::Finish(7)),
+                on_timeout: TimeoutAction::Finish(7),
             })
         });
         let outer: Role<Outer, String> = Role::new()
@@ -534,8 +578,8 @@ mod tests {
         match action {
             Action::WaitWithTimeout { blocks, on_timeout } => {
                 assert_eq!(blocks, 5);
-                match *on_timeout {
-                    Action::Finish(o) => assert_eq!(o, "sub:7"),
+                match on_timeout {
+                    TimeoutAction::Finish(o) => assert_eq!(o, "sub:7"),
                     _ => panic!("timeout fallback should be the mapped Finish"),
                 }
             }
