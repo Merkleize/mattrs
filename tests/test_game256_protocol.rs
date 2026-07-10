@@ -16,27 +16,26 @@
 mod support;
 
 use std::rc::Rc;
+use std::time::Duration;
 
-use bitcoin::key::Secp256k1;
-use bitcoin::{Amount, ScriptBuf, XOnlyPublicKey};
+use bitcoin::Amount;
 use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
-use mattrs::manager::{ContractManager, InstanceHandle};
+use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{LocalChain, Progress, Runner};
-use mattrs::testutil::{fund_fake, offline_client};
+use mattrs::script_helpers::key_path_p2tr as p2tr;
+use mattrs::testutil::fund_fake;
 
 use support::game256::{G256Params, G256S0, FORFAIT_TIMEOUT};
 use support::game256_roles::{
     alice_game_role, bob_game_role, cheating_vals, fill_fraud_data, game_fraud_data, honest_vals,
     AliceGameData, BobGameData, GameOutcome,
 };
-use support::testkit::{alice_pk, alice_xpriv, bob_pk, bob_xpriv, walk_tip};
+use support::testkit::{
+    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, offline_manager, walk_tip,
+};
 
 const AMOUNT: u64 = 20_000;
 const SEED: u8 = 77;
-
-fn p2tr(pk: XOnlyPublicKey) -> ScriptBuf {
-    ScriptBuf::new_p2tr(&Secp256k1::new(), pk, None)
-}
 
 /// Two runners over twin fake-funded `G256S0` entries and a shared chain.
 /// Returns (alice, bob, alice's entry, bob's entry) — the entry handles let a
@@ -85,14 +84,14 @@ fn setup(
     };
 
     let alice = Runner::new(
-        ContractManager::new(offline_client(), bitcoin::Network::Regtest),
+        offline_manager(),
         chain.clone(),
         alice_game_role(),
         alice_data,
         alice_entry.clone(),
     );
     let bob_runner = Runner::new(
-        ContractManager::new(offline_client(), bitcoin::Network::Regtest),
+        offline_manager(),
         chain.clone(),
         bob_game_role(),
         bob_data,
@@ -101,38 +100,12 @@ fn setup(
     (alice, bob_runner, alice_entry, bob_entry)
 }
 
-/// Interleave the two runners until both resolve (or `max_steps` runs out).
-fn drive(
-    alice: &mut Runner<AliceGameData, GameOutcome>,
-    bob: &mut Runner<BobGameData, GameOutcome>,
-    max_steps: usize,
-) -> (Option<GameOutcome>, Option<GameOutcome>) {
-    let mut a_out = None;
-    let mut b_out = None;
-    for _ in 0..max_steps {
-        if a_out.is_none()
-            && let Progress::Done(os) = alice.step().expect("alice steps")
-        {
-            a_out = os.into_iter().next();
-        }
-        if b_out.is_none()
-            && let Progress::Done(os) = bob.step().expect("bob steps")
-        {
-            b_out = os.into_iter().next();
-        }
-        if a_out.is_some() && b_out.is_some() {
-            break;
-        }
-    }
-    (a_out, b_out)
-}
-
 #[test]
 fn full_bisection_resolves_at_the_cheated_step() {
     let chain = Rc::new(LocalChain::new());
     let (mut alice, mut bob, _alice_entry, bob_entry) = setup(&chain, cheating_vals);
 
-    let (a_out, b_out) = drive(&mut alice, &mut bob, 200);
+    let (a_out, b_out) = drive_both(&mut alice, &mut bob, 200, Duration::ZERO).expect("both step");
 
     // Both parties independently reach the same outcome: Bob wins the on-chain
     // re-run of exactly the step where Alice's claim went wrong.
@@ -208,7 +181,7 @@ fn honest_claim_withdraws_after_the_timeout() {
 
     // Bob checks Alice's claimed result and walks away; Alice keeps waiting
     // out her withdrawal delay.
-    let (a_out, b_out) = drive(&mut alice, &mut bob, 30);
+    let (a_out, b_out) = drive_both(&mut alice, &mut bob, 30, Duration::ZERO).expect("both step");
     assert_eq!(b_out, Some(GameOutcome::AliceHonest));
     assert!(a_out.is_none());
 

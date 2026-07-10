@@ -12,14 +12,13 @@ use std::rc::Rc;
 
 use bitcoin::bip32::Xpriv;
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::{ScriptBuf, TxOut};
+use bitcoin::ScriptBuf;
 
 use mattrs::fraud::roles::{
-    alice_role as fraud_alice_role, bob_role as fraud_bob_role, FraudOutcome, FraudPartyData,
+    alice_role as fraud_alice_role, bob_role as fraud_bob_role, pot, FraudOutcome, FraudPartyData,
     OffChainComputer,
 };
 use mattrs::fraud::trace;
-use mattrs::manager::{InstanceHandle, ManagerError};
 use mattrs::protocol::{Action, ProtocolError, Role};
 use mattrs::script_utils::{bn2vch, commit_int, vch2bn};
 use mattrs::signer::HotSigner;
@@ -113,15 +112,6 @@ pub fn cheating_vals(x: i64) -> Vec<i64> {
         vals[k] = vals[k - 1] * 2;
     }
     vals
-}
-
-/// The whole pot, paid to `payout` (zero fee, as everywhere on regtest).
-fn pot(handle: &InstanceHandle, payout: &ScriptBuf) -> Result<Vec<TxOut>, ProtocolError> {
-    let prevout = handle.prevout().ok_or(ManagerError::NotFunded)?;
-    Ok(vec![TxOut {
-        script_pubkey: payout.clone(),
-        value: prevout.value,
-    }])
 }
 
 /// Alice: wait for Bob's input, reveal her claimed result, withdraw after the

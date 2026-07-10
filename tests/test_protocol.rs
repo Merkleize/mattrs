@@ -10,17 +10,17 @@
 mod support;
 
 use std::rc::Rc;
+use std::time::Duration;
 
 use bitcoin::Amount;
-use mattrs::manager::ContractManager;
-use mattrs::protocol::{Action, LocalChain, Progress, ProtocolError, Role, Runner};
-use mattrs::testutil::{fund_fake, offline_client};
+use mattrs::protocol::{Action, LocalChain, ProtocolError, Role, Runner};
+use mattrs::testutil::fund_fake;
 
 use support::rps::roles::{
     alice_role, bob_role, outcome_of, AliceData, BobData, RpsOutcome, RpsResult,
 };
 use support::rps::{alice_move_commitment, RpsGameS0, RpsGameS0Handle, RpsParams, DEFAULT_STAKE};
-use support::testkit::{alice_pk, bob_pk, bob_xpriv, walk_tip};
+use support::testkit::{alice_pk, bob_pk, bob_xpriv, drive_both, offline_manager, walk_tip};
 
 const SEED: u8 = 21;
 
@@ -31,10 +31,6 @@ fn params(c_a: [u8; 32]) -> RpsParams {
         c_a,
         stake: DEFAULT_STAKE,
     }
-}
-
-fn offline_manager() -> ContractManager {
-    ContractManager::new(offline_client(), bitcoin::Network::Regtest)
 }
 
 /// Play a full game offline; returns both parties' outcomes and Bob's entry
@@ -71,23 +67,8 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
         bob_entry.clone(),
     );
 
-    let mut a_out = None;
-    let mut b_out = None;
-    for _ in 0..20 {
-        if a_out.is_none()
-            && let Progress::Done(os) = alice.step().expect("alice steps")
-        {
-            a_out = os.into_iter().next();
-        }
-        if b_out.is_none()
-            && let Progress::Done(os) = bob.step().expect("bob steps")
-        {
-            b_out = os.into_iter().next();
-        }
-        if a_out.is_some() && b_out.is_some() {
-            break;
-        }
-    }
+    let (a_out, b_out) =
+        drive_both(&mut alice, &mut bob, 20, Duration::ZERO).expect("both step");
 
     // Both parties saw the same terminal adjudication of Bob's S1 twin.
     let s1 = walk_tip(&bob_entry);

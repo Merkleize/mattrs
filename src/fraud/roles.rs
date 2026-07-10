@@ -224,9 +224,11 @@ fn leaf_step(cx: &StepCtx<'_>) -> Result<i64, ProtocolError> {
     }
 }
 
-/// The whole pot, paid to this party's payout script (zero fee, as everywhere
-/// in this crate's regtest flows).
-fn pot(handle: &InstanceHandle, payout: &ScriptBuf) -> Result<Vec<TxOut>, ProtocolError> {
+/// The whole pot — the spent instance's full value — paid to this party's
+/// payout script (zero fee, as everywhere in this crate's regtest flows).
+/// Shared by any protocol whose terminal spends sweep the UTXO (the game256
+/// roles use it too).
+pub fn pot(handle: &InstanceHandle, payout: &ScriptBuf) -> Result<Vec<TxOut>, ProtocolError> {
     let prevout = handle.prevout().ok_or(ManagerError::NotFunded)?;
     Ok(vec![TxOut {
         script_pubkey: payout.clone(),

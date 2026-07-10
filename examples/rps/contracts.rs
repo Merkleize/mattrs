@@ -8,16 +8,13 @@
 //!   (`alice_wins` / `bob_wins` / `tie`) checks the outcome and pays out via a CTV
 //!   template. This exercises clause-owned CTV templates and CCV `check_in/out`.
 
-use bitcoin::{
-    key::Secp256k1,
-    Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey,
-};
+use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseOutput, CtvTemplate};
 use mattrs::{contract, script_utils::commit_int, Signature};
 use mattrs_derive::{ContractParams, ContractState};
 
-use mattrs::script_helpers::{check_input_contract, check_output_contract};
+use mattrs::script_helpers::{check_input_contract, check_output_contract, key_path_p2tr};
 
 define_pushable!();
 
@@ -52,11 +49,6 @@ pub fn alice_move_commitment(m_a: i64, r_a: &[u8; 32]) -> [u8; 32] {
     let mut preimage = mattrs::script_utils::bn2vch(m_a);
     preimage.extend_from_slice(r_a);
     sha256::Hash::hash(&preimage).to_byte_array()
-}
-
-fn p2tr_spk(pubkey: XOnlyPublicKey) -> ScriptBuf {
-    let secp = Secp256k1::new();
-    ScriptBuf::new_p2tr(&secp, pubkey, None)
 }
 
 // ============================================================================
@@ -144,7 +136,7 @@ impl RpsGameS1 {
     fn tmpl_alice_wins(p: &RpsParams) -> CtvTemplate {
         CtvTemplate::new(
             vec![TxOut {
-                script_pubkey: p2tr_spk(p.alice_pk),
+                script_pubkey: key_path_p2tr(p.alice_pk),
                 value: Amount::from_sat((2 * p.stake) as u64),
             }],
             Sequence::ZERO,
@@ -154,7 +146,7 @@ impl RpsGameS1 {
     fn tmpl_bob_wins(p: &RpsParams) -> CtvTemplate {
         CtvTemplate::new(
             vec![TxOut {
-                script_pubkey: p2tr_spk(p.bob_pk),
+                script_pubkey: key_path_p2tr(p.bob_pk),
                 value: Amount::from_sat((2 * p.stake) as u64),
             }],
             Sequence::ZERO,
@@ -165,11 +157,11 @@ impl RpsGameS1 {
         CtvTemplate::new(
             vec![
                 TxOut {
-                    script_pubkey: p2tr_spk(p.alice_pk),
+                    script_pubkey: key_path_p2tr(p.alice_pk),
                     value: Amount::from_sat(p.stake as u64),
                 },
                 TxOut {
-                    script_pubkey: p2tr_spk(p.bob_pk),
+                    script_pubkey: key_path_p2tr(p.bob_pk),
                     value: Amount::from_sat(p.stake as u64),
                 },
             ],

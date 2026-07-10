@@ -20,11 +20,11 @@ mod support;
 use std::rc::Rc;
 use std::time::Duration;
 
-use bitcoin::key::Secp256k1;
-use bitcoin::{Amount, ScriptBuf, XOnlyPublicKey};
+use bitcoin::Amount;
 use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{Progress, RpcChain, Runner};
+use mattrs::protocol::{RpcChain, Runner};
+use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::report::Report;
 
 use support::game256::{G256Params, G256S0};
@@ -32,13 +32,11 @@ use support::game256_roles::{
     alice_game_role, bob_game_role, cheating_vals, fill_fraud_data, game_fraud_data, honest_vals,
     AliceGameData, BobGameData, GameOutcome,
 };
-use support::testkit::{alice_pk, alice_xpriv, bob_pk, bob_xpriv, regtest_client, report_spend};
+use support::testkit::{
+    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, regtest_client, report_spend,
+};
 
 const AMOUNT: u64 = 20_000;
-
-fn p2tr(pk: XOnlyPublicKey) -> ScriptBuf {
-    ScriptBuf::new_p2tr(&Secp256k1::new(), pk, None)
-}
 
 #[test]
 #[ignore = "requires a running regtest bitcoind"]
@@ -95,24 +93,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
 
     // Interleave the two parties until both resolve (the happy path lives in
     // the mempool; nothing needs mining).
-    let mut a_out = None;
-    let mut b_out = None;
-    for _ in 0..600 {
-        if a_out.is_none()
-            && let Progress::Done(os) = alice.step()?
-        {
-            a_out = os.into_iter().next();
-        }
-        if b_out.is_none()
-            && let Progress::Done(os) = bob.step()?
-        {
-            b_out = os.into_iter().next();
-        }
-        if a_out.is_some() && b_out.is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let (a_out, b_out) = drive_both(&mut alice, &mut bob, 600, Duration::from_millis(20))?;
 
     // Both parties independently conclude: Bob won the on-chain re-run of
     // exactly the step where Alice cheated (64 -> 128, step 5).

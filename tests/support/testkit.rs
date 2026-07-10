@@ -54,6 +54,52 @@ pub fn offline_client() -> Client {
     mattrs::testutil::offline_client()
 }
 
+/// A manager over an [`offline_client`], for tests driving protocols on a
+/// `LocalChain`.
+pub fn offline_manager() -> mattrs::manager::ContractManager {
+    mattrs::manager::ContractManager::new(offline_client(), bitcoin::Network::Regtest)
+}
+
+/// Interleave two parties' runners — one step each per round — until both
+/// resolve their (single) outcome, or `max_steps` rounds run out (an
+/// unresolved side stays `None`). `pace` idles between rounds:
+/// `Duration::ZERO` offline, a few milliseconds against a live node.
+pub fn drive_both<Da, Oa, Db, Ob>(
+    a: &mut mattrs::protocol::Runner<Da, Oa>,
+    b: &mut mattrs::protocol::Runner<Db, Ob>,
+    max_steps: usize,
+    pace: std::time::Duration,
+) -> Result<(Option<Oa>, Option<Ob>), mattrs::protocol::ProtocolError>
+where
+    Da: 'static,
+    Oa: 'static,
+    Db: 'static,
+    Ob: 'static,
+{
+    use mattrs::protocol::Progress;
+    let mut a_out = None;
+    let mut b_out = None;
+    for _ in 0..max_steps {
+        if a_out.is_none()
+            && let Progress::Done(os) = a.step()?
+        {
+            a_out = os.into_iter().next();
+        }
+        if b_out.is_none()
+            && let Progress::Done(os) = b.step()?
+        {
+            b_out = os.into_iter().next();
+        }
+        if a_out.is_some() && b_out.is_some() {
+            break;
+        }
+        if !pace.is_zero() {
+            std::thread::sleep(pace);
+        }
+    }
+    Ok((a_out, b_out))
+}
+
 /// An RPC client for the local regtest node, used by the `#[ignore]`d e2e
 /// tests (see [`mattrs::manager::regtest_rpc_client`] for the auth rules).
 pub fn regtest_client(wallet_name: &str) -> Client {

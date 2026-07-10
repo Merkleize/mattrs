@@ -21,6 +21,16 @@ pub fn opaque_p2tr(key: XOnlyPublicKey) -> ScriptBuf {
     ScriptBuf::new_p2tr_tweaked(TweakedPublicKey::dangerous_assume_tweaked(key))
 }
 
+/// A standard key-path P2TR scriptPubKey for `key` (BIP341-tweaked, no script
+/// tree) — where a party simply gets paid (payouts, pots).
+///
+/// Contrast [`opaque_p2tr`], which uses `key` verbatim as the output key: the
+/// two look alike but produce different scripts, and only `opaque_p2tr`
+/// satisfies a CCV constraint on a bare key.
+pub fn key_path_p2tr(key: XOnlyPublicKey) -> ScriptBuf {
+    ScriptBuf::new_p2tr(&bitcoin::key::Secp256k1::verification_only(), key, None)
+}
+
 /// CCV fragment that constrains the *current input's* contract (the committed
 /// data is expected on the stack). `index = -1` means "this input"; `pubkey`
 /// is the alternate internal key, or `None` for the NUMS default.

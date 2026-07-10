@@ -13,6 +13,7 @@ mod support;
 
 use std::collections::HashSet;
 use std::rc::Rc;
+use std::time::Duration;
 
 use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
@@ -20,9 +21,9 @@ use mattrs::manager::ContractManager;
 use mattrs::protocol::{Action, LocalChain, Progress, ProtocolError, Role, RpcChain, Runner};
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
-use mattrs::testutil::{fund_fake, offline_client};
+use mattrs::testutil::fund_fake;
 
-use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client};
+use support::testkit::{alice_pk, alice_xpriv, bob_pk, drive_both, offline_manager, regtest_client};
 use support::vault::{Unvaulting, Vault, VaultHandle, VaultParams};
 use support::vault_roles::{
     owner_role, watchtower_role, OwnerData, TriggerStep, VaultOutcome, WatchtowerData,
@@ -39,10 +40,6 @@ fn params() -> VaultParams {
         recover_pk: bob_pk(),
         unvault_pk: alice_pk(),
     }
-}
-
-fn offline_manager() -> ContractManager {
-    ContractManager::new(offline_client(), bitcoin::Network::Regtest)
 }
 
 fn fake_vault(seed: u8) -> mattrs::manager::InstanceHandle {
@@ -212,23 +209,8 @@ fn watchtower_recovers_an_unauthorized_unvaulting() {
     // Interleave the two parties: the watchtower sweeps the unvaulting well
     // before its CSV delay could mature (no blocks are mined at all), and the
     // thief's own runner classifies the sweep it observes.
-    let mut thief_out = None;
-    let mut tower_out = None;
-    for _ in 0..20 {
-        if thief_out.is_none()
-            && let Progress::Done(os) = thief.step().expect("thief steps")
-        {
-            thief_out = os.into_iter().next();
-        }
-        if tower_out.is_none()
-            && let Progress::Done(os) = tower.step().expect("tower steps")
-        {
-            tower_out = os.into_iter().next();
-        }
-        if thief_out.is_some() && tower_out.is_some() {
-            break;
-        }
-    }
+    let (thief_out, tower_out) =
+        drive_both(&mut thief, &mut tower, 20, Duration::ZERO).expect("both step");
     assert_eq!(tower_out, Some(VaultOutcome::Recovered { amount }));
     assert_eq!(thief_out, Some(VaultOutcome::Recovered { amount }));
 
