@@ -13,7 +13,9 @@ use bitcoin::{OutPoint, Transaction, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
 
 use super::ProtocolError;
-use crate::manager::{find_spending_tx_once, spend_scan_start, ManagerError};
+use crate::manager::{
+    find_spending_tx_once, is_tx_not_found, spend_scan_start, tx_confirmation_height, ManagerError,
+};
 
 /// The chain operations a protocol runner performs. Methods take `&self`
 /// (implementations use interior mutability) so one chain can be shared —
@@ -78,20 +80,13 @@ impl ChainView for RpcChain {
     }
 
     fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ProtocolError> {
-        let info = self
-            .client
-            .get_raw_transaction_info(&txid, None)
-            .map_err(ManagerError::from)?;
-        match info.blockhash {
-            Some(hash) => {
-                let height = self
-                    .client
-                    .get_block_header_info(&hash)
-                    .map_err(ManagerError::from)?
-                    .height;
-                Ok(Some(height as u32))
-            }
-            None => Ok(None),
+        match tx_confirmation_height(&self.client, &txid) {
+            Ok(height) => Ok(height.map(|h| h as u32)),
+            // A transaction the node does not know (yet) is *unknown*, not a
+            // failure — the same answer `LocalChain` gives, so a role behaves
+            // identically on both chain views.
+            Err(ManagerError::RpcError(e)) if is_tx_not_found(&e) => Ok(None),
+            Err(e) => Err(e.into()),
         }
     }
 }

@@ -138,6 +138,47 @@ fn revault_forks_and_both_branches_withdraw() {
 }
 
 #[test]
+fn identical_templates_on_both_branches_withdraw() {
+    // A 50/50 split where both branches commit to the *same* withdrawal
+    // template: the two unvaultings share one CTV hash, and each must still
+    // find its outputs in the owner's plan (regression: the lookup used to
+    // consume the entry, stranding the second branch).
+    let chain = Rc::new(LocalChain::new());
+    let half = Amount::from_sat(AMOUNT / 2);
+
+    let plan = vec![
+        TriggerStep {
+            outputs: withdrawal(half),
+            revault: Some(half),
+        },
+        TriggerStep {
+            outputs: withdrawal(half),
+            revault: None,
+        },
+    ];
+    let mut owner = Runner::new(
+        offline_manager(),
+        chain.clone(),
+        owner_role(),
+        OwnerData::new(alice_xpriv(), plan),
+        fake_vault(SEED),
+    );
+
+    while let Progress::Advanced = owner.step().expect("owner steps") {}
+    assert_eq!(owner.tokens().len(), 2, "the trigger_and_revault forked");
+
+    chain.mine(SPEND_DELAY + 1);
+    let outcomes = owner.run().expect("both branches withdraw");
+    assert_eq!(
+        outcomes,
+        vec![
+            VaultOutcome::Withdrawn { amount: half },
+            VaultOutcome::Withdrawn { amount: half },
+        ]
+    );
+}
+
+#[test]
 fn watchtower_recovers_an_unauthorized_unvaulting() {
     let chain = Rc::new(LocalChain::new());
     let amount = Amount::from_sat(AMOUNT);

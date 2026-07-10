@@ -1023,13 +1023,26 @@ impl ContractManager {
     }
 }
 
+/// The height `txid` confirmed at (`None` while it sits in the mempool).
+/// Requires the node to know the transaction (wallet, mempool, or `txindex`);
+/// an unknown `txid` is an error ([`is_tx_not_found`] tells it apart).
+pub(crate) fn tx_confirmation_height(
+    rpc: &Client,
+    txid: &Txid,
+) -> Result<Option<u64>, ManagerError> {
+    let info = rpc.get_raw_transaction_info(txid, None)?;
+    Ok(match info.blockhash {
+        Some(hash) => Some(rpc.get_block_header_info(&hash)?.height as u64),
+        None => None,
+    })
+}
+
 /// The block height where a scan for spends of `outpoint` should start: where
 /// the funding transaction confirmed (or the next block, if it is still
 /// unconfirmed).
 pub(crate) fn spend_scan_start(rpc: &Client, outpoint: OutPoint) -> Result<u64, ManagerError> {
-    let info = rpc.get_raw_transaction_info(&outpoint.txid, None)?;
-    Ok(match info.blockhash {
-        Some(hash) => rpc.get_block_header_info(&hash)?.height as u64,
+    Ok(match tx_confirmation_height(rpc, &outpoint.txid)? {
+        Some(height) => height,
         None => rpc.get_block_count()? + 1,
     })
 }
@@ -1115,7 +1128,7 @@ pub fn regtest_rpc_client(wallet_name: &str) -> Client {
 /// Whether an RPC error is Core's "No such mempool or blockchain transaction"
 /// (code -5), i.e. the transaction is not (yet) known to the node — as opposed
 /// to a real failure (node unreachable, bad credentials, ...).
-fn is_tx_not_found(e: &bitcoincore_rpc::Error) -> bool {
+pub(crate) fn is_tx_not_found(e: &bitcoincore_rpc::Error) -> bool {
     matches!(
         e,
         bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::error::Error::Rpc(rpc_err))

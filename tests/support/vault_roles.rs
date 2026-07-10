@@ -97,7 +97,10 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             let state = h.state().ok_or_else(|| {
                 ProtocolError::Other("an Unvaulting instance carries its CTV hash".into())
             })?;
-            let outputs = d.withdrawals.remove(&state.ctv_hash).ok_or_else(|| {
+            // Looked up, not consumed: two planned branches may commit to the
+            // *same* template (equal outputs ⇒ equal CTV hash), and each must
+            // still find its withdrawal here.
+            let outputs = d.withdrawals.get(&state.ctv_hash).cloned().ok_or_else(|| {
                 ProtocolError::Other("unvaulting with a CTV hash the owner never planned".into())
             })?;
             let amount = h.handle().prevout().ok_or(ManagerError::NotFunded)?.value;

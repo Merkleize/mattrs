@@ -314,7 +314,9 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         if let Some((blocks, on_timeout)) = timeout {
             let confirmed = self.chain.confirmation_height(outpoint.txid)?;
             let deadline = confirmed.map(|conf| conf.saturating_add(blocks).saturating_sub(1));
-            if deadline.is_some_and(|d| self.chain.height().is_ok_and(|h| h >= d)) {
+            if let Some(d) = deadline
+                && self.chain.height()? >= d
+            {
                 return match *on_timeout {
                     Action::Wait | Action::WaitWithTimeout { .. } => {
                         Err(ProtocolError::InvalidTimeoutAction)
