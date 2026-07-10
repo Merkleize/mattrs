@@ -24,27 +24,31 @@ pub enum Progress<O> {
 }
 
 /// The runner's view of one live UTXO it follows (a *token*).
-enum TokenState<O> {
-    /// The token sits at `current`; dispatch the role's arrival handler next.
-    Arrived {
-        current: InstanceHandle,
-        parent: Option<InstanceHandle>,
-    },
-    /// Watching `current` for the counterparty's spend (and, possibly, for a
-    /// timeout deadline).
-    Waiting {
-        current: InstanceHandle,
-        parent: Option<InstanceHandle>,
-        timeout: Option<(u32, TimeoutAction<O>)>,
-    },
+struct TokenState<O> {
+    /// The instance the token sits at.
+    current: InstanceHandle,
+    /// The spent instance whose clause created `current` (`None` for the
+    /// entry).
+    parent: Option<InstanceHandle>,
+    phase: Phase<O>,
 }
 
-impl<O> TokenState<O> {
-    fn current(&self) -> &InstanceHandle {
-        match self {
-            TokenState::Arrived { current, .. } | TokenState::Waiting { current, .. } => current,
-        }
-    }
+enum Phase<O> {
+    /// Dispatch the role's arrival handler next.
+    Arrived,
+    /// Watching for the counterparty's spend (and, possibly, for a timeout
+    /// deadline).
+    Waiting(Option<Timeout<O>>),
+}
+
+/// A pending timeout of a waited-on token.
+struct Timeout<O> {
+    /// Confirmations of the current UTXO after which the fallback fires.
+    blocks: u32,
+    /// The absolute height the fallback fires at, resolved (and then cached —
+    /// a confirmation height never changes) once the watched UTXO confirms.
+    deadline: Option<u32>,
+    on_timeout: TimeoutAction<O>,
 }
 
 /// What stepping one token once did to it.
@@ -77,9 +81,9 @@ pub struct Runner<D, O> {
     data: D,
     manager: ContractManager,
     chain: Rc<dyn ChainView>,
+    /// The live tokens; empty once the protocol resolved (or a step failed).
     tokens: Vec<TokenState<O>>,
     outcomes: Vec<O>,
-    done: bool,
 }
 
 impl<D: 'static, O: 'static> Runner<D, O> {
@@ -97,12 +101,12 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             data,
             manager,
             chain,
-            tokens: vec![TokenState::Arrived {
+            tokens: vec![TokenState {
                 current: entry,
                 parent: None,
+                phase: Phase::Arrived,
             }],
             outcomes: Vec::new(),
-            done: false,
         }
     }
 
@@ -128,14 +132,14 @@ impl<D: 'static, O: 'static> Runner<D, O> {
 
     /// The instances the live tokens currently sit at (empty once done).
     pub fn tokens(&self) -> Vec<&InstanceHandle> {
-        self.tokens.iter().map(|t| t.current()).collect()
+        self.tokens.iter().map(|t| &t.current).collect()
     }
 
     /// The instance the token sits at, when exactly one token is live (`None`
     /// once finished or while several tokens are in flight).
     pub fn current(&self) -> Option<&InstanceHandle> {
         match &self.tokens[..] {
-            [only] => Some(only.current()),
+            [only] => Some(&only.current),
             _ => None,
         }
     }
@@ -152,37 +156,33 @@ impl<D: 'static, O: 'static> Runner<D, O> {
     /// arrival handlers, or poll once for counterparty spends (and timeout
     /// deadlines).
     ///
-    /// An error poisons the runner: the failing step is not retried, and
-    /// stepping again returns [`ProtocolError::Finished`].
+    /// An error poisons the runner: the failing step is not retried (the
+    /// tokens are dropped), and stepping again returns
+    /// [`ProtocolError::Finished`].
     pub fn step(&mut self) -> Result<Progress<O>, ProtocolError> {
-        if self.done {
+        if self.tokens.is_empty() {
             return Err(ProtocolError::Finished);
         }
         let mut advanced = false;
         let mut kept = Vec::new();
         for token in std::mem::take(&mut self.tokens) {
-            match self.step_token(token) {
-                Ok(TokenStep::Keep(t, adv)) => {
+            match self.step_token(token)? {
+                TokenStep::Keep(t, adv) => {
                     advanced |= adv;
                     kept.push(t);
                 }
-                Ok(TokenStep::Fork(ts)) => {
+                TokenStep::Fork(ts) => {
                     advanced = true;
                     kept.extend(ts);
                 }
-                Ok(TokenStep::Resolved(o)) => {
+                TokenStep::Resolved(o) => {
                     advanced = true;
                     self.outcomes.extend(o);
-                }
-                Err(e) => {
-                    self.done = true;
-                    return Err(e);
                 }
             }
         }
         self.tokens = kept;
         if self.tokens.is_empty() {
-            self.done = true;
             return Ok(Progress::Done(std::mem::take(&mut self.outcomes)));
         }
         Ok(if advanced {
@@ -208,7 +208,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                         let outpoint = self
                             .tokens
                             .first()
-                            .and_then(|t| t.current().outpoint())
+                            .and_then(|t| t.current.outpoint())
                             .ok_or(ManagerError::NotFunded)?;
                         return Err(ManagerError::SpendNotFound(outpoint).into());
                     }
@@ -243,8 +243,13 @@ impl<D: 'static, O: 'static> Runner<D, O> {
 
     /// Step one token once.
     fn step_token(&mut self, token: TokenState<O>) -> Result<TokenStep<O>, ProtocolError> {
-        match token {
-            TokenState::Arrived { current, parent } => {
+        let TokenState {
+            current,
+            parent,
+            phase,
+        } = token;
+        match phase {
+            Phase::Arrived => {
                 let key = ContractKey::of_handle(&current);
                 let handler = self.role.arrival(&key).ok_or(ProtocolError::NoHandler {
                     contract: key.name.to_string(),
@@ -258,11 +263,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 };
                 self.execute_action(action, current, parent)
             }
-            TokenState::Waiting {
-                current,
-                parent,
-                timeout,
-            } => self.poll_waiting(current, parent, timeout),
+            Phase::Waiting(timeout) => self.poll_waiting(current, parent, timeout),
         }
     }
 
@@ -289,9 +290,15 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             // Poll right away: the spend may already be there (e.g. an
             // observer catching up on an old game).
             Action::Wait => self.poll_waiting(current, parent, None),
-            Action::WaitWithTimeout { blocks, on_timeout } => {
-                self.poll_waiting(current, parent, Some((blocks, on_timeout)))
-            }
+            Action::WaitWithTimeout { blocks, on_timeout } => self.poll_waiting(
+                current,
+                parent,
+                Some(Timeout {
+                    blocks,
+                    deadline: None,
+                    on_timeout,
+                }),
+            ),
             Action::Finish(outcome) => Ok(TokenStep::Resolved(Some(outcome))),
         }
     }
@@ -302,7 +309,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         &mut self,
         current: InstanceHandle,
         parent: Option<InstanceHandle>,
-        timeout: Option<(u32, TimeoutAction<O>)>,
+        mut timeout: Option<Timeout<O>>,
     ) -> Result<TokenStep<O>, ProtocolError> {
         let outpoint = current.outpoint().ok_or(ManagerError::NotFunded)?;
 
@@ -311,21 +318,25 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             return self.follow_spend(children, current, parent);
         }
 
-        if let Some((blocks, _)) = timeout {
-            let confirmed = self.chain.confirmation_height(outpoint.txid)?;
-            let deadline = confirmed.map(|conf| conf.saturating_add(blocks).saturating_sub(1));
-            if let Some(d) = deadline
+        if let Some(t) = &mut timeout {
+            if t.deadline.is_none() {
+                t.deadline = self
+                    .chain
+                    .confirmation_height(outpoint.txid)?
+                    .map(|conf| conf.saturating_add(t.blocks).saturating_sub(1));
+            }
+            if let Some(d) = t.deadline
                 && self.chain.height()? >= d
             {
-                let (_, on_timeout) = timeout.expect("checked above");
-                return self.execute_action(on_timeout.into(), current, parent);
+                let t = timeout.expect("checked above");
+                return self.execute_action(t.on_timeout.into(), current, parent);
             }
         }
         Ok(TokenStep::Keep(
-            TokenState::Waiting {
+            TokenState {
                 current,
                 parent,
-                timeout,
+                phase: Phase::Waiting(timeout),
             },
             false,
         ))
@@ -358,9 +369,10 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         for child in children {
             let key = ContractKey::of_handle(&child);
             if self.role.handles_arrival(&key) {
-                followed.push(TokenState::Arrived {
+                followed.push(TokenState {
                     current: child,
                     parent: Some(current.clone()),
+                    phase: Phase::Arrived,
                 });
             } else if !self.role.ignores(&key) {
                 return Err(ProtocolError::NoHandler {

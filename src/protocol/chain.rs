@@ -14,7 +14,8 @@ use bitcoincore_rpc::{Client, RpcApi};
 
 use super::ProtocolError;
 use crate::manager::{
-    find_spending_tx_once, is_tx_not_found, spend_scan_start, tx_confirmation_height, ManagerError,
+    find_spending_tx_once, is_tx_not_found, spend_scan_start, tx_confirmation_height, BlockCache,
+    ManagerError,
 };
 
 /// The chain operations a protocol runner performs. Methods take `&self`
@@ -43,8 +44,16 @@ pub trait ChainView {
 /// [`ContractManager::wait_for_spend`]: crate::manager::ContractManager::wait_for_spend
 pub struct RpcChain {
     client: Client,
+    scan: RefCell<ScanState>,
+}
+
+#[derive(Default)]
+struct ScanState {
     /// Per-outpoint cursor of the next block height to scan for a spend.
-    scan_cursors: RefCell<HashMap<OutPoint, u64>>,
+    cursors: HashMap<OutPoint, u64>,
+    /// Blocks fetched by one outpoint's scan and not yet passed by all the
+    /// others, so concurrent tokens download each new block once.
+    blocks: BlockCache,
 }
 
 impl RpcChain {
@@ -53,7 +62,7 @@ impl RpcChain {
     pub fn new(client: Client) -> Self {
         RpcChain {
             client,
-            scan_cursors: RefCell::new(HashMap::new()),
+            scan: RefCell::new(ScanState::default()),
         }
     }
 }
@@ -67,12 +76,18 @@ impl ChainView for RpcChain {
     }
 
     fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ProtocolError> {
-        let mut cursors = self.scan_cursors.borrow_mut();
+        let mut scan = self.scan.borrow_mut();
+        let ScanState { cursors, blocks } = &mut *scan;
         let cursor = match cursors.entry(outpoint) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => e.insert(spend_scan_start(&self.client, outpoint)?),
         };
-        Ok(find_spending_tx_once(&self.client, outpoint, cursor)?)
+        let found = find_spending_tx_once(&self.client, outpoint, cursor, blocks)?;
+        // Once every cursor is past a height, nobody will read it again.
+        if let Some(min) = cursors.values().copied().min() {
+            blocks.retain_from(min);
+        }
+        Ok(found)
     }
 
     fn height(&self) -> Result<u32, ProtocolError> {

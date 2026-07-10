@@ -1016,8 +1016,12 @@ impl ContractManager {
         window: Option<Duration>,
     ) -> Result<Transaction, ManagerError> {
         let mut next_height = spend_scan_start(&self.rpc, outpoint)?;
+        let mut blocks = BlockCache::default();
         poll_until(window, || {
-            find_spending_tx_once(&self.rpc, outpoint, &mut next_height)
+            let found = find_spending_tx_once(&self.rpc, outpoint, &mut next_height, &mut blocks);
+            // A single cursor never re-reads a scanned block.
+            blocks.retain_from(next_height);
+            found
         })?
         .ok_or(ManagerError::SpendNotFound(outpoint))
     }
@@ -1047,14 +1051,40 @@ pub(crate) fn spend_scan_start(rpc: &Client, outpoint: OutPoint) -> Result<u64, 
     })
 }
 
+/// A cache of fetched blocks, shared between the spend scans of several
+/// outpoints so each new block is downloaded once even when many cursors walk
+/// the same range. Evict with [`retain_from`](BlockCache::retain_from) once
+/// every cursor has passed a height.
+#[derive(Default)]
+pub(crate) struct BlockCache(HashMap<u64, bitcoin::Block>);
+
+impl BlockCache {
+    fn get(&mut self, rpc: &Client, height: u64) -> Result<&bitcoin::Block, ManagerError> {
+        match self.0.entry(height) {
+            std::collections::hash_map::Entry::Occupied(e) => Ok(e.into_mut()),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let hash = rpc.get_block_hash(height)?;
+                Ok(e.insert(rpc.get_block(&hash)?))
+            }
+        }
+    }
+
+    /// Drop every cached block below `height`.
+    pub(crate) fn retain_from(&mut self, height: u64) {
+        self.0.retain(|h, _| *h >= height);
+    }
+}
+
 /// A single, non-blocking look for a transaction spending `outpoint`: the
 /// mempool first (`gettxspendingprevout`), then the blocks from `*next_height`
 /// to the tip (the cursor advances past the blocks already scanned; seed it
-/// with [`spend_scan_start`]).
+/// with [`spend_scan_start`], and share one `blocks` cache between the scans
+/// of concurrent outpoints).
 pub(crate) fn find_spending_tx_once(
     rpc: &Client,
     outpoint: OutPoint,
     next_height: &mut u64,
+    blocks: &mut BlockCache,
 ) -> Result<Option<Transaction>, ManagerError> {
     // 1. The mempool.
     let query = serde_json::json!([{
@@ -1076,8 +1106,7 @@ pub(crate) fn find_spending_tx_once(
     // 2. Blocks mined since the last look.
     let tip = rpc.get_block_count()?;
     while *next_height <= tip {
-        let hash = rpc.get_block_hash(*next_height)?;
-        let block = rpc.get_block(&hash)?;
+        let block = blocks.get(rpc, *next_height)?;
         if let Some(tx) = block
             .txdata
             .iter()
