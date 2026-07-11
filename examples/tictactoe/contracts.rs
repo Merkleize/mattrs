@@ -240,23 +240,23 @@ contract! {
             next(p, _a) { Ok(TicTacToe::tmpl_tie(p)) }
         }
 
-        // witness: <c0> ... <c8> (the turn byte is this clause's constant)
+        // witness: <board> — one 9-byte element: this clause never looks at
+        // single cells, so nothing forces a per-cell reveal (the turn byte is
+        // the clause's constant).
         clause timeout_alice_idle {
             args {
-                c0: [u8; 1], c1: [u8; 1], c2: [u8; 1],
-                c3: [u8; 1], c4: [u8; 1], c5: [u8; 1],
-                c6: [u8; 1], c7: [u8; 1], c8: [u8; 1],
+                #[from_state]
+                board: [u8; 9],
             }
             script TicTacToe::timeout_alice_idle_script;
             next(p, _a) { Ok(TicTacToe::tmpl_timeout_alice_idle(p)) }
         }
 
-        // witness: <c0> ... <c8>
+        // witness: <board>
         clause timeout_bob_idle {
             args {
-                c0: [u8; 1], c1: [u8; 1], c2: [u8; 1],
-                c3: [u8; 1], c4: [u8; 1], c5: [u8; 1],
-                c6: [u8; 1], c7: [u8; 1], c8: [u8; 1],
+                #[from_state]
+                board: [u8; 9],
             }
             script TicTacToe::timeout_bob_idle_script;
             next(p, _a) { Ok(TicTacToe::tmpl_timeout_bob_idle(p)) }
@@ -521,11 +521,12 @@ impl TicTacToe {
 
     /// A forfait claim: the committed turn byte is `idle_turn` (a constant of
     /// the clause), the UTXO sat unspent for the CSV delay, and the opponent
-    /// takes the pot via `ctv_hash`.
+    /// takes the pot via `ctv_hash`. The board is revealed as a single element
+    /// (its length is pinned by the 10-byte preimage), so there is nothing to
+    /// reassemble.
     fn timeout_script(timeout_blocks: u32, idle_turn: u8, ctv_hash: [u8; 32]) -> ScriptBuf {
         script! {
-            // witness: <c0> ... <c8>
-            OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT
+            // witness: <board>
             { push_byte(idle_turn) }
             OP_SWAP
             OP_CAT
@@ -574,43 +575,22 @@ impl TicTacToeHandle {
         })
     }
 
-    pub fn claim_alice_wins(&self) -> Result<SpendBuilder, MissingStateError> {
+    /// The pot to the holder of a line of `mark` (the timeout claims need no
+    /// wrapper: their board argument is `#[from_state]`-filled, so the
+    /// generated `timeout_*_idle()` methods already take nothing).
+    pub fn claim_win(&self, mark: u8) -> Result<SpendBuilder, MissingStateError> {
         let s = self.state_or_err()?;
-        let b = s.board;
-        Ok(self.alice_wins(
-            [s.turn],
-            [b[0]], [b[1]], [b[2]], [b[3]], [b[4]], [b[5]], [b[6]], [b[7]], [b[8]],
-        ))
-    }
-
-    pub fn claim_bob_wins(&self) -> Result<SpendBuilder, MissingStateError> {
-        let s = self.state_or_err()?;
-        let b = s.board;
-        Ok(self.bob_wins(
-            [s.turn],
-            [b[0]], [b[1]], [b[2]], [b[3]], [b[4]], [b[5]], [b[6]], [b[7]], [b[8]],
-        ))
+        let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = s.board.map(|b| [b]);
+        Ok(if mark == MARK_ALICE {
+            self.alice_wins([s.turn], c0, c1, c2, c3, c4, c5, c6, c7, c8)
+        } else {
+            self.bob_wins([s.turn], c0, c1, c2, c3, c4, c5, c6, c7, c8)
+        })
     }
 
     pub fn claim_tie(&self) -> Result<SpendBuilder, MissingStateError> {
-        let b = self.state_or_err()?.board;
-        Ok(self.tie(
-            [b[0]], [b[1]], [b[2]], [b[3]], [b[4]], [b[5]], [b[6]], [b[7]], [b[8]],
-        ))
-    }
-
-    pub fn claim_timeout_alice_idle(&self) -> Result<SpendBuilder, MissingStateError> {
-        let b = self.state_or_err()?.board;
-        Ok(self.timeout_alice_idle(
-            [b[0]], [b[1]], [b[2]], [b[3]], [b[4]], [b[5]], [b[6]], [b[7]], [b[8]],
-        ))
-    }
-
-    pub fn claim_timeout_bob_idle(&self) -> Result<SpendBuilder, MissingStateError> {
-        let b = self.state_or_err()?.board;
-        Ok(self.timeout_bob_idle(
-            [b[0]], [b[1]], [b[2]], [b[3]], [b[4]], [b[5]], [b[6]], [b[7]], [b[8]],
-        ))
+        let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = self.state_or_err()?.board.map(|b| [b]);
+        Ok(self.tie(c0, c1, c2, c3, c4, c5, c6, c7, c8))
     }
 }
 
@@ -695,13 +675,8 @@ pub mod roles {
 
                 // My line is on the board: claim the pot.
                 if has_line(&s.board, my_mark) {
-                    let builder = if alice {
-                        h.claim_alice_wins()?
-                    } else {
-                        h.claim_bob_wins()?
-                    };
                     return Ok(Action::SendFinal(
-                        builder,
+                        h.claim_win(my_mark)?,
                         TttOutcome {
                             result: my_win,
                             by_timeout: false,
@@ -739,9 +714,9 @@ pub mod roles {
                 // The opponent's turn: watch the UTXO, and claim the forfait
                 // if they idle past the timeout.
                 let builder = if alice {
-                    h.claim_timeout_bob_idle()?
+                    h.timeout_bob_idle()?
                 } else {
-                    h.claim_timeout_alice_idle()?
+                    h.timeout_alice_idle()?
                 };
                 Ok(Action::wait_or_send_final(
                     params.timeout_blocks,

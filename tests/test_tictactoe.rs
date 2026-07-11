@@ -151,7 +151,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("XXX OO. ..."),
     });
-    let tx = won.claim_alice_wins().unwrap().build_tx(&manager).unwrap();
+    let tx = won.claim_win(MARK_ALICE).unwrap().build_tx(&manager).unwrap();
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[0].value, pot);
@@ -175,7 +175,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         board: board("X.. ... ..."),
     });
     let tx = idle
-        .claim_timeout_bob_idle()
+        .timeout_bob_idle()
         .unwrap()
         .build_tx(&manager)
         .unwrap();
@@ -395,12 +395,12 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
     // No line on the board yet: a win claim must be rejected by the node's
     // script interpreter (the line scan is consensus-enforced)...
     assert!(
-        h.claim_bob_wins()?.exec_none(&mut manager).is_err(),
+        h.claim_win(MARK_BOB)?.exec_none(&mut manager).is_err(),
         "bob_wins must not validate without a line of O's"
     );
     // ...and so must a forfait claim before the CSV delay has passed.
     assert!(
-        h.claim_timeout_alice_idle()?.exec_none(&mut manager).is_err(),
+        h.timeout_alice_idle()?.exec_none(&mut manager).is_err(),
         "the forfait must not validate before the timeout"
     );
 
@@ -412,7 +412,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
         .try_into()?;
     let state = won.state().expect("expanded state");
     assert_eq!(state.board, board("XXX OO. ..."));
-    won.claim_alice_wins()?.exec_none(&mut manager)?;
+    won.claim_win(MARK_ALICE)?.exec_none(&mut manager)?;
     report_spend(
         &mut report,
         "TicTacToe",
@@ -448,7 +448,7 @@ fn test_tictactoe_forfait_on_regtest() -> Result<(), Box<dyn std::error::Error>>
     // Once the CSV delay has passed, the forfait claim validates and pays
     // Alice the whole pot.
     manager.mine_blocks((TIMEOUT + 1).into())?;
-    h.claim_timeout_bob_idle()?.exec_none(&mut manager)?;
+    h.timeout_bob_idle()?.exec_none(&mut manager)?;
     let payout = h.handle().spending_tx().expect("forfait collected");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(payout.output[0].value, Amount::from_sat(POT));
