@@ -6,11 +6,12 @@
 //! stack items instead: the tracker knows where every element lives and emits
 //! the right depth constants. Items are only ever *copied* up with `pick`
 //! (consumed copies excepted), and whatever is left is dropped by
-//! [`StackScript::verify_end`] — a couple of extra opcodes in exchange for
+//! [`StackScript::into_script`] — a couple of extra opcodes in exchange for
 //! scripts that read as a sequence of intentions.
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
+use mattrs::contracts::ArgSpec;
 use mattrs::script_helpers::{concat, drop as script_drop, merkle_root};
 
 define_pushable!();
@@ -41,6 +42,16 @@ impl StackScript {
     pub fn with_witness(names: &[&str]) -> Self {
         Self {
             stack: names.iter().map(|s| s.to_string()).collect(),
+            alt: Vec::new(),
+            parts: Vec::new(),
+        }
+    }
+
+    /// Start from a clause's own `ArgSpec` list, so the witness layout and the
+    /// tracked names have a single source of truth.
+    pub fn from_specs(specs: &[ArgSpec]) -> Self {
+        Self {
+            stack: specs.iter().map(|a| a.name.clone()).collect(),
             alt: Vec::new(),
             parts: Vec::new(),
         }
@@ -150,11 +161,7 @@ impl StackScript {
         for leaf in leaves {
             self.pick(leaf);
         }
-        self.parts.push(merkle_root(leaves.len()));
-        for _ in 0..leaves.len() {
-            self.stack.pop();
-        }
-        self.stack.push(name.to_string());
+        self.merkle_top(leaves.len(), name);
     }
 
     /// Reduce the top `n` elements (already in leaf order, deepest = leaf 0)

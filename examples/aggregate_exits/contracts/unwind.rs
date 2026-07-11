@@ -63,19 +63,14 @@ contract! {
 /// once (the RAM `write` pattern). Expects `<old> <new> <sibling> <direction>`
 /// on top; leaves `<old'> <new'>`. `direction = 1` means the current nodes are
 /// right children.
+///
+/// This is the shared-direction dual walk with the one sibling duplicated:
+/// `<old> <new> <sib> <d>` becomes `<old> <new> <sib> <sib> <d>`.
 fn dual_update_layer() -> ScriptBuf {
-    script! {
-        OP_IF
-            OP_DUP OP_TOALTSTACK
-            OP_ROT OP_CAT OP_SHA256
-            OP_SWAP OP_FROMALTSTACK OP_SWAP OP_CAT OP_SHA256
-        OP_ELSE
-            OP_DUP OP_TOALTSTACK
-            OP_CAT OP_SHA256
-            OP_SWAP OP_FROMALTSTACK OP_CAT OP_SHA256
-            OP_SWAP
-        OP_ENDIF
-    }
+    mattrs::script_helpers::concat(&[
+        script! { OP_SWAP OP_DUP OP_ROT },
+        super::dual_proof_layer(),
+    ])
 }
 
 impl Unwind {
@@ -91,14 +86,7 @@ impl Unwind {
 
     fn withdraw_direct_script(p: &PoolParams) -> ScriptBuf {
         let depth = p.depth();
-        let mut names: Vec<String> = vec!["pk".into(), "bal".into()];
-        for l in 0..depth {
-            names.push(format!("h_{l}"));
-            names.push(format!("d_{l}"));
-        }
-        names.push("root".into());
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut s = StackScript::with_witness(&name_refs);
+        let mut s = StackScript::from_specs(&Self::withdraw_direct_specs(p));
 
         // The claimed root is the input's committed state.
         s.ccv(
@@ -190,16 +178,10 @@ impl Unwind {
         specs
     }
 
-    fn start_exit_script(p: &PoolParams) -> ScriptBuf {
+    // Public so the tests can assert on the generated script (bit guards).
+    pub fn start_exit_script(p: &PoolParams) -> ScriptBuf {
         let n = p.padded_size();
-        let mut names: Vec<String> =
-            vec!["ut".into(), "root".into(), "r_prime".into()];
-        for u in 0..n {
-            names.push(format!("bit_{u}"));
-        }
-        names.extend(["ingrid_pk".into(), "trace_i".into(), "x".into()]);
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut s = StackScript::with_witness(&name_refs);
+        let mut s = StackScript::from_specs(&Self::start_exit_specs(p));
 
         // Bind the witness copy of our own taptree (a script cannot contain
         // its own hash; the dispute chain needs it later to revert here) and
@@ -208,7 +190,7 @@ impl Unwind {
             Source::Item("root"),
             -1,
             Source::None,
-            Source::Item("ut"),
+            Source::Item("unwind_taptree"),
             CCV_FLAG_CHECK_INPUT,
         );
 
@@ -216,8 +198,19 @@ impl Unwind {
         // commitment here, so anyone can recompute the honest claim and
         // challenge a false one. O(n) script work at claim time; the rest of
         // the protocol only ever touches single bits by Merkle proof.
+        //
+        // Each bit must be the *canonical* encoding of 0 or 1 — only `[]` and
+        // `[0x01]` survive `x == 0NOTEQUAL(x)` byte-wise. The bit-consuming
+        // clauses (ExitLeaf, challenge_delegation) can only prove canonical
+        // leaves, so a non-canonical bit would make its step undisputable by
+        // either party: an unchallengeable claim. Reject it at the source.
         for u in 0..n {
             s.roll(&format!("bit_{u}"));
+            s.raw(
+                script! { OP_DUP OP_DUP OP_0NOTEQUAL OP_EQUALVERIFY },
+                1,
+                &["bit"],
+            );
             s.sha256_top(&format!("bitleaf_{u}"));
         }
         s.merkle_top(n, "s_root");
@@ -225,7 +218,7 @@ impl Unwind {
         s.pick("x");
         s.sha256_top("x_leaf");
         s.merkle_of(
-            &["ut", "root", "r_prime", "s_root", "ingrid_pk", "trace_i", "x_leaf"],
+            &["unwind_taptree", "root", "r_prime", "s_root", "ingrid_pk", "trace_i", "x_leaf"],
             "pe_state",
         );
 

@@ -14,7 +14,8 @@ use super::dispute::{BisectRangeParams, ExitBisect1, ExitBisect1State};
 use super::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
 use super::{
-    spec, spec_num, step_h, w32, ChallengeContext, ExitClaim, PoolParams, PoolTree,
+    dual_proof_layer, spec, spec_num, step_h, w32, ChallengeContext, ExitClaim, PoolParams,
+    PoolTree,
 };
 
 define_pushable!();
@@ -85,9 +86,6 @@ impl PendingExitState {
     }
 }
 
-/// The tracked-stack names of [`PendingExitState::to_witness`], bottom → top.
-const STATE_ITEMS: [&str; 7] = ["ut", "r", "r_prime", "s_root", "ipk", "tr_i", "x"];
-
 contract! {
     /// The claim matures over `challenge_period` blocks. Anyone may then
     /// `finalize` it (the outputs are covenant-fixed); before that, anyone may
@@ -103,7 +101,7 @@ contract! {
         params PoolParams;
         state PendingExitState;
 
-        // witness: <ut> <r> <r_prime> <s_root> <ipk> <tr_i> <x>
+        // witness: <unwind_taptree> <r> <r_prime> <s_root> <ingrid_pk> <trace_i> <x>
         clause finalize {
             args raw |_p| PendingExit::state_specs();
             script PendingExit::finalize_script;
@@ -135,25 +133,6 @@ contract! {
     }
 }
 
-/// One level of the shared-direction dual Merkle walk: proves the same leaf
-/// index in the account tree and the bit tree at once. Expects
-/// `<a> <b> <sib_a> <sib_b> <direction>` on top; leaves `<a'> <b'>`.
-/// `direction = 1` means the current nodes are right children.
-fn dual_proof_layer() -> ScriptBuf {
-    use bitcoin_script::script;
-    script! {
-        OP_IF
-            OP_TOALTSTACK
-            OP_ROT OP_CAT OP_SHA256
-            OP_SWAP OP_FROMALTSTACK OP_SWAP OP_CAT OP_SHA256
-        OP_ELSE
-            OP_TOALTSTACK
-            OP_ROT OP_SWAP OP_CAT OP_SHA256
-            OP_SWAP OP_FROMALTSTACK OP_CAT OP_SHA256
-        OP_ENDIF
-    }
-}
-
 impl PendingExit {
     fn state_specs() -> Vec<ArgSpec> {
         vec![
@@ -167,28 +146,31 @@ impl PendingExit {
         ]
     }
 
-    /// Reveal the state leaves on `s` and verify them against the input
-    /// commitment (own taptree). Leaves the seven items tracked.
-    fn reveal_state(s: &mut StackScript) {
+    /// Reveal the state leaves on `s`, commit them as `as_name`, and verify
+    /// against the input. `taptree` is `Source::Current` when the clause may
+    /// rely on the input's own taptree, or the witness `pe_taptree` when the
+    /// clause must bind a copy of it for downstream use. Leaves the seven
+    /// witness items (and `as_name`) tracked.
+    fn reveal_state(s: &mut StackScript, as_name: &str, taptree: Source) {
         s.pick("x");
         s.sha256_top("x_leaf");
         s.merkle_of(
-            &["ut", "r", "r_prime", "s_root", "ipk", "tr_i", "x_leaf"],
-            "state",
+            &["unwind_taptree", "r", "r_prime", "s_root", "ingrid_pk", "trace_i", "x_leaf"],
+            as_name,
         );
         s.ccv(
-            Source::Item("state"),
+            Source::Item(as_name),
             -1,
             Source::None,
-            Source::Current,
+            taptree,
             CCV_FLAG_CHECK_INPUT,
         );
     }
 
     fn finalize_script(p: &PoolParams) -> ScriptBuf {
-        let mut s = StackScript::with_witness(&STATE_ITEMS);
+        let mut s = StackScript::from_specs(&Self::state_specs());
         s.older(p.challenge_period);
-        Self::reveal_state(&mut s);
+        Self::reveal_state(&mut s, "state", Source::Current);
 
         // Output 0 pays Ingrid.
         // TODO(OP_AMOUNT): enforce that output 0 carries exactly `x + bond`
@@ -196,12 +178,18 @@ impl PendingExit {
         s.ccv(
             Source::None,
             0,
-            Source::Item("ipk"),
+            Source::Item("ingrid_pk"),
             Source::None,
             CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
         );
         // Output 1 continues the pool at the claimed post-exit root.
-        s.ccv(Source::Item("r_prime"), 1, Source::None, Source::Item("ut"), 0);
+        s.ccv(
+            Source::Item("r_prime"),
+            1,
+            Source::None,
+            Source::Item("unwind_taptree"),
+            0,
+        );
         s.into_script()
     }
 
@@ -228,25 +216,11 @@ impl PendingExit {
     }
 
     fn challenge_state_script(p: &PoolParams) -> ScriptBuf {
-        let mut names = STATE_ITEMS.to_vec();
-        names.extend(["pe_tt", "cpk", "h_end_c", "trace_c"]);
-        let mut s = StackScript::with_witness(&names);
+        let mut s = StackScript::from_specs(&Self::challenge_state_specs());
 
         // Verify the state against the input, binding the witness copy of our
         // own taptree (needed downstream to resume this claim).
-        s.pick("x");
-        s.sha256_top("x_leaf");
-        s.merkle_of(
-            &["ut", "r", "r_prime", "s_root", "ipk", "tr_i", "x_leaf"],
-            "resume",
-        );
-        s.ccv(
-            Source::Item("resume"),
-            -1,
-            Source::None,
-            Source::Item("pe_tt"),
-            CCV_FLAG_CHECK_INPUT,
-        );
+        Self::reveal_state(&mut s, "resume", Source::Item("pe_taptree"));
 
         // The bisection endpoints: h_start = H(r || bn2vch(0)) = H(r), and
         // Ingrid's claimed end H(r_prime || bn2vch(x)); the challenger commits
@@ -255,7 +229,7 @@ impl PendingExit {
         s.sha_cat(&["r_prime", "x"], "h_end_i");
         s.sha_cat(&super::CARRY_ITEMS, "carry");
         s.merkle_of(
-            &["h_start", "h_end_i", "h_end_c", "tr_i", "trace_c", "carry"],
+            &["h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "carry"],
             "b1_state",
         );
 
@@ -308,29 +282,9 @@ impl PendingExit {
 
     fn challenge_delegation_script(p: &PoolParams) -> ScriptBuf {
         let depth = p.depth();
-        let mut names: Vec<String> = STATE_ITEMS.iter().map(|s| s.to_string()).collect();
-        names.extend(["pe_tt".into(), "cpk".into(), "user_pk".into(), "bal".into()]);
-        for l in 0..depth {
-            names.push(format!("sib_r_{l}"));
-            names.push(format!("sib_s_{l}"));
-            names.push(format!("d_{l}"));
-        }
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut s = StackScript::with_witness(&name_refs);
+        let mut s = StackScript::from_specs(&Self::challenge_delegation_specs(p));
 
-        s.pick("x");
-        s.sha256_top("x_leaf");
-        s.merkle_of(
-            &["ut", "r", "r_prime", "s_root", "ipk", "tr_i", "x_leaf"],
-            "resume",
-        );
-        s.ccv(
-            Source::Item("resume"),
-            -1,
-            Source::None,
-            Source::Item("pe_tt"),
-            CCV_FLAG_CHECK_INPUT,
-        );
+        Self::reveal_state(&mut s, "resume", Source::Item("pe_taptree"));
 
         // One shared-direction walk proves that the challenged slot holds
         // `(user_pk, bal)` in the pool root *and* that its exit bit is set.
@@ -346,7 +300,7 @@ impl PendingExit {
         s.expect_equal("b", "s_root");
 
         s.merkle_of(
-            &["resume", "pe_tt", "ut", "r", "ipk", "user_pk", "cpk"],
+            &["resume", "pe_taptree", "unwind_taptree", "r", "ingrid_pk", "user_pk", "challenger_pk"],
             "dc_state",
         );
         // TODO(OP_AMOUNT): enforce that output 0 carries the pot plus the
@@ -408,7 +362,7 @@ impl PendingExitHandle {
         let mut witness = state.to_witness();
         witness.push(pe_taptree.to_vec());
         witness.push(challenger_pk.serialize().to_vec());
-        witness.push(honest.hs[honest.hs.len() - 1].to_vec());
+        witness.push(honest.hs.last().unwrap().to_vec());
         witness.push(honest.trace.to_vec());
         self.0.spend_clause("challenge_state", witness)
     }

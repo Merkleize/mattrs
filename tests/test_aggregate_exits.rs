@@ -8,65 +8,17 @@
 mod support;
 
 use bitcoin::bip32::Xpriv;
-use bitcoin::key::{Keypair, Secp256k1};
-use bitcoin::{Amount, Network, Transaction, XOnlyPublicKey};
+use bitcoin::key::Secp256k1;
+use bitcoin::{Amount, Network, Transaction};
 use mattrs::manager::{ContractManager, InstanceHandle, SpendBuilder};
 use mattrs::merkle::NIL;
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
+// The demo cast (pool, keys, exit set) is shared with the demo binary.
+use support::aggregate_exits::fixture::*;
 use support::aggregate_exits::*;
 use support::testkit::{fund_fake, offline_manager, try_handle};
-
-// ============================================================================
-// Fixture
-// ============================================================================
-
-const BOND: i64 = 10_000;
-/// Balances 1000, 2000, ..., 6000 — total 21_000, all sums well under 2^31.
-const POOL_TOTAL: u64 = 21_000;
-
-fn params() -> PoolParams {
-    PoolParams {
-        pool_id: [7u8; 32],
-        n_users: 6, // padded to 8
-        challenge_period: 10,
-        response_timeout: 5,
-        bond: BOND,
-    }
-}
-
-fn user_xpriv(i: usize) -> Xpriv {
-    Xpriv::new_master(Network::Regtest, &[10 + i as u8]).unwrap()
-}
-
-fn ingrid_xpriv() -> Xpriv {
-    Xpriv::new_master(Network::Regtest, &[99]).unwrap()
-}
-
-fn xonly(xpriv: &Xpriv) -> XOnlyPublicKey {
-    xpriv.to_priv().public_key(&Secp256k1::new()).into()
-}
-
-fn keypair(xpriv: &Xpriv) -> Keypair {
-    Keypair::from_secret_key(&Secp256k1::new(), &xpriv.to_priv().inner)
-}
-
-fn pool() -> PoolTree {
-    let accounts: Vec<(XOnlyPublicKey, i64)> = (0..6)
-        .map(|i| (xonly(&user_xpriv(i)), 1000 * (i as i64 + 1)))
-        .collect();
-    PoolTree::new(&params(), &accounts)
-}
-
-/// The demo exit set: users 1, 2 and 4 (aggregate 2000 + 3000 + 5000).
-fn exit_bits() -> Vec<bool> {
-    let mut bits = vec![false; 8];
-    bits[1] = true;
-    bits[2] = true;
-    bits[4] = true;
-    bits
-}
 
 /// Build the batch transaction, then decode it against every input's instance,
 /// materializing (deduplicated) children. The offline counterpart of
@@ -269,6 +221,26 @@ fn all_tapscripts_build() {
         for k in 0..n {
             ExitLeaf::new(LeafStepParams { pool: p.clone(), k }).taptree_root();
         }
+    }
+}
+
+/// `start_exit` must reject non-canonical bit encodings (one guard per slot):
+/// the bit-consuming clauses can only prove canonical `commit_int(0|1)` leaves,
+/// so a garbage bit would make its step undisputable by either party — an
+/// unchallengeable claim. Offline tests don't execute scripts, so assert the
+/// guard's presence in the generated tapscript instead (the e2e runs execute it).
+#[test]
+fn start_exit_canonicalizes_the_published_bits() {
+    use bitcoin::blockdata::opcodes::all::OP_0NOTEQUAL;
+    for n_users in [2u32, 6, 9] {
+        let mut p = params();
+        p.n_users = n_users;
+        let script = Unwind::start_exit_script(&p);
+        let guards = script
+            .instructions()
+            .filter(|i| matches!(i, Ok(bitcoin::script::Instruction::Op(op)) if *op == OP_0NOTEQUAL))
+            .count();
+        assert_eq!(guards, p.padded_size(), "one canonical-bit guard per slot");
     }
 }
 
@@ -706,13 +678,34 @@ fn regtest_setup(
     Ok((manager, mattrs::report::Report::new()))
 }
 
+/// Fund Ingrid's bond and post `claim` from `unwind`, returning the merged
+/// [`PendingExit`] — the regtest counterpart of [`claimed_pool`].
+fn regtest_claim(
+    manager: &mut ContractManager,
+    unwind: &UnwindHandle,
+    claim: &ExitClaim,
+) -> Result<(PendingExitHandle, PendingExitState), Box<dyn std::error::Error>> {
+    let ingrid_pk = xonly(&ingrid_xpriv());
+    let bond = ExitBond::new(ExitBondParams {
+        pool: params(),
+        owner_pk: ingrid_pk,
+    })
+    .fund(manager, Amount::from_sat(BOND as u64))?;
+    let claim_state = PendingExitState::for_claim(&params(), claim, &ingrid_pk);
+    let children = manager.spend_batch(&[
+        unwind.start_exit(claim, &ingrid_pk),
+        bond.stake_claim(&claim_state)
+            .sign(HotSigner::new(ingrid_xpriv())),
+    ])?;
+    Ok((try_handle(children[0].clone()), claim_state))
+}
+
 #[test]
 #[ignore = "requires a running MATT-enabled regtest bitcoind"]
 fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     use support::testkit::report_spend;
     let (mut manager, mut report) = regtest_setup("testwallet")?;
     let pool = pool();
-    let ingrid_pk = xonly(&ingrid_xpriv());
 
     let unwind = Unwind::new(params()).fund(
         &mut manager,
@@ -737,19 +730,8 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
     bits[4] = true;
     let claim = compute_claim(&after, &bits);
     assert_eq!(claim.x, 7_000);
-    let bond = ExitBond::new(ExitBondParams {
-        pool: params(),
-        owner_pk: ingrid_pk,
-    })
-    .fund(&mut manager, Amount::from_sat(BOND as u64))?;
-
-    let claim_state = PendingExitState::for_claim(&params(), &claim, &ingrid_pk);
-    let children = manager.spend_batch(&[
-        unwind.start_exit(&claim, &ingrid_pk),
-        bond.stake_claim(&claim_state).sign(HotSigner::new(ingrid_xpriv())),
-    ])?;
+    let (pending, _) = regtest_claim(&mut manager, &unwind, &claim)?;
     report_spend(&mut report, "AggregateExits", "start_exit + bond", unwind.handle());
-    let pending: PendingExitHandle = try_handle(children[0].clone());
 
     // The claim matures unchallenged; Ingrid finalizes.
     manager.mine_blocks(params().challenge_period as u64)?;
@@ -771,7 +753,6 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     use support::testkit::report_spend;
     let (mut manager, mut report) = regtest_setup("testwallet")?;
     let pool = pool();
-    let ingrid_pk = xonly(&ingrid_xpriv());
 
     let unwind = Unwind::new(params()).fund(
         &mut manager,
@@ -782,17 +763,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     // Ingrid claims 2000 sats too much at step 4.
     let lie = compute_claim_with_lie(&pool, &exit_bits(), Some((4, 2_000)));
     let honest = compute_claim(&pool, &exit_bits());
-    let claim_state = PendingExitState::for_claim(&params(), &lie, &ingrid_pk);
-    let ibond = ExitBond::new(ExitBondParams {
-        pool: params(),
-        owner_pk: ingrid_pk,
-    })
-    .fund(&mut manager, Amount::from_sat(BOND as u64))?;
-    let children = manager.spend_batch(&[
-        unwind.start_exit(&lie, &ingrid_pk),
-        ibond.stake_claim(&claim_state).sign(HotSigner::new(ingrid_xpriv())),
-    ])?;
-    let pending: PendingExitHandle = try_handle(children[0].clone());
+    let (pending, claim_state) = regtest_claim(&mut manager, &unwind, &lie)?;
 
     // User 0 opens the bisection game.
     let challenger = user_xpriv(0);
@@ -851,17 +822,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         UnwindState { root: pool.root() },
     )?;
     let honest = compute_claim(&pool, &exit_bits());
-    let claim_state = PendingExitState::for_claim(&params(), &honest, &ingrid_pk);
-    let ibond = ExitBond::new(ExitBondParams {
-        pool: params(),
-        owner_pk: ingrid_pk,
-    })
-    .fund(&mut manager, Amount::from_sat(BOND as u64))?;
-    let children = manager.spend_batch(&[
-        unwind.start_exit(&honest, &ingrid_pk),
-        ibond.stake_claim(&claim_state).sign(HotSigner::new(ingrid_xpriv())),
-    ])?;
-    let pending: PendingExitHandle = try_handle(children[0].clone());
+    let (pending, claim_state) = regtest_claim(&mut manager, &unwind, &honest)?;
 
     // User 2 disputes their own delegation; Ingrid defends with the signature.
     let challenger = user_xpriv(2);

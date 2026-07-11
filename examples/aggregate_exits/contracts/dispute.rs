@@ -25,8 +25,7 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, ContractState, WitnessError, CCV_FLAG_CHECK_INPUT,
-    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, ClauseError, ClauseOutput, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
 };
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{get_directions, is_power_of_2, MerkleTree, NIL};
@@ -124,17 +123,7 @@ impl ExitBisect1State {
     }
 }
 
-impl ContractState for ExitBisect1State {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(self.leaves()).root().to_vec()
-    }
-
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::DecodingFailed(
-            "ExitBisect1State is committed as an opaque Merkle root".to_string(),
-        ))
-    }
-}
+super::opaque_merkle_state!(ExitBisect1State);
 
 /// [`ExitBisect2`] state: [`ExitBisect1State`] plus Ingrid's revealed midpoint
 /// and half-traces.
@@ -171,17 +160,7 @@ impl ExitBisect2State {
     }
 }
 
-impl ContractState for ExitBisect2State {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(self.leaves()).root().to_vec()
-    }
-
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::DecodingFailed(
-            "ExitBisect2State is committed as an opaque Merkle root".to_string(),
-        ))
-    }
-}
+super::opaque_merkle_state!(ExitBisect2State);
 
 /// [`ExitLeaf`] state: the agreed start, the two claimed ends, the carry.
 #[derive(Debug, Clone)]
@@ -198,17 +177,7 @@ impl ExitLeafState {
     }
 }
 
-impl ContractState for ExitLeafState {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(self.leaves()).root().to_vec()
-    }
-
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::DecodingFailed(
-            "ExitLeafState is committed as an opaque Merkle root".to_string(),
-        ))
-    }
-}
+super::opaque_merkle_state!(ExitLeafState);
 
 // ============================================================================
 // Settlement (shared by forfaits and leaf outcomes)
@@ -269,8 +238,8 @@ fn settlement_outputs(
 /// loser is Ingrid (the challenger also recovers their own bond).
 fn settlement_script(s: &mut StackScript, winner: DisputeWinner) {
     let winner_item = match winner {
-        DisputeWinner::Ingrid => "ipk",
-        DisputeWinner::Challenger => "cpk",
+        DisputeWinner::Ingrid => "ingrid_pk",
+        DisputeWinner::Challenger => "challenger_pk",
     };
     s.ccv(
         Source::None,
@@ -287,19 +256,54 @@ fn settlement_script(s: &mut StackScript, winner: DisputeWinner) {
         CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
     );
     match winner {
-        DisputeWinner::Ingrid => {
-            s.ccv(Source::Item("resume"), 2, Source::None, Source::Item("pe_tt"), 0)
-        }
-        DisputeWinner::Challenger => {
-            s.ccv(Source::Item("r"), 2, Source::None, Source::Item("ut"), 0)
-        }
+        DisputeWinner::Ingrid => s.ccv(
+            Source::Item("resume"),
+            2,
+            Source::None,
+            Source::Item("pe_taptree"),
+            0,
+        ),
+        DisputeWinner::Challenger => s.ccv(
+            Source::Item("r"),
+            2,
+            Source::None,
+            Source::Item("unwind_taptree"),
+            0,
+        ),
     }
+}
+
+/// The forfait witness: the state's plain leaves (the carry leaf omitted at
+/// `carry_index`) followed by the expanded carry components — the layout of
+/// every clause that re-expands the carry in-script.
+fn carry_expanded_witness(
+    leaves: &[[u8; 32]],
+    carry_index: usize,
+    ctx: &ChallengeContext,
+) -> Vec<Vec<u8>> {
+    let mut witness: Vec<Vec<u8>> = leaves
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != carry_index)
+        .map(|(_, l)| l.to_vec())
+        .collect();
+    witness.extend(ctx.carry_witness());
+    witness
 }
 
 const B1_ITEMS: [&str; 5] = ["h_start", "h_end_i", "h_end_c", "trace_i", "trace_c"];
 const B2_ITEMS: [&str; 8] = [
     "h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "h_mid_i", "t_left_i", "t_right_i",
 ];
+
+/// The committed-leaves name list of a bisection state: `items` with the
+/// carry leaf inserted at position 5 (after the endpoint/trace leaves).
+fn with_carry(items: &[&'static str]) -> Vec<&'static str> {
+    let mut leaves = items[..5].to_vec();
+    leaves.push("carry");
+    leaves.extend(&items[5..]);
+    leaves
+}
 
 // ============================================================================
 // ExitBisect1 — Ingrid's turn
@@ -324,7 +328,7 @@ contract! {
         }
 
         // witness: <h_start> <h_end_i> <h_end_c> <trace_i> <trace_c>
-        //          <ipk> <cpk> <s_root> <r> <resume> <pe_tt> <ut>
+        //          <carry components x 7>
         clause forfait {
             args raw |_p| ExitBisect1::forfait_specs();
             script ExitBisect1::forfait_script;
@@ -339,21 +343,15 @@ contract! {
 
 impl ExitBisect1 {
     fn ingrid_reveal_specs() -> Vec<ArgSpec> {
-        let mut specs: Vec<ArgSpec> = B1_ITEMS.iter().map(|n| spec(n)).collect();
-        specs.push(spec("carry"));
+        let mut specs: Vec<ArgSpec> = with_carry(&B1_ITEMS).iter().map(|n| spec(n)).collect();
         specs.extend([spec("h_mid_i"), spec("t_left_i"), spec("t_right_i")]);
         specs
     }
 
     fn ingrid_reveal_script(p: &BisectRangeParams) -> ScriptBuf {
-        let mut names = B1_ITEMS.to_vec();
-        names.extend(["carry", "h_mid_i", "t_left_i", "t_right_i"]);
-        let mut s = StackScript::with_witness(&names);
+        let mut s = StackScript::from_specs(&Self::ingrid_reveal_specs());
 
-        s.merkle_of(
-            &["h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "carry"],
-            "state",
-        );
+        s.merkle_of(&with_carry(&B1_ITEMS), "state");
         s.ccv(
             Source::Item("state"),
             -1,
@@ -367,13 +365,7 @@ impl ExitBisect1 {
         s.sha_cat(&["h_start", "h_end_i", "t_left_i", "t_right_i"], "t");
         s.expect_equal("t", "trace_i");
 
-        s.merkle_of(
-            &[
-                "h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "carry", "h_mid_i",
-                "t_left_i", "t_right_i",
-            ],
-            "b2_state",
-        );
+        s.merkle_of(&with_carry(&B2_ITEMS), "b2_state");
         let b2_root = ExitBisect2::new(p.clone()).taptree_root();
         s.ccv(Source::Item("b2_state"), -1, Source::None, Source::Const(b2_root), 0);
         s.into_script()
@@ -414,14 +406,10 @@ impl ExitBisect1 {
     }
 
     fn forfait_script(p: &BisectRangeParams) -> ScriptBuf {
-        let names: Vec<&str> = B1_ITEMS.iter().chain(CARRY_ITEMS.iter()).copied().collect();
-        let mut s = StackScript::with_witness(&names);
+        let mut s = StackScript::from_specs(&Self::forfait_specs());
         s.older(p.pool.response_timeout);
         s.sha_cat(&CARRY_ITEMS, "carry");
-        s.merkle_of(
-            &["h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "carry"],
-            "state",
-        );
+        s.merkle_of(&with_carry(&B1_ITEMS), "state");
         s.ccv(
             Source::Item("state"),
             -1,
@@ -465,9 +453,7 @@ impl ExitBisect1Handle {
     /// `.output_amount(1, bond - bond / 2)`).
     pub fn forfait(&self) -> SpendBuilder {
         let state = self.bisect_state();
-        let mut witness: Vec<Vec<u8>> = state.to_witness();
-        witness.pop(); // the carry leaf is recomputed in-script from...
-        witness.extend(state.ctx.carry_witness()); // ...its expanded components
+        let witness = carry_expanded_witness(&state.leaves(), 5, &state.ctx);
         self.0
             .spend_clause("forfait", witness)
             .sequence(self.params().expect("params decode").pool.response_timeout)
@@ -526,27 +512,15 @@ enum Side {
 
 impl ExitBisect2 {
     fn reveal_specs() -> Vec<ArgSpec> {
-        let mut specs: Vec<ArgSpec> = B2_ITEMS[..5].iter().map(|n| spec(n)).collect();
-        specs.push(spec("carry"));
-        specs.extend(B2_ITEMS[5..].iter().map(|n| spec(n)));
+        let mut specs: Vec<ArgSpec> = with_carry(&B2_ITEMS).iter().map(|n| spec(n)).collect();
         specs.extend([spec("h_mid_c"), spec("t_left_c"), spec("t_right_c")]);
         specs
     }
 
     fn reveal_script(p: &BisectRangeParams, side: Side) -> ScriptBuf {
-        let mut names = B2_ITEMS[..5].to_vec();
-        names.push("carry");
-        names.extend(&B2_ITEMS[5..]);
-        names.extend(["h_mid_c", "t_left_c", "t_right_c"]);
-        let mut s = StackScript::with_witness(&names);
+        let mut s = StackScript::from_specs(&Self::reveal_specs());
 
-        s.merkle_of(
-            &[
-                "h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "carry", "h_mid_i",
-                "t_left_i", "t_right_i",
-            ],
-            "state",
-        );
+        s.merkle_of(&with_carry(&B2_ITEMS), "state");
         s.ccv(
             Source::Item("state"),
             -1,
@@ -688,17 +662,10 @@ impl ExitBisect2 {
     }
 
     fn forfait_script(p: &BisectRangeParams) -> ScriptBuf {
-        let names: Vec<&str> = B2_ITEMS.iter().chain(CARRY_ITEMS.iter()).copied().collect();
-        let mut s = StackScript::with_witness(&names);
+        let mut s = StackScript::from_specs(&Self::forfait_specs());
         s.older(p.pool.response_timeout);
         s.sha_cat(&CARRY_ITEMS, "carry");
-        s.merkle_of(
-            &[
-                "h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "carry", "h_mid_i",
-                "t_left_i", "t_right_i",
-            ],
-            "state",
-        );
+        s.merkle_of(&with_carry(&B2_ITEMS), "state");
         s.ccv(
             Source::Item("state"),
             -1,
@@ -748,14 +715,7 @@ impl ExitBisect2Handle {
     /// `.output_amount(1, bond - bond / 2)`).
     pub fn forfait(&self) -> SpendBuilder {
         let state = self.bisect_state();
-        let mut witness: Vec<Vec<u8>> = state
-            .leaves()
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != 5) // the carry leaf is recomputed in-script
-            .map(|(_, l)| l.to_vec())
-            .collect();
-        witness.extend(state.ctx.carry_witness());
+        let witness = carry_expanded_witness(&state.leaves(), 5, &state.ctx);
         self.0
             .spend_clause("forfait", witness)
             .sequence(self.params().expect("params decode").pool.response_timeout)
@@ -878,31 +838,8 @@ impl ExitLeaf {
     }
 
     fn case_script(p: &LeafStepParams, case: StepCase, winner: DisputeWinner) -> ScriptBuf {
-        let depth = p.pool.depth();
         let dirs = Self::directions(p);
-
-        let mut names: Vec<String> = ["h_start", "h_end_i", "h_end_c"]
-            .iter()
-            .chain(CARRY_ITEMS.iter())
-            .map(|n| n.to_string())
-            .collect();
-        match case {
-            StepCase::Noop => {}
-            StepCase::Nil => names.extend(["root_k".into(), "sum".into()]),
-            StepCase::Spend => {
-                names.extend(["root_k".into(), "sum".into(), "user_pk".into(), "bal".into()])
-            }
-        }
-        for l in 0..depth {
-            names.push(format!("s_sib_{l}"));
-        }
-        if case != StepCase::Noop {
-            for l in 0..depth {
-                names.push(format!("r_sib_{l}"));
-            }
-        }
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut s = StackScript::with_witness(&name_refs);
+        let mut s = StackScript::from_specs(&Self::case_specs(p, case));
 
         // Reveal the state (expanding the carry) and bind it to the input.
         s.sha_cat(&CARRY_ITEMS, "carry");
@@ -1022,12 +959,7 @@ impl ExitLeafHandle {
             (DisputeWinner::Challenger, StepCase::Spend) => "challenger_spend",
         };
 
-        let mut witness = vec![
-            state.h_start.to_vec(),
-            state.h_end_i.to_vec(),
-            state.h_end_c.to_vec(),
-        ];
-        witness.extend(state.ctx.carry_witness());
+        let mut witness = carry_expanded_witness(&state.leaves(), 3, &state.ctx);
         match case {
             StepCase::Noop => {}
             StepCase::Nil => {

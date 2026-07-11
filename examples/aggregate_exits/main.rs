@@ -26,42 +26,12 @@
 mod contracts;
 
 use bitcoin::bip32::Xpriv;
-use bitcoin::key::{Keypair, Secp256k1};
 use bitcoin::{Amount, Network, XOnlyPublicKey};
 use mattrs::manager::{regtest_rpc_client, ContractManager, InstanceHandle};
 use mattrs::signer::HotSigner;
 
+use contracts::fixture::*;
 use contracts::*;
-
-const BOND: i64 = 10_000;
-const BALANCES: [i64; 6] = [1_000, 2_000, 3_000, 4_000, 5_000, 6_000];
-const POOL_TOTAL: u64 = 21_000;
-
-fn params() -> PoolParams {
-    PoolParams {
-        pool_id: [7u8; 32],
-        n_users: 6, // padded to 8 slots
-        challenge_period: 10,
-        response_timeout: 5,
-        bond: BOND,
-    }
-}
-
-fn user_xpriv(i: usize) -> Xpriv {
-    Xpriv::new_master(Network::Regtest, &[10 + i as u8]).unwrap()
-}
-
-fn ingrid_xpriv() -> Xpriv {
-    Xpriv::new_master(Network::Regtest, &[99]).unwrap()
-}
-
-fn xonly(xpriv: &Xpriv) -> XOnlyPublicKey {
-    xpriv.to_priv().public_key(&Secp256k1::new()).into()
-}
-
-fn keypair(xpriv: &Xpriv) -> Keypair {
-    Keypair::from_secret_key(&Secp256k1::new(), &xpriv.to_priv().inner)
-}
 
 fn short(bytes: &[u8; 32]) -> String {
     bytes[..4].iter().map(|b| format!("{b:02x}")).collect()
@@ -89,10 +59,7 @@ struct Stage {
 impl Stage {
     fn new(wallet: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let params = params();
-        let accounts: Vec<(XOnlyPublicKey, i64)> = (0..6)
-            .map(|i| (xonly(&user_xpriv(i)), BALANCES[i]))
-            .collect();
-        let pool = PoolTree::new(&params, &accounts);
+        let pool = pool();
 
         let mut manager =
             ContractManager::new(regtest_rpc_client(wallet), Network::Regtest);
@@ -253,14 +220,6 @@ fn scenario_direct(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn exit_bits() -> Vec<bool> {
-    let mut bits = vec![false; 8];
-    bits[1] = true;
-    bits[2] = true;
-    bits[4] = true;
-    bits
-}
-
 fn scenario_happy(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== happy: users 1, 2 and 4 exit through Ingrid, unchallenged ===");
     let mut stage = Stage::new(wallet)?;
@@ -359,10 +318,10 @@ fn scenario_delegation_defend(wallet: &str) -> Result<(), Box<dyn std::error::Er
     println!("\n=== delegation-defend: \"user 2 never delegated!\" — but they did ===");
     let mut stage = Stage::new(wallet)?;
     let honest = compute_claim(&stage.pool, &exit_bits());
-    // Users 1, 2 and 4 sign delegations off-chain before the claim.
-    let delegations: Vec<[u8; 64]> = (0..6)
-        .map(|i| sign_delegation(&keypair(&user_xpriv(i)), &stage.params.pool_id, &stage.ingrid_pk))
-        .collect();
+    // User 2 signed a delegation off-chain before the claim (so did 1 and 4,
+    // but only user 2's will be challenged).
+    let delegation_2 =
+        sign_delegation(&keypair(&user_xpriv(2)), &stage.params.pool_id, &stage.ingrid_pk);
     let (pending, claim_state) = stage.claim(&honest)?;
 
     let challenger = user_xpriv(2);
@@ -377,7 +336,7 @@ fn scenario_delegation_defend(wallet: &str) -> Result<(), Box<dyn std::error::Er
 
     let dc: DelegationChallengeHandle = children[0].clone().try_into().unwrap();
     let children = dc
-        .defend(&delegations[2])
+        .defend(&delegation_2)
         .output_amount(0, Amount::from_sat((BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
@@ -451,6 +410,7 @@ const SCENARIOS: [(&str, fn(&str) -> Result<(), Box<dyn std::error::Error>>); 6]
 ];
 
 fn main() {
+    let scenario_names = SCENARIOS.map(|(n, _)| n).join("|");
     let args: Vec<String> = std::env::args().collect();
     let mut wallet = "testwallet".to_string();
     let mut selected: Option<String> = None;
@@ -467,10 +427,7 @@ fn main() {
             }
             other => {
                 eprintln!("unknown argument: {other}");
-                eprintln!(
-                    "usage: aggregate_exits [--wallet <name>] [--scenario all|{}]",
-                    SCENARIOS.map(|(n, _)| n).join("|")
-                );
+                eprintln!("usage: aggregate_exits [--wallet <name>] [--scenario all|{scenario_names}]");
                 std::process::exit(2);
             }
         }
@@ -482,10 +439,7 @@ fn main() {
         .filter(|(name, _)| selected == "all" || selected == *name)
         .collect();
     if to_run.is_empty() {
-        eprintln!(
-            "unknown scenario `{selected}`; expected all|{}",
-            SCENARIOS.map(|(n, _)| n).join("|")
-        );
+        eprintln!("unknown scenario `{selected}`; expected all|{scenario_names}");
         std::process::exit(2);
     }
 

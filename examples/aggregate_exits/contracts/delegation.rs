@@ -4,11 +4,9 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, ContractState, WitnessError, CCV_FLAG_CHECK_INPUT,
-    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, ClauseError, ClauseOutput, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
 };
 use mattrs::manager::SpendBuilder;
-use mattrs::merkle::MerkleTree;
 
 use super::bond::{burn_output, key_payout_output};
 use super::pending_exit::PendingExit;
@@ -49,20 +47,18 @@ impl DelegationChallengeState {
     }
 }
 
-impl ContractState for DelegationChallengeState {
-    fn encode(&self) -> Vec<u8> {
-        MerkleTree::new(self.leaves().to_vec()).root().to_vec()
-    }
-
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Err(WitnessError::DecodingFailed(
-            "DelegationChallengeState is committed as an opaque Merkle root".to_string(),
-        ))
-    }
-}
+super::opaque_merkle_state!(DelegationChallengeState);
 
 /// The tracked-stack names of the seven state leaves, bottom → top.
-const STATE_ITEMS: [&str; 7] = ["resume", "pe_tt", "ut", "r", "ipk", "user_pk", "cpk"];
+const STATE_ITEMS: [&str; 7] = [
+    "resume",
+    "pe_taptree",
+    "unwind_taptree",
+    "r",
+    "ingrid_pk",
+    "user_pk",
+    "challenger_pk",
+];
 
 contract! {
     /// Ingrid defends by revealing the challenged user's delegation signature,
@@ -75,7 +71,7 @@ contract! {
         params PoolParams;
         state DelegationChallengeState;
 
-        // witness: <resume> <pe_tt> <ut> <r> <ipk> <user_pk> <cpk> <sig>
+        // witness: the seven state leaves (STATE_ITEMS order), then <sig>
         clause defend {
             args raw |_p| DelegationChallenge::defend_specs();
             script DelegationChallenge::defend_script;
@@ -84,7 +80,7 @@ contract! {
             }
         }
 
-        // witness: <resume> <pe_tt> <ut> <r> <ipk> <user_pk> <cpk>
+        // witness: the seven state leaves (STATE_ITEMS order)
         clause challenger_wins {
             args raw |_p| DelegationChallenge::challenger_wins_specs();
             script DelegationChallenge::challenger_wins_script;
@@ -121,15 +117,13 @@ impl DelegationChallenge {
     }
 
     fn defend_script(p: &PoolParams) -> ScriptBuf {
-        let mut names = STATE_ITEMS.to_vec();
-        names.push("sig");
-        let mut s = StackScript::with_witness(&names);
+        let mut s = StackScript::from_specs(&Self::defend_specs());
         Self::reveal_state(&mut s);
 
         // The delegation message is H(pool_id || ingrid_pk); the signature
         // must verify against the user's in-pool key.
         s.push_const("pool_id", p.pool_id);
-        s.sha_cat(&["pool_id", "ipk"], "msg");
+        s.sha_cat(&["pool_id", "ingrid_pk"], "msg");
         s.roll("sig");
         s.roll("msg");
         s.pick("user_pk");
@@ -140,7 +134,7 @@ impl DelegationChallenge {
         s.ccv(
             Source::None,
             0,
-            Source::Item("ipk"),
+            Source::Item("ingrid_pk"),
             Source::None,
             CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
         );
@@ -154,7 +148,13 @@ impl DelegationChallenge {
             CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
         );
         // Output 2 resumes the claim (same state, fresh challenge period).
-        s.ccv(Source::Item("resume"), 2, Source::None, Source::Item("pe_tt"), 0);
+        s.ccv(
+            Source::Item("resume"),
+            2,
+            Source::None,
+            Source::Item("pe_taptree"),
+            0,
+        );
         s.into_script()
     }
 
@@ -183,7 +183,7 @@ impl DelegationChallenge {
     }
 
     fn challenger_wins_script(p: &PoolParams) -> ScriptBuf {
-        let mut s = StackScript::with_witness(&STATE_ITEMS);
+        let mut s = StackScript::from_specs(&Self::challenger_wins_specs());
         s.older(p.response_timeout);
         Self::reveal_state(&mut s);
 
@@ -192,7 +192,7 @@ impl DelegationChallenge {
         s.ccv(
             Source::None,
             0,
-            Source::Item("cpk"),
+            Source::Item("challenger_pk"),
             Source::None,
             CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
         );
@@ -206,7 +206,13 @@ impl DelegationChallenge {
             CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
         );
         // Output 2 reverts the pool to the pre-claim root.
-        s.ccv(Source::Item("r"), 2, Source::None, Source::Item("ut"), 0);
+        s.ccv(
+            Source::Item("r"),
+            2,
+            Source::None,
+            Source::Item("unwind_taptree"),
+            0,
+        );
         s.into_script()
     }
 

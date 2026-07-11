@@ -159,30 +159,30 @@ contract! {
     contract ExitBond {
         params ExitBondParams;
 
-        // witness: <ut> <r> <r_prime> <s_root> <ipk> <trace_i> <x> <sig>
+        // witness: the seven claim-state fields, then <sig>
         clause stake_claim {
             args raw |p| ExitBond::stake_claim_specs(p);
-            script |p| ExitBond::stake_script(p, 7);
+            script |p| ExitBond::stake_script(p, ExitBond::stake_claim_specs(p));
             next(p, a) {
                 ExitBond::stake_claim_outputs(p, &a.0)
             }
         }
 
-        // witness: <ut> <r> <r_prime> <s_root> <ipk> <trace_i> <x>
-        //          <pe_tt> <cpk> <h_end_c> <trace_c> <sig>
+        // witness: the claim-state fields, <pe_taptree> <challenger_pk>
+        //          <h_end_c> <trace_c>, then <sig>
         clause stake_state_challenge {
             args raw |p| ExitBond::stake_state_challenge_specs(p);
-            script |p| ExitBond::stake_script(p, 11);
+            script |p| ExitBond::stake_script(p, ExitBond::stake_state_challenge_specs(p));
             next(p, a) {
                 ExitBond::stake_state_challenge_outputs(p, &a.0)
             }
         }
 
-        // witness: <ut> <r> <r_prime> <s_root> <ipk> <trace_i> <x>
-        //          <pe_tt> <cpk> <user_pk> <sig>
+        // witness: the claim-state fields, <pe_taptree> <challenger_pk>
+        //          <user_pk>, then <sig>
         clause stake_delegation_challenge {
             args raw |p| ExitBond::stake_delegation_challenge_specs(p);
-            script |p| ExitBond::stake_script(p, 10);
+            script |p| ExitBond::stake_script(p, ExitBond::stake_delegation_challenge_specs(p));
             next(p, a) {
                 ExitBond::stake_delegation_challenge_outputs(p, &a.0)
             }
@@ -232,14 +232,9 @@ impl ExitBond {
         specs
     }
 
-    /// `<data> x n_data <sig>` — check the owner's signature, drop the data.
-    fn stake_script(p: &ExitBondParams, n_data: usize) -> ScriptBuf {
-        let names: Vec<String> = (0..n_data)
-            .map(|i| format!("data_{i}"))
-            .chain(["sig".to_string()])
-            .collect();
-        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        let mut s = StackScript::with_witness(&name_refs);
+    /// `<data...> <sig>` — check the owner's signature, drop the data.
+    fn stake_script(p: &ExitBondParams, specs: Vec<ArgSpec>) -> ScriptBuf {
+        let mut s = StackScript::from_specs(&specs);
         let owner = p.owner_pk;
         s.raw(script! { { owner } OP_CHECKSIGVERIFY }, 1, &[]);
         s.into_script()
@@ -339,7 +334,7 @@ impl ExitBondHandle {
         let mut witness = claim_state.to_witness();
         witness.push(self.pe_taptree().to_vec());
         witness.push(challenger_pk.serialize().to_vec());
-        witness.push(honest.hs[honest.hs.len() - 1].to_vec());
+        witness.push(honest.hs.last().unwrap().to_vec());
         witness.push(honest.trace.to_vec());
         witness.push(Vec::new());
         self.0.spend_clause("stake_state_challenge", witness)

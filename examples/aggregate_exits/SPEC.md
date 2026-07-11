@@ -25,7 +25,11 @@ is marked `TODO(OP_AMOUNT)` in the code and listed in the
   leaf `sha256(bn2vch(bit))`. The bits themselves are *published* in the
   `start_exit` witness and bound to `s_root` in-script (O(N) hashing at claim
   time), so any observer can recompute the honest claim — without data
-  availability of S, fraud would be unchallengeable.
+  availability of S, fraud would be unchallengeable. `start_exit` also
+  *rejects non-canonical bit encodings* (only `[]` and `[0x01]` pass
+  `DUP DUP 0NOTEQUAL EQUALVERIFY`): the bit-consuming clauses can only prove
+  canonical leaves, so a garbage bit would make its step undisputable by
+  either party — an unchallengeable claim, if it were postable.
 - **Step commitment**: the claimed run is an N-step computation over the state
   `(root, sum)`, committed per step as `h = sha256(root || bn2vch(sum))`
   (`h_0 = sha256(R)` since `bn2vch(0)` is empty). Step `u`: if `bit_u` is set,
@@ -206,8 +210,9 @@ log, no script path): provably unspendable.
 ## Files
 
 - `contracts/` — the contracts (`unwind`, `pending_exit`, `delegation`,
-  `dispute`, `bond`), the pool/claim model (`mod.rs`), and a symbolic
-  stack-tracking script assembler (`stack.rs`).
+  `dispute`, `bond`), the pool/claim model (`mod.rs`), a symbolic
+  stack-tracking script assembler (`stack.rs`), and the demo cast shared by
+  the demo and the tests (`fixture.rs`).
 - `main.rs` — the regtest demo, one scenario per execution path.
 - `../../tests/test_aggregate_exits.rs` — offline unit/build/protocol tiers
   plus `#[ignore]`d regtest e2e.

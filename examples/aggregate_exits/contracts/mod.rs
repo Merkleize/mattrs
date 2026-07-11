@@ -41,6 +41,7 @@
 pub mod bond;
 pub mod delegation;
 pub mod dispute;
+pub mod fixture;
 pub mod pending_exit;
 pub mod stack;
 pub mod unwind;
@@ -59,11 +60,14 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::key::{Keypair, Secp256k1};
 use bitcoin::secp256k1::Message;
 use bitcoin::XOnlyPublicKey;
+use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, WitnessError};
 use mattrs::fraud::trace;
 use mattrs::merkle::{ceil_lg, MerkleProof, MerkleTree, NIL};
 use mattrs::script_utils::{bn2vch, commit_int};
 use mattrs_derive::ContractParams;
+
+define_pushable!();
 
 // ============================================================================
 // Pool parameters
@@ -357,10 +361,64 @@ impl ChallengeContext {
     }
 }
 
-/// The tracked-stack item names of the expanded carry, in witness order.
-/// Scripts that consume an expanded carry share this layout.
-pub(crate) const CARRY_ITEMS: [&str; 7] =
-    ["ipk", "cpk", "s_root", "r", "resume", "pe_tt", "ut"];
+/// The tracked-stack item names of the expanded carry, in witness order
+/// (matching [`ChallengeContext::carry_fields`]). Scripts that consume an
+/// expanded carry share this layout.
+pub(crate) const CARRY_ITEMS: [&str; 7] = [
+    "ingrid_pk",
+    "challenger_pk",
+    "s_root",
+    "r",
+    "resume",
+    "pe_taptree",
+    "unwind_taptree",
+];
+
+/// Implements [`mattrs::contracts::ContractState`] for an *expanded* state
+/// type: the commitment is the Merkle root of its `leaves()`, and — as with
+/// the RAM example — the expanded data cannot be recovered from the root, so
+/// `decode` always fails (children are materialized via `with_state` instead).
+macro_rules! opaque_merkle_state {
+    ($ty:ty) => {
+        impl mattrs::contracts::ContractState for $ty {
+            fn encode(&self) -> Vec<u8> {
+                mattrs::merkle::MerkleTree::new(self.leaves().to_vec())
+                    .root()
+                    .to_vec()
+            }
+
+            fn decode(_bytes: &[u8]) -> Result<Self, mattrs::contracts::WitnessError> {
+                Err(mattrs::contracts::WitnessError::DecodingFailed(format!(
+                    "{} is committed as an opaque Merkle root",
+                    stringify!($ty)
+                )))
+            }
+        }
+    };
+}
+pub(crate) use opaque_merkle_state;
+
+// ============================================================================
+// Shared script fragments
+// ============================================================================
+
+/// One level of a shared-direction dual Merkle walk: advances two leaf→root
+/// walks with the same in-tree position at once. Expects
+/// `<a> <b> <sib_a> <sib_b> <direction>` on top; leaves `<a'> <b'>`.
+/// `direction = 1` means the current nodes are right children.
+pub(crate) fn dual_proof_layer() -> bitcoin::ScriptBuf {
+    script! {
+        OP_IF
+            OP_TOALTSTACK
+            OP_ROT OP_CAT OP_SHA256
+            OP_SWAP OP_FROMALTSTACK OP_SWAP OP_CAT OP_SHA256
+        OP_ELSE
+            OP_TOALTSTACK
+            OP_ROT OP_SWAP OP_CAT OP_SHA256
+            OP_SWAP OP_FROMALTSTACK OP_CAT OP_SHA256
+        OP_ENDIF
+    }
+}
 
 // ============================================================================
 // Raw-witness parsing helpers
