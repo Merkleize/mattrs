@@ -204,7 +204,21 @@ cargo run --example vault                                    # interactive
 cargo run --example vault -- --script examples/vault/scripts/revault.txt
 ```
 
-**Live inspector** — both demos take `--inspector` (or `--inspector-port <P>`)
+**Aggregate exits** (`examples/aggregate_exits/`) implements optimistic
+aggregated withdrawals from a pooled UTXO (the protocol of
+`examples/aggregate_exits/aggregate_exits.md`; concrete spec in `SPEC.md`):
+direct Merkle-proof exits, plus an intermediary who withdraws a set of small
+balances at once behind a bond and a challenge period, adjudicated by
+delegation challenges (OP_CHECKSIGFROMSTACK) and a bisection fraud proof whose
+settlements route the pot back into the covenant. One scenario per execution
+path, against a MATT-enabled regtest node:
+
+```sh
+cargo run --example aggregate_exits                          # all scenarios
+cargo run --example aggregate_exits -- --scenario fraud
+```
+
+**Live inspector** — the rps and vault demos take `--inspector` (or `--inspector-port <P>`)
 when built with the `inspector` feature: the manager then serves a JSON snapshot
 of every tracked instance over TCP on each state change, and the
 `mattrs-inspector` workspace crate renders it as a live TUI (instance table +

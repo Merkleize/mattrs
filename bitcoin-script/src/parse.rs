@@ -113,6 +113,7 @@ impl MyFromStr for Opcode {
             "OP_CSV" | "CSV" => Ok(opcodes::all::OP_CSV),
             "OP_CHECKTEMPLATEVERIFY" | "CHECKTEMPLATEVERIFY" => Ok(Opcode::from(0xb3u8)),
             "OP_CHECKCONTRACTVERIFY" | "CHECKCONTRACTVERIFY" => Ok(Opcode::from(0xbbu8)),
+            "OP_CHECKSIGFROMSTACK" | "CHECKSIGFROMSTACK" => Ok(Opcode::from(0xccu8)),
             _ => Err(()),
         }
     }

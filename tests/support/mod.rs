@@ -6,6 +6,11 @@
 //! real (nothing here is dead across *all* binaries). Hence the targeted
 //! `allow(dead_code)` on each module.
 
+// The aggregate-exits contracts live with their demo (examples/aggregate_exits/);
+// the tests compile the same single source.
+#[allow(dead_code, unused_imports)]
+#[path = "../../examples/aggregate_exits/contracts/mod.rs"]
+pub mod aggregate_exits;
 #[allow(dead_code)]
 pub mod game256;
 #[allow(dead_code)]
