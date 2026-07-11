@@ -264,9 +264,10 @@ contract! {
 
         tree [
             [move_alice, move_bob],
-            [alice_wins, bob_wins],
-            tie,
-            [timeout_alice_idle, timeout_bob_idle]
+            [
+                [alice_wins, bob_wins],
+                [tie, [timeout_alice_idle, timeout_bob_idle]]
+            ]
         ];
     }
 }

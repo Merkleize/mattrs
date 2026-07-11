@@ -189,9 +189,10 @@ impl Parse for ContractDef {
     }
 }
 
-/// Check that every name in `tree [ .. ]` is a declared clause, with a spanned
-/// error on the offending identifier (instead of a "cannot find value" error
-/// deep inside the generated code).
+/// Check the shape and names of `tree [ .. ]`: every level holds one clause or
+/// exactly two subtrees (the taproot tree grammar — there is no implicit
+/// folding), and every name is a declared clause. Spanned errors here beat a
+/// "cannot find value" (or a `compile_error!`) deep inside the generated code.
 fn validate_tree_names(tree_tokens: &TokenStream2, clauses: &[ClauseDef]) -> syn::Result<()> {
     use syn::parse::Parser;
 
@@ -202,7 +203,15 @@ fn validate_tree_names(tree_tokens: &TokenStream2, clauses: &[ClauseDef]) -> syn
         input: ParseStream,
         names: &std::collections::HashSet<String>,
     ) -> syn::Result<()> {
+        let mut entries = 0usize;
         while !input.is_empty() {
+            if entries == 2 {
+                return Err(input.error(
+                    "a tree level holds one clause or exactly two subtrees; \
+                     write branches explicitly, e.g. `[a, [b, c]]`",
+                ));
+            }
+            entries += 1;
             if input.peek(syn::token::Bracket) {
                 let inner;
                 bracketed!(inner in input);
