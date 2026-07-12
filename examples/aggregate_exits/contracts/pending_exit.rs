@@ -8,10 +8,9 @@ use mattrs::manager::SpendBuilder;
 use mattrs::script_utils::{bn2vch, commit_int};
 use mattrs_derive::ContractState;
 
-use super::bond::key_payout_output;
 use super::delegation::{DelegationChallenge, DelegationChallengeState};
 use super::dispute::{BisectRangeParams, ExitBisect1, ExitBisect1State};
-use super::stack::{Source, StackScript};
+use mattrs::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
 use super::{
     dual_proof_layer, spec, spec_num, step_h, w32, ChallengeContext, ExitClaim, PoolParams,
@@ -105,6 +104,7 @@ contract! {
         clause finalize {
             args raw |_p| PendingExit::state_specs();
             script PendingExit::finalize_script;
+            timelock |p| p.challenge_period;
             next(p, a) {
                 PendingExit::finalize_outputs(p, &a.0)
             }
@@ -167,9 +167,8 @@ impl PendingExit {
         );
     }
 
-    fn finalize_script(p: &PoolParams) -> ScriptBuf {
+    fn finalize_script(_p: &PoolParams) -> ScriptBuf {
         let mut s = StackScript::from_specs(&Self::state_specs());
-        s.older(p.challenge_period);
         Self::reveal_state(&mut s, "state", Source::Current);
 
         // Output 0 pays Ingrid.
@@ -200,7 +199,7 @@ impl PendingExit {
         let r_prime = w32(witness, 2)?;
         let ingrid_pk = super::wpk(witness, 4)?;
         Ok(vec![
-            key_payout_output(ingrid_pk, 0),
+            ClauseOutput::pay_key(0, ingrid_pk),
             ClauseOutput::at(1)
                 .to(Unwind::new(p.clone()).as_erased())
                 .with_state(&UnwindState { root: r_prime })
@@ -341,12 +340,10 @@ impl PendingExitHandle {
 
     /// Settle the matured claim: output 0 pays Ingrid, output 1 continues the
     /// pool at the claimed root. The caller must set the payout amount
-    /// (`.output_amount(0, x + bond)`); the CSV sequence is set here.
+    /// (`.output_amount(0, x + bond)`); the clause's `timelock` sets the CSV
+    /// sequence.
     pub fn finalize(&self) -> SpendBuilder {
-        let witness = self.claim_state().to_witness();
-        self.0
-            .spend_clause("finalize", witness)
-            .sequence(self.params().expect("params decode").challenge_period)
+        self.0.spend_clause("finalize", self.claim_state().to_witness())
     }
 
     /// Open the bisection game on the claimed amount/root. `honest` is the
@@ -358,7 +355,7 @@ impl PendingExitHandle {
         challenger_pk: &bitcoin::XOnlyPublicKey,
     ) -> SpendBuilder {
         let state = self.claim_state();
-        let pe_taptree = PendingExit::new(self.params().expect("params decode")).taptree_root();
+        let pe_taptree = PendingExit::new(self.params()).taptree_root();
         let mut witness = state.to_witness();
         witness.push(pe_taptree.to_vec());
         witness.push(challenger_pk.serialize().to_vec());
@@ -386,7 +383,7 @@ impl PendingExitHandle {
         let bit_proof = bit_tree.prove_leaf(index);
         assert_eq!(account_proof.directions, bit_proof.directions);
 
-        let pe_taptree = PendingExit::new(self.params().expect("params decode")).taptree_root();
+        let pe_taptree = PendingExit::new(self.params()).taptree_root();
         let mut witness = state.to_witness();
         witness.push(pe_taptree.to_vec());
         witness.push(challenger_pk.serialize().to_vec());

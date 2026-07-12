@@ -108,6 +108,12 @@ pub enum ManagerError {
     /// A spend produced a different number of child instances than the caller
     /// asserted via `exec_one` / `exec_none`.
     UnexpectedOutputCount { expected: usize, got: usize },
+    /// A child instance was not of the requested contract type
+    /// ([`Children::typed`] / [`Children::one`]).
+    WrongContract(WrongContractType),
+    /// A `NextOutputs::Join` contribution targets an output index no other
+    /// input's clause defines.
+    JoinWithoutTarget { index: u32 },
     Other(String),
 }
 
@@ -180,6 +186,12 @@ impl std::fmt::Display for ManagerError {
                 "Unexpected number of spend outputs: expected {}, got {}",
                 expected, got
             ),
+            ManagerError::WrongContract(e) => write!(f, "{}", e),
+            ManagerError::JoinWithoutTarget { index } => write!(
+                f,
+                "a Join contribution targets output index {}, which no other input defines",
+                index
+            ),
             ManagerError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -202,6 +214,12 @@ impl From<ClauseError> for ManagerError {
 impl From<ContractError> for ManagerError {
     fn from(e: ContractError) -> Self {
         ManagerError::ContractError(e)
+    }
+}
+
+impl From<WrongContractType> for ManagerError {
+    fn from(e: WrongContractType) -> Self {
+        ManagerError::WrongContract(e)
     }
 }
 
@@ -359,7 +377,7 @@ impl ContractManager {
 
     /// Execute a spend: build, sign, broadcast, and materialize child instances.
     /// A single spend is a batch of one.
-    fn execute_spend(&mut self, builder: SpendBuilder) -> Result<Vec<InstanceHandle>, ManagerError> {
+    fn execute_spend(&mut self, builder: SpendBuilder) -> Result<Children, ManagerError> {
         self.spend_batch(std::slice::from_ref(&builder))
     }
 
@@ -381,7 +399,7 @@ impl ContractManager {
     pub fn spend_batch(
         &mut self,
         builders: &[SpendBuilder],
-    ) -> Result<Vec<InstanceHandle>, ManagerError> {
+    ) -> Result<Children, ManagerError> {
         let (tx, nexts) = self.assemble(builders)?;
 
         self.rpc.send_raw_transaction(&tx)?;
@@ -396,6 +414,7 @@ impl ContractManager {
 
         // Materialize the children; outputs merged across inputs (a shared
         // `PreserveOutput` index) yield one child instance, linked to each parent.
+        // Contract outputs first: a `Join` references a child another input defines.
         let mut handles: Vec<InstanceHandle> = Vec::new();
         for (vin, (builder, next)) in builders.iter().zip(&nexts).enumerate() {
             if let NextOutputs::Contracts(outputs) = next {
@@ -407,11 +426,27 @@ impl ContractManager {
                 }
             }
         }
+        for (builder, next) in builders.iter().zip(&nexts) {
+            if let NextOutputs::Join { index } = next {
+                let outpoint = OutPoint {
+                    txid: tx.compute_txid(),
+                    vout: *index,
+                };
+                let child = self
+                    .find_instance_by_outpoint(outpoint)
+                    .ok_or(ManagerError::JoinWithoutTarget { index: *index })?;
+                builder.instance.borrow_mut().add_output(child.clone());
+                let handle = InstanceHandle { instance: child };
+                if !handles.contains(&handle) {
+                    handles.push(handle);
+                }
+            }
+        }
 
         #[cfg(feature = "inspector")]
         self.notify_inspector();
 
-        Ok(handles)
+        Ok(Children::new(handles))
     }
 
     /// Shared core of every spend (a single spend is a batch of one): build the
@@ -505,7 +540,7 @@ impl ContractManager {
 
         let template = nexts.iter().find_map(|next| match next {
             NextOutputs::Template(template) => Some(template),
-            NextOutputs::Contracts(_) => None,
+            NextOutputs::Contracts(_) | NextOutputs::Join { .. } => None,
         });
 
         if let Some(explicit) = builders.iter().find_map(|b| b.explicit_outputs.as_ref()) {
@@ -572,6 +607,8 @@ impl ContractManager {
         for (input_index, next) in nexts.iter().enumerate() {
             let clause_outputs = match next {
                 NextOutputs::Contracts(clause_outputs) => clause_outputs,
+                // Joins contribute to outputs other inputs define; second pass.
+                NextOutputs::Join { .. } => continue,
                 NextOutputs::Template(_) => unreachable!("templates are handled above"),
             };
 
@@ -627,6 +664,22 @@ impl ContractManager {
                     ClauseOutputAmountBehaviour::IgnoreOutput => {}
                 }
             }
+        }
+
+        // Second pass: each Join adds its input's whole amount to an output some
+        // other input defined. A join is preserve-like — it cannot fund a
+        // caller-amounted (deduct) output.
+        for (input_index, next) in nexts.iter().enumerate() {
+            let NextOutputs::Join { index } = next else {
+                continue;
+            };
+            let entry = outputs_map
+                .get_mut(index)
+                .ok_or(ManagerError::JoinWithoutTarget { index: *index })?;
+            if semantics.get(index) == Some(&Semantics::Deduct) {
+                return Err(ManagerError::MixedOutputSemantics { index: *index });
+            }
+            entry.value += prevouts[input_index].value;
         }
 
         // Every caller-supplied amount must have been used by a DeductOutput;
@@ -859,7 +912,7 @@ impl ContractManager {
         &mut self,
         handle: &InstanceHandle,
         spending_tx: &Transaction,
-    ) -> Result<Vec<InstanceHandle>, ManagerError> {
+    ) -> Result<Children, ManagerError> {
         let txid = spending_tx.compute_txid();
 
         {
@@ -946,15 +999,31 @@ impl ContractManager {
                 self.materialize_outputs(&handle.instance, outputs, spending_tx, vin)?
             }
             NextOutputs::Template(_) => Vec::new(),
+            // A joining input contributes to a child another input's clause
+            // defines: link it when that input's observation already
+            // materialized the child; otherwise return nothing (observe the
+            // defining input first to get the shared child).
+            NextOutputs::Join { index } => {
+                let outpoint = OutPoint { txid, vout: *index };
+                match self.find_instance_by_outpoint(outpoint) {
+                    Some(child) => {
+                        handle.instance.borrow_mut().add_output(child.clone());
+                        vec![child]
+                    }
+                    None => Vec::new(),
+                }
+            }
         };
 
         #[cfg(feature = "inspector")]
         self.notify_inspector();
 
-        Ok(children
-            .into_iter()
-            .map(|instance| InstanceHandle { instance })
-            .collect())
+        Ok(Children::new(
+            children
+                .into_iter()
+                .map(|instance| InstanceHandle { instance })
+                .collect(),
+        ))
     }
 
     /// Wait until `handle`'s instance is spent on-chain (watching the mempool and
@@ -969,7 +1038,7 @@ impl ContractManager {
     pub fn wait_for_spend(
         &mut self,
         handle: &InstanceHandle,
-    ) -> Result<Vec<InstanceHandle>, ManagerError> {
+    ) -> Result<Children, ManagerError> {
         self.wait_for_spend_within(handle, Some(DEFAULT_POLL_WINDOW))
     }
 
@@ -980,7 +1049,7 @@ impl ContractManager {
         &mut self,
         handle: &InstanceHandle,
         window: Option<Duration>,
-    ) -> Result<Vec<InstanceHandle>, ManagerError> {
+    ) -> Result<Children, ManagerError> {
         if handle.status() == InstanceStatus::Spent {
             return Ok(handle.outputs());
         }
@@ -995,7 +1064,7 @@ impl ContractManager {
     pub fn wait_for_spends(
         &mut self,
         handles: &[InstanceHandle],
-    ) -> Result<Vec<InstanceHandle>, ManagerError> {
+    ) -> Result<Children, ManagerError> {
         let mut result: Vec<InstanceHandle> = Vec::new();
         for handle in handles {
             for child in self.wait_for_spend(handle)? {
@@ -1004,7 +1073,7 @@ impl ContractManager {
                 }
             }
         }
-        Ok(result)
+        Ok(Children::new(result))
     }
 
     /// Poll (within `window`; `None` = forever) until a transaction spending
@@ -1300,6 +1369,23 @@ impl InstanceHandle {
         self.instance.borrow().contract().params_bytes().to_vec()
     }
 
+    /// The instance's typed params `P`: read back by downcast when the contract
+    /// carries them (every contract built from a typed `P` does — see
+    /// [`ErasedContract::params_any`](crate::contracts::ErasedContract::params_any)),
+    /// else decoded from the encoded bytes. `None` only if `P` is the wrong
+    /// type *and* the bytes don't decode as a `P`.
+    pub fn params<P: crate::contracts::ContractParams + 'static>(&self) -> Option<P> {
+        let inst = self.instance.borrow();
+        if let Some(typed) = inst
+            .contract()
+            .params_any()
+            .and_then(|any| any.downcast_ref::<P>())
+        {
+            return Some(typed.clone());
+        }
+        P::decode(inst.contract().params_bytes()).ok()
+    }
+
     /// The name of the clause that spent this instance (None until spent).
     pub fn clause_name(&self) -> Option<String> {
         self.instance.borrow().clause_name().map(str::to_string)
@@ -1349,24 +1435,38 @@ impl InstanceHandle {
     }
 
     /// Get the child instances created from spending this instance.
-    pub fn outputs(&self) -> Vec<InstanceHandle> {
-        self.instance
-            .borrow()
-            .outputs()
-            .iter()
-            .cloned()
-            .map(|instance| InstanceHandle { instance })
-            .collect()
+    pub fn outputs(&self) -> Children {
+        Children::new(
+            self.instance
+                .borrow()
+                .outputs()
+                .iter()
+                .cloned()
+                .map(|instance| InstanceHandle { instance })
+                .collect(),
+        )
     }
 
     /// Begin a spend of `clause_name` with the given (already-encoded) witness
     /// arguments. The `contract!`-generated per-clause methods call this; most code
     /// should prefer those typed methods.
+    ///
+    /// If the clause declares a CSV timelock (the `contract!` DSL's `timelock`
+    /// section), the builder's `nSequence` is seeded from it, so the script's
+    /// `OP_CHECKSEQUENCEVERIFY` and the transaction cannot disagree; an
+    /// explicit [`SpendBuilder::sequence`] still overrides.
     pub fn spend_clause(
         &self,
         clause_name: &'static str,
         witness_args: Vec<Vec<u8>>,
     ) -> SpendBuilder {
+        let sequence = self
+            .instance
+            .borrow()
+            .contract()
+            .get_clause(clause_name)
+            .and_then(|clause| clause.csv_blocks())
+            .map(Sequence);
         SpendBuilder {
             instance: self.instance.clone(),
             clause_name,
@@ -1374,8 +1474,82 @@ impl InstanceHandle {
             signers: HashMap::new(),
             explicit_outputs: None,
             output_amounts: BTreeMap::new(),
-            sequence: None,
+            sequence,
         }
+    }
+}
+
+/// The child instances a spend produced (or an observation materialized), in
+/// merged-output order. Derefs to a slice of [`InstanceHandle`]s for
+/// positional access; [`typed`](Children::typed) / [`one`](Children::one)
+/// convert children into their `contract!`-generated typed handles.
+#[derive(Debug, Clone)]
+pub struct Children(Vec<InstanceHandle>);
+
+impl Children {
+    pub(crate) fn new(handles: Vec<InstanceHandle>) -> Self {
+        Children(handles)
+    }
+
+    /// The child at `index`, as the typed handle `H`.
+    pub fn typed<H>(&self, index: usize) -> Result<H, ManagerError>
+    where
+        H: TryFrom<InstanceHandle, Error = WrongContractType>,
+    {
+        let handle = self
+            .0
+            .get(index)
+            .cloned()
+            .ok_or(ManagerError::UnexpectedOutputCount {
+                expected: index + 1,
+                got: self.0.len(),
+            })?;
+        Ok(H::try_from(handle)?)
+    }
+
+    /// The single child, typed; errors unless exactly one child was produced.
+    pub fn one<H>(self) -> Result<H, ManagerError>
+    where
+        H: TryFrom<InstanceHandle, Error = WrongContractType>,
+    {
+        if self.0.len() != 1 {
+            return Err(ManagerError::UnexpectedOutputCount {
+                expected: 1,
+                got: self.0.len(),
+            });
+        }
+        self.typed(0)
+    }
+
+    /// The untyped handles.
+    pub fn into_vec(self) -> Vec<InstanceHandle> {
+        self.0
+    }
+}
+
+impl std::ops::Deref for Children {
+    type Target = [InstanceHandle];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl IntoIterator for Children {
+    type Item = InstanceHandle;
+    type IntoIter = std::vec::IntoIter<InstanceHandle>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Children {
+    type Item = &'a InstanceHandle;
+    type IntoIter = std::slice::Iter<'a, InstanceHandle>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
     }
 }
 
@@ -1428,13 +1602,13 @@ impl SpendBuilder {
     }
 
     /// Build, sign, broadcast, and return handles to all child instances.
-    pub fn exec(self, manager: &mut ContractManager) -> Result<Vec<InstanceHandle>, ManagerError> {
+    pub fn exec(self, manager: &mut ContractManager) -> Result<Children, ManagerError> {
         manager.execute_spend(self)
     }
 
     /// Like [`exec`](Self::exec) but asserts exactly one child instance is produced.
     pub fn exec_one(self, manager: &mut ContractManager) -> Result<InstanceHandle, ManagerError> {
-        let mut outputs = self.exec(manager)?;
+        let mut outputs = self.exec(manager)?.into_vec();
         if outputs.len() != 1 {
             return Err(ManagerError::UnexpectedOutputCount {
                 expected: 1,
@@ -1567,6 +1741,68 @@ mod tests {
         assert_eq!(tx.output[0].script_pubkey, spk_of(&unvault));
         assert_eq!(tx.output[1].value, sat(30_000));
         assert_eq!(tx.output[1].script_pubkey, spk_of(&revault));
+    }
+
+    #[test]
+    fn join_contributes_to_another_inputs_output() {
+        let dest = test_contract(90, None);
+        let defining = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(dest.clone()).preserve_amount().build()],
+        );
+        let joining = test_contract(
+            2,
+            Some(Arc::new(|_: &(), _: &RawArgs, _: Option<&()>| {
+                Ok(NextOutputs::join(0))
+            })),
+        );
+        let hd = fund_fake(defining, None, sat(100_000), 1);
+        let hj = fund_fake(joining, None, sat(60_000), 2);
+
+        // Both orders: the join is resolved after all defining inputs.
+        for builders in [
+            [spend(&hd), spend(&hj)],
+            [spend(&hj), spend(&hd)],
+        ] {
+            let tx = offline_manager().build_batch_tx(&builders).unwrap();
+            assert_eq!(tx.output.len(), 1);
+            assert_eq!(tx.output[0].value, sat(160_000));
+            assert_eq!(tx.output[0].script_pubkey, spk_of(&dest));
+        }
+    }
+
+    #[test]
+    fn join_without_target_errors() {
+        let joining = test_contract(
+            1,
+            Some(Arc::new(|_: &(), _: &RawArgs, _: Option<&()>| {
+                Ok(NextOutputs::join(0))
+            })),
+        );
+        let h = fund_fake(joining, None, sat(60_000), 1);
+        let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+        assert!(matches!(err, ManagerError::JoinWithoutTarget { index: 0 }));
+    }
+
+    #[test]
+    fn join_into_a_deduct_output_errors() {
+        let dest = test_contract(90, None);
+        let deducting = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(dest.clone()).deduct_amount().build()],
+        );
+        let joining = test_contract(
+            2,
+            Some(Arc::new(|_: &(), _: &RawArgs, _: Option<&()>| {
+                Ok(NextOutputs::join(0))
+            })),
+        );
+        let hd = fund_fake(deducting, None, sat(100_000), 1);
+        let hj = fund_fake(joining, None, sat(60_000), 2);
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hj)])
+            .unwrap_err();
+        assert!(matches!(err, ManagerError::MixedOutputSemantics { index: 0 }));
     }
 
     #[test]

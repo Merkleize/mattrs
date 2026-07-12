@@ -81,7 +81,7 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
                 return Ok(Action::Wait);
             }
             let step = d.plan.remove(0);
-            let p = h.params()?;
+            let p = h.params();
             let ctv_hash = compute_ctv_hash(&step.outputs, Sequence(p.spend_delay));
             d.withdrawals.insert(ctv_hash, step.outputs);
             let signer = HotSigner::new(d.xpriv);
@@ -95,7 +95,7 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             }))
         })
         .on::<Unvaulting, _>(|d: &mut OwnerData, h: UnvaultingHandle, _cx| {
-            let p = h.params()?;
+            let p = h.params();
             let state = h.state().ok_or_else(|| {
                 ProtocolError::Other("an Unvaulting instance carries its CTV hash".into())
             })?;
@@ -137,7 +137,7 @@ pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
             if d.authorized.contains(&state.ctv_hash) {
                 return Ok(Action::Wait);
             }
-            let p = h.params()?;
+            let p = h.params();
             let amount = h.handle().prevout().ok_or(ManagerError::NotFunded)?.value;
             let sweep = TxOut {
                 script_pubkey: opaque_p2tr(p.recover_pk),

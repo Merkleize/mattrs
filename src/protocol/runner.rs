@@ -348,7 +348,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
     /// role's settlement handler.
     fn follow_spend(
         &mut self,
-        children: Vec<InstanceHandle>,
+        children: crate::manager::Children,
         current: InstanceHandle,
         parent: Option<InstanceHandle>,
     ) -> Result<TokenStep<O>, ProtocolError> {

@@ -558,15 +558,9 @@ impl TicTacToe {
 /// Ergonomic spend methods filling the board-reveal arguments from the
 /// instance's typed state, so callers pass only what is genuinely new.
 impl TicTacToeHandle {
-    fn state_or_err(&self) -> Result<TttState, MissingStateError> {
-        self.state().ok_or(MissingStateError {
-            contract: "TicTacToe",
-        })
-    }
-
     /// The current player's move at `cell` (which must be empty).
     pub fn make_move(&self, cell: usize) -> Result<SpendBuilder, MissingStateError> {
-        let s = self.state_or_err()?;
+        let s = self.state_req()?;
         let (prefix, suffix) = s.prefix_suffix(cell);
         Ok(if s.turn == TURN_ALICE {
             self.move_alice(prefix, suffix)
@@ -579,7 +573,7 @@ impl TicTacToeHandle {
     /// wrapper: their board argument is `#[from_state]`-filled, so the
     /// generated `timeout_*_idle()` methods already take nothing).
     pub fn claim_win(&self, mark: u8) -> Result<SpendBuilder, MissingStateError> {
-        let s = self.state_or_err()?;
+        let s = self.state_req()?;
         let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = s.board.map(|b| [b]);
         Ok(if mark == MARK_ALICE {
             self.alice_wins([s.turn], c0, c1, c2, c3, c4, c5, c6, c7, c8)
@@ -589,7 +583,7 @@ impl TicTacToeHandle {
     }
 
     pub fn claim_tie(&self) -> Result<SpendBuilder, MissingStateError> {
-        let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = self.state_or_err()?.board.map(|b| [b]);
+        let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = self.state_req()?.board.map(|b| [b]);
         Ok(self.tie(c0, c1, c2, c3, c4, c5, c6, c7, c8))
     }
 }
@@ -668,7 +662,7 @@ pub mod roles {
 
         Role::new()
             .on::<TicTacToe, _>(move |d: &mut PlayerData, h: TicTacToeHandle, _cx| {
-                let params = h.params()?;
+                let params = h.params();
                 let s = h.state().ok_or_else(|| {
                     ProtocolError::Other("the game state is unavailable".to_string())
                 })?;

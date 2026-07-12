@@ -62,6 +62,7 @@ pub mod argtypes;
 pub mod contracts;
 pub mod ctv;
 pub mod fraud;
+pub mod key_payout;
 #[cfg(feature = "inspector")]
 pub mod inspector;
 #[macro_use]
@@ -73,6 +74,7 @@ pub mod report;
 pub mod script_helpers;
 pub mod script_utils;
 pub mod signer;
+pub mod stack;
 pub mod testutil;
 
 /// NUMS ("nothing-up-my-sleeve") x-only public key, used as a taproot internal key

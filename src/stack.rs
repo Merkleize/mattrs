@@ -1,18 +1,24 @@
 //! A symbolic stack tracker for assembling tapscripts.
 //!
-//! The aggregate-exit tapscripts juggle a lot of witness elements (state
-//! leaves, carry components, Merkle proofs). Hand-counting `OP_PICK`/`OP_ROLL`
-//! depths across them is error-prone, so scripts are written against named
-//! stack items instead: the tracker knows where every element lives and emits
-//! the right depth constants. Items are only ever *copied* up with `pick`
-//! (consumed copies excepted), and whatever is left is dropped by
-//! [`StackScript::into_script`] — a couple of extra opcodes in exchange for
-//! scripts that read as a sequence of intentions.
+//! MATT tapscripts juggle many witness elements (state leaves, Merkle proofs,
+//! carried context), and hand-counting `OP_PICK`/`OP_ROLL` depths across them
+//! is error-prone. A [`StackScript`] is written against *named* stack items
+//! instead: the tracker knows where every element lives and emits the right
+//! depth constants, panicking at script-build time on any stack-discipline
+//! mistake. Start it from the clause's own [`ArgSpec`] list
+//! ([`StackScript::from_specs`]) so the witness layout and the tracked names
+//! have a single source of truth.
+//!
+//! Items are only ever *copied* up with `pick` (consumed copies excepted), and
+//! whatever is left is dropped by [`StackScript::into_script`] — a couple of
+//! extra opcodes in exchange for scripts that read as a sequence of
+//! intentions. See `examples/aggregate_exits/contracts/` for contracts written
+//! entirely this way.
 
+use crate::contracts::ArgSpec;
+use crate::script_helpers::{concat, drop as script_drop, merkle_root};
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::ArgSpec;
-use mattrs::script_helpers::{concat, drop as script_drop, merkle_root};
 
 define_pushable!();
 
@@ -214,7 +220,7 @@ impl StackScript {
 
     /// A relative timelock: `<blocks> CSV DROP`.
     pub fn older(&mut self, blocks: u32) {
-        self.parts.push(mattrs::script_helpers::older(blocks));
+        self.parts.push(crate::script_helpers::older(blocks));
     }
 
     /// Finish the script: drop everything still tracked on the stack and leave

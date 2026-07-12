@@ -167,12 +167,18 @@ The examples from the Python reference framework (`pymatt`) are ported under
 
 Supporting MATT infrastructure lives in the library for downstream reuse: the
 generic fraud-proof contracts (`mattrs::fraud`), a data `MerkleTree` /
-`MerkleProof` / `WitProof` / `MerkleProofType` (`mattrs::merkle`), the
+`MerkleProof` / `WitProof` / `MerkleProofType` (`mattrs::merkle`), a symbolic
+stack tracker for assembling tapscripts against *named* witness elements
+instead of hand-counted `OP_PICK` depths (`mattrs::stack`), the
 `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
 `check_output_contract` / `older` / `timeout_sig_script` / `opaque_p2tr` script
-fragments (`mattrs::script_helpers`), `commit_int` (`mattrs::script_utils`), and
-`offline_client()` / `fund_fake(..)` for building spends without a node
-(`mattrs::testutil`, used by the examples and fixtures).
+fragments (`mattrs::script_helpers`), `commit_int` (`mattrs::script_utils`),
+bare-key payout and burn outputs (`mattrs::key_payout`, with the
+`ClauseOutput::pay_key` / `ClauseOutput::burn` constructors), a `WitnessReader`
+for parsing raw-args witnesses sequentially, the `opaque_merkle_state!` macro
+for expanded states committed as a Merkle root, and `offline_client()` /
+`fund_fake(..)` / `apply_batch(..)` for building and applying spends without a
+node (`mattrs::testutil`, used by the examples and fixtures).
 
 ## Demos
 
@@ -235,6 +241,15 @@ cargo run -p mattrs-inspector       # or: nc localhost 34443
   `CtvTemplate`, which fixes the transaction outputs and `nSequence` (see rps).
 - **Multi-input batch spends** — `ContractManager::spend_batch(..)` merges several
   instances' outputs by index (pymatt's `get_spend_tx` semantics).
+- **Join contributions** — a clause's `next` may return
+  `NextOutputs::Join { index }`: the input's whole amount joins an output
+  *another* input's clause defines (the aggregate-exits bond stakes itself into
+  a pot with nothing but a signature).
+- **Declared timelocks** — a clause's `timelock |p| ..;` section prepends the
+  CSV `older()` fragment to its script *and* seeds the spend's `nSequence`, so
+  the two cannot disagree.
+- **Typed handles** — spends return `Children` (`.typed::<H>(i)?` / `.one()`),
+  and a handle's `params()` / `state_req()` read the typed values directly.
 - **Expanded state** — an instance can carry logical state richer than its on-chain
   commitment (e.g. RAM's cells vs their Merkle root), recovered by `next_outputs`.
 - **Chain observation** — follow a covenant driven by someone else:

@@ -43,10 +43,9 @@ pub mod delegation;
 pub mod dispute;
 pub mod fixture;
 pub mod pending_exit;
-pub mod stack;
 pub mod unwind;
 
-pub use bond::{ExitBond, ExitBondHandle, ExitBondParams, KeyPayout};
+pub use bond::{ExitBond, ExitBondHandle, ExitBondParams};
 pub use delegation::{DelegationChallenge, DelegationChallengeHandle, DelegationChallengeState};
 pub use dispute::{
     BisectRangeParams, DisputeWinner, ExitBisect1, ExitBisect1Handle, ExitBisect1State,
@@ -373,30 +372,6 @@ pub(crate) const CARRY_ITEMS: [&str; 7] = [
     "pe_taptree",
     "unwind_taptree",
 ];
-
-/// Implements [`mattrs::contracts::ContractState`] for an *expanded* state
-/// type: the commitment is the Merkle root of its `leaves()`, and — as with
-/// the RAM example — the expanded data cannot be recovered from the root, so
-/// `decode` always fails (children are materialized via `with_state` instead).
-macro_rules! opaque_merkle_state {
-    ($ty:ty) => {
-        impl mattrs::contracts::ContractState for $ty {
-            fn encode(&self) -> Vec<u8> {
-                mattrs::merkle::MerkleTree::new(self.leaves().to_vec())
-                    .root()
-                    .to_vec()
-            }
-
-            fn decode(_bytes: &[u8]) -> Result<Self, mattrs::contracts::WitnessError> {
-                Err(mattrs::contracts::WitnessError::DecodingFailed(format!(
-                    "{} is committed as an opaque Merkle root",
-                    stringify!($ty)
-                )))
-            }
-        }
-    };
-}
-pub(crate) use opaque_merkle_state;
 
 // ============================================================================
 // Shared script fragments

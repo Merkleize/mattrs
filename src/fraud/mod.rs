@@ -39,6 +39,11 @@
 //! committed as `sha256(x)`).
 //!
 //! As in the pymatt reference, bonds/slashing are not implemented.
+//!
+//! The tapscripts here count `OP_PICK` depths by hand instead of using the
+//! [`crate::stack`] tracker: the game256 tests pin these scripts (and thus the
+//! taptree roots) byte-for-byte against pymatt, and a tracker rewrite would
+//! change the emitted bytes. New scripts should prefer [`crate::stack`].
 
 pub mod roles;
 

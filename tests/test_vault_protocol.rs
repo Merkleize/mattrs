@@ -123,9 +123,9 @@ fn revault_forks_and_both_branches_withdraw() {
         .find(|c| c.contract_name() == "Vault")
         .expect("the revaulted branch");
     assert_eq!(revaulted.clause_name().as_deref(), Some("trigger"));
-    let mut grandchildren = revaulted.outputs();
+    let grandchildren = revaulted.outputs();
     assert_eq!(grandchildren.len(), 1);
-    let small = grandchildren.remove(0);
+    let small = grandchildren.into_vec().remove(0);
     assert_eq!(small.contract_name(), "Unvaulting");
     assert_eq!(small.clause_name().as_deref(), Some("withdraw"));
     assert_eq!(
@@ -215,9 +215,9 @@ fn watchtower_recovers_an_unauthorized_unvaulting() {
     assert_eq!(thief_out, Some(VaultOutcome::Recovered { amount }));
 
     // The unvaulting was spent through `recover`, paying the recovery key.
-    let mut children = tower_entry.outputs();
+    let children = tower_entry.outputs();
     assert_eq!(children.len(), 1);
-    let unvaulting = children.remove(0);
+    let unvaulting = children.into_vec().remove(0);
     assert_eq!(unvaulting.contract_name(), "Unvaulting");
     assert_eq!(unvaulting.clause_name().as_deref(), Some("recover"));
     let sweep = &unvaulting.spending_tx().expect("swept").output[0];
@@ -297,7 +297,7 @@ fn watchtower_keeps_watching_the_revaulted_branch() {
 fn trigger_only() -> Role<OwnerData, VaultOutcome> {
     Role::new().on::<Vault, _>(|d: &mut OwnerData, h: VaultHandle, _cx| {
         let step = d.plan.remove(0);
-        let p = h.params()?;
+        let p = h.params();
         let ctv_hash = compute_ctv_hash(&step.outputs, Sequence(p.spend_delay));
         Ok(Action::Send(
             h.trigger(ctv_hash, 0).sign(HotSigner::new(d.xpriv)),

@@ -129,14 +129,14 @@ pub fn alice_role() -> Role<FraudPartyData, FraudOutcome> {
     with_settlements(
         Role::new()
             .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
-                let (h_mid, t_left, t_right) = d.reveal_args(&h.params()?);
+                let (h_mid, t_left, t_right) = d.reveal_args(&h.params());
                 let builder = h
                     .alice_reveal(h_mid, t_left, t_right)?
                     .sign(HotSigner::new(d.xpriv));
                 Ok(Action::Send(builder))
             })
             .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
-                let p = h.params()?;
+                let p = h.params();
                 wait_or_forfait(d, h.forfait(), h.handle(), FraudWinner::Alice, &p)
             })
             .on::<Leaf, _>(|d, h: LeafHandle, cx| {
@@ -160,11 +160,11 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
     with_settlements(
         Role::new()
             .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
-                let p = h.params()?;
+                let p = h.params();
                 wait_or_forfait(d, h.forfait(), h.handle(), FraudWinner::Bob, &p)
             })
             .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
-                let p = h.params()?;
+                let p = h.params();
                 let state = h.state().ok_or_else(|| {
                     ProtocolError::Other("a Bisect2 instance carries its revealed state".into())
                 })?;
@@ -197,11 +197,11 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
 fn with_settlements(role: Role<FraudPartyData, FraudOutcome>) -> Role<FraudPartyData, FraudOutcome> {
     role.on_settled::<Leaf, _>(|_d, h: LeafHandle, cx| settled_leaf(&h, cx))
         .on_settled::<Bisect1, _>(|_d, h: Bisect1Handle, _cx| match h.spent_clause() {
-            Some(Bisect1Clause::Forfait) => Ok(forfait_outcome(&h.params()?, FraudWinner::Bob)),
+            Some(Bisect1Clause::Forfait) => Ok(forfait_outcome(&h.params(), FraudWinner::Bob)),
             other => Err(unexpected_terminal(other, "Bisect1")),
         })
         .on_settled::<Bisect2, _>(|_d, h: Bisect2Handle, _cx| match h.spent_clause() {
-            Some(Bisect2Clause::Forfait) => Ok(forfait_outcome(&h.params()?, FraudWinner::Alice)),
+            Some(Bisect2Clause::Forfait) => Ok(forfait_outcome(&h.params(), FraudWinner::Alice)),
             other => Err(unexpected_terminal(other, "Bisect2")),
         })
 }
@@ -213,7 +213,7 @@ fn leaf_step(cx: &StepCtx<'_>) -> Result<i64, ProtocolError> {
         ProtocolError::Other("a Leaf arises from a Bisect2 reveal, not as an entry".into())
     })?;
     let b2: Bisect2Handle = parent.clone().try_into()?;
-    let p = b2.params()?;
+    let p = b2.params();
     match b2.spent_clause() {
         Some(Bisect2Clause::BobRevealLeft) => Ok(p.i),
         Some(Bisect2Clause::BobRevealRight) => Ok(p.i + p.m()),

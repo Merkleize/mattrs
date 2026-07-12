@@ -48,6 +48,10 @@ struct ClauseDef {
     name: Ident,
     args: ClauseArgsDef,
     script_expr: Expr,
+    /// The optional `timelock |p| <blocks>;` section: a CSV delay (in blocks)
+    /// prepended to the script as an `older()` fragment and recorded on the
+    /// clause, so the manager seeds the spending input's `nSequence` from it.
+    timelock: Option<Expr>,
     next: Option<NextDef>,
 }
 
@@ -265,6 +269,7 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
 
     let mut args: Option<ClauseArgsDef> = None;
     let mut script_expr: Option<Expr> = None;
+    let mut timelock: Option<Expr> = None;
     let mut next: Option<NextDef> = None;
 
     while !body.is_empty() {
@@ -327,6 +332,10 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                 script_expr = Some(body.parse()?);
                 body.parse::<Token![;]>()?;
             }
+            "timelock" => {
+                timelock = Some(body.parse()?);
+                body.parse::<Token![;]>()?;
+            }
             "next" => {
                 let params;
                 parenthesized!(params in body);
@@ -357,6 +366,7 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
         args: args.unwrap_or(ClauseArgsDef::Typed(Vec::new())),
         script_expr: script_expr
             .ok_or_else(|| syn::Error::new(name_span, "clause is missing `script <fn>;`"))?,
+        timelock,
         next,
     })
 }
@@ -450,6 +460,34 @@ fn next_fn_tokens(
                 }
             ))
         },
+    }
+}
+
+/// The three token pieces a clause's optional `timelock` section contributes
+/// to its construction: the CSV-blocks binding, the script expression (the
+/// user's script with `older(blocks)` prepended), and the builder-chain call
+/// recording the blocks on the clause. Without a `timelock`, the script call
+/// passes through untouched.
+fn timelock_tokens(
+    clause: &ClauseDef,
+    call_builder: &dyn Fn(&Expr, TokenStream2) -> TokenStream2,
+    script_call: TokenStream2,
+) -> (TokenStream2, TokenStream2, TokenStream2) {
+    match &clause.timelock {
+        None => (quote! {}, script_call, quote! {}),
+        Some(expr) => {
+            let blocks_call = call_builder(expr, quote! { u32 });
+            (
+                quote! { let __csv_blocks: u32 = #blocks_call; },
+                quote! {
+                    ::mattrs::script_helpers::concat(&[
+                        ::mattrs::script_helpers::older(__csv_blocks),
+                        #script_call,
+                    ])
+                },
+                quote! { .with_csv_blocks(__csv_blocks) },
+            )
+        }
     }
 }
 
@@ -552,8 +590,11 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                     specs_expr,
                     quote! { ::std::vec::Vec<::mattrs::contracts::ArgSpec> },
                 );
+                let (csv_binding, script_tokens, csv_chain) =
+                    timelock_tokens(clause, &call_builder, script_call);
                 clause_locals.push(quote! {
-                    let #cname: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> =
+                    let #cname: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> = {
+                        #csv_binding
                         ::std::sync::Arc::new(
                             ::mattrs::contracts::StandardClause::<
                                 #params_ty,
@@ -561,11 +602,13 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                                 ::mattrs::contracts::RawArgs,
                             >::new(
                                 ::core::stringify!(#cname).to_string(),
-                                #script_call,
+                                #script_tokens,
                                 #specs_call,
                                 #next_fn,
-                            ),
-                        );
+                            )
+                            #csv_chain,
+                        )
+                    };
                 });
                 continue;
             }
@@ -593,16 +636,21 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         let args_ty = quote! { #args_ident };
         let next_fn = next_fn_tokens(clause, params_ty, &state_ty, ctx_ty, &args_ty);
         let script_call = call_builder(script_expr, quote! { ::bitcoin::ScriptBuf });
+        let (csv_binding, script_tokens, csv_chain) =
+            timelock_tokens(clause, &call_builder, script_call);
         clause_locals.push(quote! {
-            let #cname: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> =
+            let #cname: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> = {
+                #csv_binding
                 ::std::sync::Arc::new(
                     ::mattrs::contracts::StandardClause::<#params_ty, #state_ty, #args_ident>::new(
                         ::core::stringify!(#cname).to_string(),
-                        #script_call,
+                        #script_tokens,
                         <#args_ident>::arg_specs_for_params(&params),
                         #next_fn,
-                    ),
-                );
+                    )
+                    #csv_chain,
+                )
+            };
         });
 
         // --- The per-clause method on the typed handle ---
@@ -708,6 +756,18 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             /// This instance's typed state, if available.
             pub fn state(&self) -> ::core::option::Option<#state_ty> {
                 self.0.state::<#state_ty>()
+            }
+
+            /// This instance's typed state, or a
+            /// [`MissingStateError`](::mattrs::manager::MissingStateError) if
+            /// the instance carries none (only possible for instances
+            /// constructed by hand without their state).
+            pub fn state_req(
+                &self,
+            ) -> ::core::result::Result<#state_ty, ::mattrs::manager::MissingStateError> {
+                self.state().ok_or(::mattrs::manager::MissingStateError {
+                    contract: ::core::stringify!(#name),
+                })
             }
         }
     } else {
@@ -848,14 +908,13 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 &self.0
             }
 
-            /// The instance's decoded contract parameters (contracts are
-            /// self-describing).
-            pub fn params(
-                &self,
-            ) -> ::core::result::Result<#params_ty, ::mattrs::contracts::WitnessError> {
-                <#params_ty as ::mattrs::contracts::ContractParams>::decode(
-                    &self.0.params_bytes(),
-                )
+            /// The instance's typed contract parameters (contracts are
+            /// self-describing; a typed handle's contract always carries them,
+            /// so no decoding is involved).
+            pub fn params(&self) -> #params_ty {
+                self.0
+                    .params::<#params_ty>()
+                    .expect("a typed handle's contract carries its params")
             }
 
             #state_fn

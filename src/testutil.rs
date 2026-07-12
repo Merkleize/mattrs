@@ -18,7 +18,7 @@ use bitcoin::{Amount, OutPoint, Transaction, TxOut, Txid};
 use bitcoincore_rpc::{Auth, Client};
 
 use crate::contracts::{ContractInstance, ErasedContract, ErasedState};
-use crate::manager::InstanceHandle;
+use crate::manager::{Children, ContractManager, InstanceHandle, ManagerError, SpendBuilder};
 
 /// An RPC client that is never actually contacted: building (as opposed to
 /// broadcasting) a spend performs no RPC, so this lets a
@@ -62,4 +62,26 @@ pub fn fund_fake(
         funding_tx,
     );
     InstanceHandle::new(instance)
+}
+
+/// Build the batch transaction for `builders` and decode it against each of
+/// `parents` with [`ContractManager::observe_spend`], materializing the
+/// (deduplicated) children — the offline counterpart of
+/// [`ContractManager::spend_batch`]: no broadcast, no RPC. Children merged
+/// across inputs (a shared `PreserveOutput` index) are returned once.
+pub fn apply_batch(
+    manager: &mut ContractManager,
+    parents: &[&InstanceHandle],
+    builders: &[SpendBuilder],
+) -> Result<(Transaction, Children), ManagerError> {
+    let tx = manager.build_batch_tx(builders)?;
+    let mut children: Vec<InstanceHandle> = Vec::new();
+    for parent in parents {
+        for child in manager.observe_spend(parent, &tx)? {
+            if !children.contains(&child) {
+                children.push(child);
+            }
+        }
+    }
+    Ok((tx, Children::new(children)))
 }

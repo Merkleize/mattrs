@@ -20,24 +20,14 @@ use support::aggregate_exits::fixture::*;
 use support::aggregate_exits::*;
 use support::testkit::{fund_fake, offline_manager, try_handle};
 
-/// Build the batch transaction, then decode it against every input's instance,
-/// materializing (deduplicated) children. The offline counterpart of
-/// `spend_batch`.
+/// Offline batch application ([`mattrs::testutil::apply_batch`]), expecting
+/// success: the counterpart of `spend_batch` without broadcast or RPC.
 fn apply(
     manager: &mut ContractManager,
     parents: &[&InstanceHandle],
     builders: Vec<SpendBuilder>,
-) -> (Transaction, Vec<InstanceHandle>) {
-    let tx = manager.build_batch_tx(&builders).expect("build spend tx");
-    let mut children: Vec<InstanceHandle> = Vec::new();
-    for parent in parents {
-        for child in manager.observe_spend(parent, &tx).expect("observe spend") {
-            if !children.contains(&child) {
-                children.push(child);
-            }
-        }
-    }
-    (tx, children)
+) -> (Transaction, mattrs::manager::Children) {
+    mattrs::testutil::apply_batch(manager, parents, &builders).expect("apply batch")
 }
 
 /// Fake-fund the pool and Ingrid's bond, post the claim, and return the merged
@@ -70,7 +60,7 @@ fn claimed_pool(
         &[unwind.handle(), bond.handle()],
         vec![
             unwind.start_exit(claim, &ingrid_pk),
-            bond.stake_claim(&claim_state)
+            bond.stake()
                 .sign(HotSigner::new(ingrid_xpriv())),
         ],
     );
@@ -373,7 +363,7 @@ fn fraudulent_claim_loses_the_bisection() {
     // Ingrid inflates the aggregate by 2000 at step 4.
     let lie = compute_claim_with_lie(&pool, &exit_bits(), Some((4, 2_000)));
     let honest = compute_claim(&pool, &exit_bits());
-    let (pending, claim_state) = claimed_pool(&mut manager, &lie);
+    let (pending, _) = claimed_pool(&mut manager, &lie);
 
     // User 0 challenges the claimed amount.
     let challenger = user_xpriv(0);
@@ -384,7 +374,7 @@ fn fraudulent_claim_loses_the_bisection() {
         vec![
             pending.challenge_state(&honest, &xonly(&challenger)),
             cbond
-                .stake_state_challenge(&claim_state, &honest, &xonly(&challenger))
+                .stake()
                 .sign(HotSigner::new(challenger.clone())),
         ],
     );
@@ -396,7 +386,7 @@ fn fraudulent_claim_loses_the_bisection() {
 
     // The bisection converges on the lying step...
     let leaf = bisect_to_leaf(&mut manager, children[0].clone(), &lie.hs, &honest.hs);
-    assert_eq!(leaf.params().unwrap().k, 4);
+    assert_eq!(leaf.params().k, 4);
 
     // ...where the challenger re-runs it and wins: bond + half of Ingrid's,
     // half burned, and the withdrawal is reverted.
@@ -434,13 +424,13 @@ fn false_challenge_loses_and_the_claim_resumes() {
         vec![
             pending.challenge_state(&fabricated, &xonly(&challenger)),
             cbond
-                .stake_state_challenge(&claim_state, &fabricated, &xonly(&challenger))
+                .stake()
                 .sign(HotSigner::new(challenger.clone())),
         ],
     );
 
     let leaf = bisect_to_leaf(&mut manager, children[0].clone(), &honest.hs, &fabricated.hs);
-    assert_eq!(leaf.params().unwrap().k, 2);
+    assert_eq!(leaf.params().k, 2);
 
     // Ingrid re-runs the disputed step and wins: half the challenger's bond,
     // half burned, and the claim resumes with a fresh challenge period.
@@ -476,7 +466,7 @@ fn stalled_turns_forfait_both_ways() {
     let pool = pool();
     let lie = compute_claim_with_lie(&pool, &exit_bits(), Some((1, 500)));
     let honest = compute_claim(&pool, &exit_bits());
-    let (pending, claim_state) = claimed_pool(&mut manager, &lie);
+    let (pending, _) = claimed_pool(&mut manager, &lie);
 
     let challenger = user_xpriv(0);
     let cbond = challenger_bond(&challenger, 3);
@@ -486,7 +476,7 @@ fn stalled_turns_forfait_both_ways() {
         vec![
             pending.challenge_state(&honest, &xonly(&challenger)),
             cbond
-                .stake_state_challenge(&claim_state, &honest, &xonly(&challenger))
+                .stake()
                 .sign(HotSigner::new(challenger.clone())),
         ],
     );
@@ -517,7 +507,7 @@ fn stalled_turns_forfait_both_ways() {
         vec![
             pending.challenge_state(&honest, &xonly(&challenger)),
             cbond
-                .stake_state_challenge(&claim_state, &honest, &xonly(&challenger))
+                .stake()
                 .sign(HotSigner::new(challenger.clone())),
         ],
     );
@@ -554,7 +544,7 @@ fn delegation_challenge_defended() {
         vec![
             pending.challenge_delegation(&pool, &honest.bits, 2, &xonly(&challenger)),
             cbond
-                .stake_delegation_challenge(&claim_state, &xonly(&challenger), &xonly(&challenger))
+                .stake()
                 .sign(HotSigner::new(challenger.clone())),
         ],
     );
@@ -589,7 +579,7 @@ fn unanswerable_delegation_challenge_reverts_the_claim() {
     let mut bits = exit_bits();
     bits[3] = true;
     let claim = compute_claim(&pool, &bits);
-    let (pending, claim_state) = claimed_pool(&mut manager, &claim);
+    let (pending, _) = claimed_pool(&mut manager, &claim);
 
     let challenger = user_xpriv(3);
     let cbond = challenger_bond(&challenger, 3);
@@ -599,7 +589,7 @@ fn unanswerable_delegation_challenge_reverts_the_claim() {
         vec![
             pending.challenge_delegation(&pool, &claim.bits, 3, &xonly(&challenger)),
             cbond
-                .stake_delegation_challenge(&claim_state, &xonly(&challenger), &xonly(&challenger))
+                .stake()
                 .sign(HotSigner::new(challenger.clone())),
         ],
     );
@@ -632,7 +622,7 @@ fn nil_step_dispute_is_defensible() {
     bits[6] = true; // padding slot: contributes nothing
     let lie = compute_claim_with_lie(&pool, &bits, Some((6, 700)));
     let honest = compute_claim(&pool, &bits);
-    let (pending, claim_state) = claimed_pool(&mut manager, &lie);
+    let (pending, _) = claimed_pool(&mut manager, &lie);
 
     let challenger = user_xpriv(1);
     let cbond = challenger_bond(&challenger, 3);
@@ -642,12 +632,12 @@ fn nil_step_dispute_is_defensible() {
         vec![
             pending.challenge_state(&honest, &xonly(&challenger)),
             cbond
-                .stake_state_challenge(&claim_state, &honest, &xonly(&challenger))
+                .stake()
                 .sign(HotSigner::new(challenger.clone())),
         ],
     );
     let leaf = bisect_to_leaf(&mut manager, children[0].clone(), &lie.hs, &honest.hs);
-    assert_eq!(leaf.params().unwrap().k, 6);
+    assert_eq!(leaf.params().k, 6);
 
     let (tx, _) = apply(
         &mut manager,
@@ -694,7 +684,7 @@ fn regtest_claim(
     let claim_state = PendingExitState::for_claim(&params(), claim, &ingrid_pk);
     let children = manager.spend_batch(&[
         unwind.start_exit(claim, &ingrid_pk),
-        bond.stake_claim(&claim_state)
+        bond.stake()
             .sign(HotSigner::new(ingrid_xpriv())),
     ])?;
     Ok((try_handle(children[0].clone()), claim_state))
@@ -763,7 +753,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     // Ingrid claims 2000 sats too much at step 4.
     let lie = compute_claim_with_lie(&pool, &exit_bits(), Some((4, 2_000)));
     let honest = compute_claim(&pool, &exit_bits());
-    let (pending, claim_state) = regtest_claim(&mut manager, &unwind, &lie)?;
+    let (pending, _) = regtest_claim(&mut manager, &unwind, &lie)?;
 
     // User 0 opens the bisection game.
     let challenger = user_xpriv(0);
@@ -775,7 +765,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let children = manager.spend_batch(&[
         pending.challenge_state(&honest, &xonly(&challenger)),
         cbond
-            .stake_state_challenge(&claim_state, &honest, &xonly(&challenger))
+            .stake()
             .sign(HotSigner::new(challenger.clone())),
     ])?;
     report_spend(&mut report, "AggregateExits", "challenge_state + bond", pending.handle());
@@ -792,7 +782,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
             Err(_) => current = children[0].clone(),
         }
     };
-    assert_eq!(leaf.params().unwrap().k, 4);
+    assert_eq!(leaf.params().k, 4);
 
     // The challenger re-runs step 4 on-chain and wins.
     let children = leaf
@@ -834,7 +824,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let children = manager.spend_batch(&[
         pending.challenge_delegation(&pool, &honest.bits, 2, &xonly(&challenger)),
         cbond
-            .stake_delegation_challenge(&claim_state, &xonly(&challenger), &xonly(&challenger))
+            .stake()
             .sign(HotSigner::new(challenger.clone())),
     ])?;
     let dc: DelegationChallengeHandle = try_handle(children[0].clone());

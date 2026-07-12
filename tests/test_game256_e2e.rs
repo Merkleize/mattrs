@@ -127,11 +127,11 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
                 _ => 'R',
             });
         }
-        let mut outputs = current.outputs();
+        let outputs = current.outputs();
         if outputs.is_empty() {
             break;
         }
-        current = outputs.remove(0);
+        current = outputs.into_vec().remove(0);
     }
     assert_eq!(path, ['R', 'L', 'R']);
     assert_eq!(current.contract_name(), "Leaf");

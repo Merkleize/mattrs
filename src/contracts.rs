@@ -320,22 +320,22 @@ macro_rules! impl_le_param {
 
 impl_le_param!(u8, u16, u32, u64);
 
+/// Booleans use the *canonical* script encoding — `[]` for false, `[0x01]` for
+/// true — the only values tapscript's consensus `MINIMALIF` accepts as `OP_IF`
+/// operands (a `[0x00]` false would be invalid on-chain).
 impl WitnessEncodable for bool {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![vec![if *self { 1 } else { 0 }]]
+        vec![if *self { vec![1] } else { Vec::new() }]
     }
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+        match witness.first().ok_or(WitnessError::StackUnderflow)?.as_slice() {
+            [] => Ok((false, 1)),
+            [1] => Ok((true, 1)),
+            other => Err(WitnessError::InvalidValue(format!(
+                "not a canonical bool encoding: {other:02x?}"
+            ))),
         }
-        if witness[0].len() != 1 {
-            return Err(WitnessError::InvalidValue(format!(
-                "Expected 1 byte for bool, got {}",
-                witness[0].len()
-            )));
-        }
-        Ok((witness[0][0] != 0, 1))
     }
 }
 
@@ -488,6 +488,95 @@ impl ClauseArgs for RawArgs {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
         Ok(RawArgs(witness.to_vec()))
+    }
+}
+
+/// A sequential reader over a clause's witness elements, for raw-args clauses'
+/// `next()` bodies: each read consumes elements in order, so argument
+/// extraction follows the clause's `ArgSpec` order by construction instead of
+/// hand-counted indices, and errors name the failing element's position.
+///
+/// ```ignore
+/// let mut r = WitnessReader::new(witness);
+/// let taptree = r.bytes32()?;
+/// let root = r.bytes32()?;
+/// let x = r.num()?;
+/// ```
+#[derive(Debug)]
+pub struct WitnessReader<'a> {
+    witness: &'a [Vec<u8>],
+    pos: usize,
+}
+
+impl<'a> WitnessReader<'a> {
+    /// Start reading at the first element.
+    pub fn new(witness: &'a [Vec<u8>]) -> Self {
+        WitnessReader { witness, pos: 0 }
+    }
+
+    fn take(&mut self) -> Result<&'a [u8], WitnessError> {
+        let element = self.witness.get(self.pos).ok_or_else(|| {
+            WitnessError::InvalidData(format!(
+                "witness element {} requested, but the stack has {}",
+                self.pos,
+                self.witness.len()
+            ))
+        })?;
+        self.pos += 1;
+        Ok(element)
+    }
+
+    /// The next element, as raw bytes.
+    pub fn bytes(&mut self) -> Result<&'a [u8], WitnessError> {
+        self.take()
+    }
+
+    /// The next element, as exactly 32 bytes.
+    pub fn bytes32(&mut self) -> Result<[u8; 32], WitnessError> {
+        let pos = self.pos;
+        self.take()?.try_into().map_err(|_| {
+            WitnessError::InvalidValue(format!("witness element {pos} is not 32 bytes"))
+        })
+    }
+
+    /// The next element, as a Bitcoin script number.
+    pub fn num(&mut self) -> Result<i64, WitnessError> {
+        let pos = self.pos;
+        crate::script_utils::vch2bn(self.take()?)
+            .map_err(|e| WitnessError::DecodingFailed(format!("witness element {pos}: {e}")))
+    }
+
+    /// The next element, as an x-only public key.
+    pub fn xonly(&mut self) -> Result<XOnlyPublicKey, WitnessError> {
+        let pos = self.pos;
+        XOnlyPublicKey::from_slice(&self.bytes32()?).map_err(|e| {
+            WitnessError::InvalidValue(format!("witness element {pos} is not an x-only key: {e}"))
+        })
+    }
+
+    /// Skip the next `n` elements.
+    pub fn skip(&mut self, n: usize) -> Result<(), WitnessError> {
+        for _ in 0..n {
+            self.take()?;
+        }
+        Ok(())
+    }
+
+    /// How many elements are left.
+    pub fn remaining(&self) -> usize {
+        self.witness.len().saturating_sub(self.pos)
+    }
+
+    /// Assert every element was consumed.
+    pub fn expect_end(&self) -> Result<(), WitnessError> {
+        if self.remaining() != 0 {
+            return Err(WitnessError::InvalidData(format!(
+                "{} unread witness elements past position {}",
+                self.remaining(),
+                self.pos
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -748,6 +837,23 @@ pub enum NextOutputs {
     Contracts(Vec<ClauseOutput>),
     /// A fixed `CHECKTEMPLATEVERIFY` template — terminal (no child instances).
     Template(CtvTemplate),
+    /// Contribute this input's whole amount to the transaction output at
+    /// `index`, whose contract and state must be defined by *another input's*
+    /// clause in the same batch spend — the "bond joins the pot" pattern: the
+    /// joining input's script typically just checks its owner's signature
+    /// (which covers the whole transaction), so nothing about the target needs
+    /// to be re-declared or carried in its witness.
+    Join {
+        /// The transaction output index the amount joins.
+        index: u32,
+    },
+}
+
+impl NextOutputs {
+    /// A [`Join`](NextOutputs::Join) contribution to output `index`.
+    pub fn join(index: u32) -> Self {
+        NextOutputs::Join { index }
+    }
 }
 
 impl From<Vec<ClauseOutput>> for NextOutputs {
@@ -1058,6 +1164,13 @@ pub trait ErasedClause: Debug + Send + Sync {
     /// Get the argument specifications, in witness order.
     fn arg_specs(&self) -> &[ArgSpec];
 
+    /// The CSV timelock (in blocks) this clause's script enforces, if it
+    /// declared one: the manager seeds the spending input's `nSequence` from
+    /// it (an explicit `SpendBuilder::sequence` still overrides).
+    fn csv_blocks(&self) -> Option<u32> {
+        None
+    }
+
     /// Compute next outputs from the spend's witness stack (args in witness order).
     ///
     /// The witness stack is the authoritative, ordered argument encoding; params and
@@ -1156,6 +1269,9 @@ where
     script: ScriptBuf,
     arg_specs: Vec<ArgSpec>,
     next_outputs_fn: Option<NextOutputsFn<P, S, A>>,
+    /// The clause's CSV timelock, when declared (see
+    /// [`ErasedClause::csv_blocks`]).
+    csv_blocks: Option<u32>,
     _phantom: PhantomData<(P, S, A)>,
 }
 
@@ -1179,8 +1295,19 @@ where
             script,
             arg_specs,
             next_outputs_fn,
+            csv_blocks: None,
             _phantom: PhantomData,
         }
+    }
+
+    /// Record the clause's CSV timelock (in blocks). The `contract!` DSL's
+    /// `timelock` section uses this after prepending the matching
+    /// [`older`](crate::script_helpers::older) fragment to the script; the
+    /// manager then seeds the spend's `nSequence` from it, so the script and
+    /// the transaction cannot disagree.
+    pub fn with_csv_blocks(mut self, blocks: u32) -> Self {
+        self.csv_blocks = Some(blocks);
+        self
     }
 
     /// Compute next outputs from typed parameters, arguments and state. A clause
@@ -1226,6 +1353,7 @@ where
             script: self.script.clone(),
             arg_specs: self.arg_specs.clone(),
             next_outputs_fn: self.next_outputs_fn.clone(),
+            csv_blocks: self.csv_blocks,
             _phantom: PhantomData,
         }
     }
@@ -1248,6 +1376,10 @@ where
 
     fn arg_specs(&self) -> &[ArgSpec] {
         &self.arg_specs
+    }
+
+    fn csv_blocks(&self) -> Option<u32> {
+        self.csv_blocks
     }
 
     fn next_outputs_from_witness(
@@ -1295,6 +1427,14 @@ pub trait ErasedContract: Debug + Send + Sync {
     /// The contract's encoded params. A contract is self-describing, so child
     /// instances created by a clause can recover their params from here.
     fn params_bytes(&self) -> &[u8];
+
+    /// The typed params value behind [`params_bytes`](Self::params_bytes), when
+    /// the contract was built from one — so a typed handle can read its params
+    /// back by downcast instead of decoding. `None` for contracts that don't
+    /// carry it (the default); such handles fall back to decoding.
+    fn params_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
 
     /// Get a clause by name.
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
@@ -1356,12 +1496,19 @@ struct P2trContractCore {
     /// Encoded params, so the contract is self-describing and child instances can
     /// recover their params without a separate `next_params` carrier.
     params_bytes: Vec<u8>,
+    /// The typed params value behind `params_bytes`, so typed handles read
+    /// them back without a decode round-trip (see [`ErasedContract::params_any`]).
+    params_any: Arc<dyn std::any::Any + Send + Sync>,
 }
 
 impl P2trContractCore {
     /// Derive the script taptree and the clause list from one `clause_tree`, so
     /// they cannot drift apart.
-    fn new<P: ContractParams>(name: &'static str, params: &P, clause_tree: ClauseTree) -> Self {
+    fn new<P: ContractParams + 'static>(
+        name: &'static str,
+        params: &P,
+        clause_tree: ClauseTree,
+    ) -> Self {
         let taptree = Arc::new(clause_tree.to_script_tree());
         let clauses = clause_tree.clauses();
         debug_assert_no_duplicate_clauses(&clauses);
@@ -1370,6 +1517,7 @@ impl P2trContractCore {
             taptree,
             clauses,
             params_bytes: params.encode(),
+            params_any: Arc::new(params.clone()),
         }
     }
 
@@ -1398,7 +1546,7 @@ pub struct StandardP2TR<P: ContractParams> {
     _phantom: PhantomData<P>,
 }
 
-impl<P: ContractParams> StandardP2TR<P> {
+impl<P: ContractParams + 'static> StandardP2TR<P> {
     /// Build a contract from its params and a clause tree. The script taptree and
     /// the clause list are both derived from `clause_tree`, so they cannot drift
     /// apart; the encoded params are stored so the contract is self-describing.
@@ -1465,6 +1613,10 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         &self.core.params_bytes
     }
 
+    fn params_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self.core.params_any.as_ref())
+    }
+
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
         self.core.get_clause(name)
     }
@@ -1523,7 +1675,7 @@ pub struct StandardAugmentedP2TR<P: ContractParams, S: ContractState> {
     _phantom: PhantomData<(P, S)>,
 }
 
-impl<P: ContractParams, S: ContractState> StandardAugmentedP2TR<P, S> {
+impl<P: ContractParams + 'static, S: ContractState> StandardAugmentedP2TR<P, S> {
     /// Build an augmented contract from its params and a clause tree. The script
     /// taptree and the clause list are both derived from `clause_tree`, so they
     /// cannot drift apart; the encoded params are stored to be self-describing.
@@ -1610,6 +1762,10 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
 
     fn params_bytes(&self) -> &[u8] {
         &self.core.params_bytes
+    }
+
+    fn params_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self.core.params_any.as_ref())
     }
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {

@@ -32,9 +32,8 @@ use mattrs::merkle::{get_directions, is_power_of_2, MerkleTree, NIL};
 use mattrs::script_utils::{bn2vch, commit_int};
 use mattrs_derive::ContractParams;
 
-use super::bond::{burn_output, key_payout_output};
 use super::pending_exit::PendingExit;
-use super::stack::{Source, StackScript};
+use mattrs::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
 use super::{
     reveal_mids, spec, spec_num, w32, ChallengeContext, ExitClaim, PoolParams, PoolTree,
@@ -123,7 +122,7 @@ impl ExitBisect1State {
     }
 }
 
-super::opaque_merkle_state!(ExitBisect1State);
+mattrs::opaque_merkle_state!(ExitBisect1State);
 
 /// [`ExitBisect2`] state: [`ExitBisect1State`] plus Ingrid's revealed midpoint
 /// and half-traces.
@@ -160,7 +159,7 @@ impl ExitBisect2State {
     }
 }
 
-super::opaque_merkle_state!(ExitBisect2State);
+mattrs::opaque_merkle_state!(ExitBisect2State);
 
 /// [`ExitLeaf`] state: the agreed start, the two claimed ends, the carry.
 #[derive(Debug, Clone)]
@@ -177,7 +176,7 @@ impl ExitLeafState {
     }
 }
 
-super::opaque_merkle_state!(ExitLeafState);
+mattrs::opaque_merkle_state!(ExitLeafState);
 
 // ============================================================================
 // Settlement (shared by forfaits and leaf outcomes)
@@ -222,8 +221,8 @@ fn settlement_outputs(
         DisputeWinner::Challenger => xonly(&ctx.challenger_pk)?,
     };
     Ok(vec![
-        key_payout_output(winner_pk, 0),
-        burn_output(1),
+        ClauseOutput::pay_key(0, winner_pk),
+        ClauseOutput::burn(1),
         continuation,
     ])
 }
@@ -332,6 +331,7 @@ contract! {
         clause forfait {
             args raw |_p| ExitBisect1::forfait_specs();
             script ExitBisect1::forfait_script;
+            timelock |p| p.pool.response_timeout;
             next(p, a, s) {
                 ExitBisect1::forfait_outputs(p, &a.0, s)
             }
@@ -405,9 +405,8 @@ impl ExitBisect1 {
             .collect()
     }
 
-    fn forfait_script(p: &BisectRangeParams) -> ScriptBuf {
+    fn forfait_script(_p: &BisectRangeParams) -> ScriptBuf {
         let mut s = StackScript::from_specs(&Self::forfait_specs());
-        s.older(p.pool.response_timeout);
         s.sha_cat(&CARRY_ITEMS, "carry");
         s.merkle_of(&with_carry(&B1_ITEMS), "state");
         s.ccv(
@@ -441,7 +440,7 @@ impl ExitBisect1Handle {
     /// Ingrid reveals her midpoint/half-traces for this range, from her
     /// claimed step commitments `hs`.
     pub fn ingrid_reveal(&self, hs: &[[u8; 32]]) -> SpendBuilder {
-        let p = self.params().expect("params decode");
+        let p = self.params();
         let (h_mid, t_left, t_right) = reveal_mids(hs, p.i as usize, p.j as usize);
         let mut witness = self.bisect_state().to_witness();
         witness.extend([h_mid.to_vec(), t_left.to_vec(), t_right.to_vec()]);
@@ -450,13 +449,12 @@ impl ExitBisect1Handle {
 
     /// The challenger collects after Ingrid's response timeout. The caller
     /// must set the slash amounts (`.output_amount(0, bond + bond / 2)`,
-    /// `.output_amount(1, bond - bond / 2)`).
+    /// `.output_amount(1, bond - bond / 2)`); the clause's `timelock` sets
+    /// the CSV sequence.
     pub fn forfait(&self) -> SpendBuilder {
         let state = self.bisect_state();
         let witness = carry_expanded_witness(&state.leaves(), 5, &state.ctx);
-        self.0
-            .spend_clause("forfait", witness)
-            .sequence(self.params().expect("params decode").pool.response_timeout)
+        self.0.spend_clause("forfait", witness)
     }
 }
 
@@ -494,6 +492,7 @@ contract! {
         clause forfait {
             args raw |_p| ExitBisect2::forfait_specs();
             script ExitBisect2::forfait_script;
+            timelock |p| p.pool.response_timeout;
             next(p, a, s) {
                 ExitBisect2::forfait_outputs(p, &a.0, s)
             }
@@ -661,9 +660,8 @@ impl ExitBisect2 {
             .collect()
     }
 
-    fn forfait_script(p: &BisectRangeParams) -> ScriptBuf {
+    fn forfait_script(_p: &BisectRangeParams) -> ScriptBuf {
         let mut s = StackScript::from_specs(&Self::forfait_specs());
-        s.older(p.pool.response_timeout);
         s.sha_cat(&CARRY_ITEMS, "carry");
         s.merkle_of(&with_carry(&B2_ITEMS), "state");
         s.ccv(
@@ -697,7 +695,7 @@ impl ExitBisect2Handle {
     /// The challenger reveals their midpoint/half-traces from their claimed
     /// step commitments `hs`, recursing into the diverging half.
     pub fn challenger_reveal(&self, hs: &[[u8; 32]]) -> SpendBuilder {
-        let p = self.params().expect("params decode");
+        let p = self.params();
         let state = self.bisect_state();
         let (h_mid, t_left, t_right) = reveal_mids(hs, p.i as usize, p.j as usize);
         let clause = if h_mid == state.h_mid_i {
@@ -712,13 +710,12 @@ impl ExitBisect2Handle {
 
     /// Ingrid collects after the challenger's response timeout. The caller
     /// must set the slash amounts (`.output_amount(0, bond / 2)`,
-    /// `.output_amount(1, bond - bond / 2)`).
+    /// `.output_amount(1, bond - bond / 2)`); the clause's `timelock` sets
+    /// the CSV sequence.
     pub fn forfait(&self) -> SpendBuilder {
         let state = self.bisect_state();
         let witness = carry_expanded_witness(&state.leaves(), 5, &state.ctx);
-        self.0
-            .spend_clause("forfait", witness)
-            .sequence(self.params().expect("params decode").pool.response_timeout)
+        self.0.spend_clause("forfait", witness)
     }
 }
 
@@ -937,7 +934,7 @@ impl ExitLeafHandle {
         claim: &ExitClaim,
         pool: &PoolTree,
     ) -> SpendBuilder {
-        let p = self.params().expect("params decode");
+        let p = self.params();
         let k = p.k as usize;
         let state: ExitLeafState =
             self.state().expect("ExitLeaf instances carry their state");

@@ -8,9 +8,8 @@ use mattrs::contracts::{
 };
 use mattrs::manager::SpendBuilder;
 
-use super::bond::{burn_output, key_payout_output};
 use super::pending_exit::PendingExit;
-use super::stack::{Source, StackScript};
+use mattrs::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
 use super::{spec, ChallengeContext, PoolParams};
 
@@ -47,7 +46,7 @@ impl DelegationChallengeState {
     }
 }
 
-super::opaque_merkle_state!(DelegationChallengeState);
+mattrs::opaque_merkle_state!(DelegationChallengeState);
 
 /// The tracked-stack names of the seven state leaves, bottom → top.
 const STATE_ITEMS: [&str; 7] = [
@@ -84,6 +83,7 @@ contract! {
         clause challenger_wins {
             args raw |_p| DelegationChallenge::challenger_wins_specs();
             script DelegationChallenge::challenger_wins_script;
+            timelock |p| p.response_timeout;
             next(p, a, s) {
                 DelegationChallenge::challenger_wins_outputs(p, &a.0, s)
             }
@@ -168,8 +168,8 @@ impl DelegationChallenge {
         })?;
         let ingrid_pk = super::wpk(witness, 4)?;
         Ok(vec![
-            key_payout_output(ingrid_pk, 0),
-            burn_output(1),
+            ClauseOutput::pay_key(0, ingrid_pk),
+            ClauseOutput::burn(1),
             ClauseOutput::at(2)
                 .to(PendingExit::new(p.clone()).as_erased())
                 .with_state(&state.ctx.resume_state)
@@ -182,9 +182,8 @@ impl DelegationChallenge {
         Self::state_specs()
     }
 
-    fn challenger_wins_script(p: &PoolParams) -> ScriptBuf {
+    fn challenger_wins_script(_p: &PoolParams) -> ScriptBuf {
         let mut s = StackScript::from_specs(&Self::challenger_wins_specs());
-        s.older(p.response_timeout);
         Self::reveal_state(&mut s);
 
         // Output 0: the challenger's bond back plus half of Ingrid's.
@@ -226,8 +225,8 @@ impl DelegationChallenge {
         })?;
         let challenger_pk = super::wpk(witness, 6)?;
         Ok(vec![
-            key_payout_output(challenger_pk, 0),
-            burn_output(1),
+            ClauseOutput::pay_key(0, challenger_pk),
+            ClauseOutput::burn(1),
             ClauseOutput::at(2)
                 .to(Unwind::new(p.clone()).as_erased())
                 .with_state(&UnwindState {
@@ -255,11 +254,10 @@ impl DelegationChallengeHandle {
 
     /// The challenger collects after Ingrid's response timeout. The caller
     /// must set the slash amounts (`.output_amount(0, bond + bond / 2)` and
-    /// `.output_amount(1, bond - bond / 2)`); the CSV sequence is set here.
+    /// `.output_amount(1, bond - bond / 2)`); the clause's `timelock` sets
+    /// the CSV sequence.
     pub fn challenger_wins(&self) -> SpendBuilder {
-        let witness = self.challenge_state().to_witness();
         self.0
-            .spend_clause("challenger_wins", witness)
-            .sequence(self.params().expect("params decode").response_timeout)
+            .spend_clause("challenger_wins", self.challenge_state().to_witness())
     }
 }

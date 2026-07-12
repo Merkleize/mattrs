@@ -11,9 +11,8 @@ use mattrs::merkle::{MerkleProof, NIL};
 use mattrs::script_utils::bn2vch;
 use mattrs_derive::ContractState;
 
-use super::bond::key_payout_output;
 use super::pending_exit::{PendingExit, PendingExitState};
-use super::stack::{Source, StackScript};
+use mattrs::stack::{Source, StackScript};
 use super::{bit_root, spec, spec_num, w32, wnum, wpk, ExitClaim, PoolParams, PoolTree};
 
 define_pushable!();
@@ -160,7 +159,7 @@ impl Unwind {
         let new_root = proof.get_new_root_after_update(NIL);
 
         Ok(vec![
-            key_payout_output(pk, 0),
+            ClauseOutput::pay_key(0, pk),
             ClauseOutput::at(1)
                 .to(Unwind::new(p.clone()).as_erased())
                 .with_state(&UnwindState { root: new_root })
@@ -289,7 +288,7 @@ impl UnwindHandle {
     /// [`PendingExit`]. Batch with an [`super::ExitBond`] `stake_claim` spend
     /// so the bond joins the pot.
     pub fn start_exit(&self, claim: &ExitClaim, ingrid_pk: &bitcoin::XOnlyPublicKey) -> SpendBuilder {
-        let unwind_taptree = Unwind::new(self.params().expect("params decode")).taptree_root();
+        let unwind_taptree = Unwind::new(self.params()).taptree_root();
         let mut witness = vec![
             unwind_taptree.to_vec(),
             claim.r.to_vec(),

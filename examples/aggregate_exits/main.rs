@@ -101,7 +101,7 @@ impl Stage {
         let claim_state = PendingExitState::for_claim(&self.params, claim, &self.ingrid_pk);
         let children = self.manager.spend_batch(&[
             self.unwind.start_exit(claim, &self.ingrid_pk),
-            bond.stake_claim(&claim_state)
+            bond.stake()
                 .sign(HotSigner::new(ingrid_xpriv())),
         ])?;
         println!(
@@ -111,7 +111,7 @@ impl Stage {
             BOND,
             self.params.challenge_period,
         );
-        Ok((children[0].clone().try_into().unwrap(), claim_state))
+        Ok((children.typed(0)?, claim_state))
     }
 
     /// Open the bisection game on a claim.
@@ -126,7 +126,7 @@ impl Stage {
         let children = self.manager.spend_batch(&[
             pending.challenge_state(challenger_claim, &xonly(challenger)),
             cbond
-                .stake_state_challenge(claim_state, challenger_claim, &xonly(challenger))
+                .stake()
                 .sign(HotSigner::new(*challenger)),
         ])?;
         println!(
@@ -148,10 +148,10 @@ impl Stage {
         let mut current = entry;
         loop {
             let b1: ExitBisect1Handle = current.clone().try_into().unwrap();
-            let p = b1.params().unwrap();
+            let p = b1.params();
             let children = b1.ingrid_reveal(ingrid_hs).exec(&mut self.manager)?;
             println!("    bisecting [{}, {}]: Ingrid reveals her midpoint", p.i, p.j);
-            let b2: ExitBisect2Handle = children[0].clone().try_into().unwrap();
+            let b2: ExitBisect2Handle = children.typed(0)?;
             let children = b2
                 .challenger_reveal(challenger_hs)
                 .exec(&mut self.manager)?;
@@ -159,13 +159,13 @@ impl Stage {
                 Ok(leaf) => {
                     println!(
                         "    the challenger recurses: dispute pinned to step {}",
-                        leaf.params().unwrap().k
+                        leaf.params().k
                     );
                     return Ok(leaf);
                 }
                 Err(_) => {
-                    let next: ExitBisect1Handle = children[0].clone().try_into().unwrap();
-                    let np = next.params().unwrap();
+                    let next: ExitBisect1Handle = children.typed(0)?;
+                    let np = next.params();
                     println!("    the challenger recurses into [{}, {}]", np.i, np.j);
                     current = children[0].clone();
                 }
@@ -195,7 +195,7 @@ fn scenario_direct(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
         .exec(&mut stage.manager)?;
     let mut after = stage.pool.clone();
     after.zero(2);
-    let next: UnwindHandle = children[1].clone().try_into().unwrap();
+    let next: UnwindHandle = children.typed(1)?;
     assert_eq!(next.state().unwrap().root, after.root());
     println!(
         "  user 2 takes {} sats; the pool continues with {} sats at root {}",
@@ -210,7 +210,7 @@ fn scenario_direct(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
         .output_amount(0, Amount::from_sat(BALANCES[5] as u64))
         .exec(&mut stage.manager)?;
     after.zero(5);
-    let next: UnwindHandle = children[1].clone().try_into().unwrap();
+    let next: UnwindHandle = children.typed(1)?;
     assert_eq!(next.state().unwrap().root, after.root());
     println!(
         "  user 5 takes {} sats; the pool continues with {} sats",
@@ -231,7 +231,7 @@ fn scenario_happy(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
         .finalize()
         .output_amount(0, Amount::from_sat((claim.x + BOND) as u64))
         .exec(&mut stage.manager)?;
-    let continued: UnwindHandle = children[1].clone().try_into().unwrap();
+    let continued: UnwindHandle = children.typed(1)?;
     assert_eq!(continued.state().unwrap().root, claim.r_prime);
     println!(
         "  Ingrid takes {} sats (aggregate {} + bond {}); the pool continues with {} sats at R' {}",
@@ -265,7 +265,7 @@ fn scenario_fraud(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
         .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
-    let reverted: UnwindHandle = children[2].clone().try_into().unwrap();
+    let reverted: UnwindHandle = children.typed(2)?;
     assert_eq!(reverted.state().unwrap().root, stage.pool.root());
     println!(
         "  step 4 re-run on-chain: Ingrid lied. The challenger takes {} sats (their bond back + half of Ingrid's), {} sats are burned,",
@@ -296,7 +296,7 @@ fn scenario_false_challenge(wallet: &str) -> Result<(), Box<dyn std::error::Erro
         .output_amount(0, Amount::from_sat((BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
-    let resumed: PendingExitHandle = children[2].clone().try_into().unwrap();
+    let resumed: PendingExitHandle = children.typed(2)?;
     assert_eq!(resumed.state().unwrap(), claim_state);
     println!(
         "  step 2 re-run on-chain: the claim was honest. Ingrid pockets {} sats of the challenger's bond, {} are burned,",
@@ -329,18 +329,18 @@ fn scenario_delegation_defend(wallet: &str) -> Result<(), Box<dyn std::error::Er
     let children = stage.manager.spend_batch(&[
         pending.challenge_delegation(&stage.pool, &honest.bits, 2, &xonly(&challenger)),
         cbond
-            .stake_delegation_challenge(&claim_state, &xonly(&challenger), &xonly(&challenger))
+            .stake()
             .sign(HotSigner::new(challenger)),
     ])?;
     println!("  user 2 disputes their own delegation (bond: {} sats)", BOND);
 
-    let dc: DelegationChallengeHandle = children[0].clone().try_into().unwrap();
+    let dc: DelegationChallengeHandle = children.typed(0)?;
     let children = dc
         .defend(&delegation_2)
         .output_amount(0, Amount::from_sat((BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
-    let resumed: PendingExitHandle = children[2].clone().try_into().unwrap();
+    let resumed: PendingExitHandle = children.typed(2)?;
     assert_eq!(resumed.state().unwrap(), claim_state);
     println!(
         "  Ingrid reveals user 2's delegation signature (verified with OP_CHECKSIGFROMSTACK):"
@@ -366,26 +366,26 @@ fn scenario_delegation_timeout(wallet: &str) -> Result<(), Box<dyn std::error::E
     let mut bits = exit_bits();
     bits[3] = true;
     let claim = compute_claim(&stage.pool, &bits);
-    let (pending, claim_state) = stage.claim(&claim)?;
+    let (pending, _) = stage.claim(&claim)?;
 
     let challenger = user_xpriv(3);
     let cbond = stage.bond_for(&challenger)?;
     let children = stage.manager.spend_batch(&[
         pending.challenge_delegation(&stage.pool, &claim.bits, 3, &xonly(&challenger)),
         cbond
-            .stake_delegation_challenge(&claim_state, &xonly(&challenger), &xonly(&challenger))
+            .stake()
             .sign(HotSigner::new(challenger.clone())),
     ])?;
     println!("  user 3 disputes their delegation (bond: {} sats)", BOND);
 
     stage.mine(stage.params.response_timeout, "Ingrid has no signature to reveal")?;
-    let dc: DelegationChallengeHandle = children[0].clone().try_into().unwrap();
+    let dc: DelegationChallengeHandle = children.typed(0)?;
     let children = dc
         .challenger_wins()
         .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
-    let reverted: UnwindHandle = children[2].clone().try_into().unwrap();
+    let reverted: UnwindHandle = children.typed(2)?;
     assert_eq!(reverted.state().unwrap().root, stage.pool.root());
     println!(
         "  user 3 collects {} sats (their bond back + half of Ingrid's), {} sats are burned,",

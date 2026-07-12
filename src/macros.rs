@@ -1,9 +1,11 @@
-//! Declarative helper below the `contract!` DSL: `clause_tree!` arranges
-//! (type-erased) clauses into a `ClauseTree` with nested-bracket syntax. The
-//! `contract!` macro expands to it; use it directly (alongside
-//! [`StandardClause::new`](crate::contracts::StandardClause::new)) when a
+//! Declarative helpers below the `contract!` DSL: `clause_tree!` arranges
+//! (type-erased) clauses into a `ClauseTree` with nested-bracket syntax (the
+//! `contract!` macro expands to it; use it directly alongside
+//! [`StandardClause::new`](crate::contracts::StandardClause::new) when a
 //! contract doesn't fit the DSL — e.g. the runtime-shaped clauses of
-//! [`mattrs::fraud`](crate::fraud).
+//! [`mattrs::fraud`](crate::fraud)), and `opaque_merkle_state!` implements
+//! [`ContractState`](crate::contracts::ContractState) for *expanded* states
+//! committed as an opaque Merkle root.
 
 /// Build a [`ClauseTree`](crate::contracts::ClauseTree) from clauses, with
 /// bracket syntax mirroring the taproot tree grammar:
@@ -80,6 +82,42 @@ macro_rules! clause_tree {
             "clause_tree!: a tree level is one clause or exactly two subtrees; \
              write branches explicitly, e.g. `[a, [b, c]]`"
         )
+    };
+}
+
+/// Implements [`ContractState`](crate::contracts::ContractState) for an
+/// *expanded* state type: the on-chain commitment is the Merkle root of the
+/// type's `leaves()` (a method returning the 32-byte leaves in order, as an
+/// array or `Vec`), and — as with the RAM example's cell vector — the expanded
+/// data cannot be recovered from the root, so `decode` always fails (children
+/// are materialized via `with_state` instead; see
+/// [`ErasedState`](crate::contracts::ErasedState)).
+///
+/// ```ignore
+/// #[derive(Debug, Clone)]
+/// pub struct DisputeState { pub h_start: [u8; 32], /* ... */ }
+/// impl DisputeState {
+///     fn leaves(&self) -> Vec<[u8; 32]> { vec![self.h_start /* ... */] }
+/// }
+/// mattrs::opaque_merkle_state!(DisputeState);
+/// ```
+#[macro_export]
+macro_rules! opaque_merkle_state {
+    ($ty:ty) => {
+        impl $crate::contracts::ContractState for $ty {
+            fn encode(&self) -> Vec<u8> {
+                $crate::merkle::MerkleTree::new(self.leaves().to_vec())
+                    .root()
+                    .to_vec()
+            }
+
+            fn decode(_bytes: &[u8]) -> Result<Self, $crate::contracts::WitnessError> {
+                Err($crate::contracts::WitnessError::DecodingFailed(format!(
+                    "{} is committed as an opaque Merkle root",
+                    stringify!($ty)
+                )))
+            }
+        }
     };
 }
 

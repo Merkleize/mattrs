@@ -22,7 +22,10 @@
 //! unexpected child is a loud error, never a silently orphaned branch.
 //!
 //! Scope: each action spends a single token; transactions batching several
-//! tokens' UTXOs as inputs are a future extension.
+//! tokens' UTXOs as inputs (e.g. a party's bond joining the pot via a
+//! [`NextOutputs::Join`](crate::contracts::NextOutputs::Join) input) are a
+//! future extension — say an `Action::SendWith(primary, companions)` driving
+//! [`spend_batch`](crate::manager::ContractManager::spend_batch).
 
 pub mod chain;
 mod runner;
@@ -535,7 +538,7 @@ mod tests {
         );
         assert_eq!(ContractKey::of_handle(&a), KeyA::kind());
         let typed: KeyAHandle = a.clone().try_into().expect("same contract");
-        assert_eq!(typed.params().expect("decodes").tag, 42);
+        assert_eq!(typed.params().tag, 42);
         // A same-TypeId instance of the *other* contract must not convert.
         assert!(KeyBHandle::try_from(a).is_err());
     }

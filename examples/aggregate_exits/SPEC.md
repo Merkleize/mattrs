@@ -167,11 +167,11 @@ and the pot is stuck — a mutual-griefing corner inherited from the generic
 module (both bonds are already forfeit at that point).
 
 ### `ExitBond`
-A plain owner-signed UTXO with one clause per pot it can join (`stake_claim`,
-`stake_state_challenge`, `stake_delegation_challenge`). Its witness carries the
-target's state fields only so its `next()` reproduces the pool-side clause
-output exactly; `ContractManager::spend_batch` then merges the two preserve
-outputs into one accumulated pot.
+A plain owner-signed UTXO with a single `stake` clause: its `next()` is a
+`NextOutputs::Join { index: 0 }`, contributing the bond's amount to whatever
+pot the batched pool-side clause defines at output 0. The owner's signature
+covers the whole transaction — it is their consent to that specific pot — so
+nothing about the target is re-declared or carried in the bond's witness.
 
 ## Amounts and the OP_AMOUNT gaps
 
@@ -210,9 +210,9 @@ log, no script path): provably unspendable.
 ## Files
 
 - `contracts/` — the contracts (`unwind`, `pending_exit`, `delegation`,
-  `dispute`, `bond`), the pool/claim model (`mod.rs`), a symbolic
-  stack-tracking script assembler (`stack.rs`), and the demo cast shared by
-  the demo and the tests (`fixture.rs`).
+  `dispute`, `bond`), the pool/claim model (`mod.rs`), and the demo cast
+  shared by the demo and the tests (`fixture.rs`). The tapscripts are
+  assembled with the symbolic stack tracker (`mattrs::stack`).
 - `main.rs` — the regtest demo, one scenario per execution path.
 - `../../tests/test_aggregate_exits.rs` — offline unit/build/protocol tiers
   plus `#[ignore]`d regtest e2e.
