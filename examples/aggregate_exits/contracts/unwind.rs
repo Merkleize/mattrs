@@ -4,7 +4,8 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, ClauseError, ClauseOutput, WitnessReader, CCV_FLAG_CHECK_INPUT,
+    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
 };
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{MerkleProof, NIL};
@@ -13,7 +14,7 @@ use mattrs_derive::ContractState;
 
 use super::pending_exit::{PendingExit, PendingExitState};
 use mattrs::stack::{Source, StackScript};
-use super::{bit_root, spec, spec_num, w32, wnum, wpk, ExitClaim, PoolParams, PoolTree};
+use super::{bit_root, spec, spec_num, ExitClaim, PoolParams, PoolTree};
 
 define_pushable!();
 
@@ -136,15 +137,17 @@ impl Unwind {
         witness: &[Vec<u8>],
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let depth = p.depth();
-        let pk = wpk(witness, 0)?;
-        let bal = wnum(witness, 1)?;
+        let mut w = WitnessReader::new(witness);
+        let pk = w.xonly()?;
+        let bal = w.num()?;
         let mut hashes = Vec::with_capacity(depth);
         let mut directions = Vec::with_capacity(depth);
-        for l in 0..depth {
-            hashes.push(w32(witness, 2 + 2 * l)?);
-            directions.push(wnum(witness, 3 + 2 * l)? as u8);
+        for _ in 0..depth {
+            hashes.push(w.bytes32()?);
+            directions.push(w.num()? as u8);
         }
-        let root = w32(witness, 2 + 2 * depth)?;
+        let root = w.bytes32()?;
+        w.expect_end()?;
 
         let proof = MerkleProof {
             hashes,
@@ -240,16 +243,18 @@ impl Unwind {
         witness: &[Vec<u8>],
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let n = p.padded_size();
-        let unwind_taptree = w32(witness, 0)?;
-        let r = w32(witness, 1)?;
-        let r_prime = w32(witness, 2)?;
+        let mut w = WitnessReader::new(witness);
+        let unwind_taptree = w.bytes32()?;
+        let r = w.bytes32()?;
+        let r_prime = w.bytes32()?;
         let mut bits = Vec::with_capacity(n);
-        for u in 0..n {
-            bits.push(wnum(witness, 3 + u)? != 0);
+        for _ in 0..n {
+            bits.push(w.num()? != 0);
         }
-        let ingrid_pk = w32(witness, 3 + n)?;
-        let trace_i = w32(witness, 4 + n)?;
-        let x = wnum(witness, 5 + n)?;
+        let ingrid_pk = w.bytes32()?;
+        let trace_i = w.bytes32()?;
+        let x = w.num()?;
+        w.expect_end()?;
 
         let state = PendingExitState {
             unwind_taptree,

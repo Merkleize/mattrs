@@ -3,7 +3,10 @@
 use bitcoin::ScriptBuf;
 use bitcoin_script::define_pushable;
 use mattrs::contract;
-use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT};
+use mattrs::contracts::{
+    ArgSpec, ClauseError, ClauseOutput, WitnessReader, CCV_FLAG_CHECK_INPUT,
+    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+};
 use mattrs::manager::SpendBuilder;
 use mattrs::script_utils::{bn2vch, commit_int};
 use mattrs_derive::ContractState;
@@ -13,8 +16,7 @@ use super::dispute::{BisectRangeParams, ExitBisect1, ExitBisect1State};
 use mattrs::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
 use super::{
-    dual_proof_layer, spec, spec_num, step_h, w32, ChallengeContext, ExitClaim, PoolParams,
-    PoolTree,
+    dual_proof_layer, spec, spec_num, step_h, ChallengeContext, ExitClaim, PoolParams, PoolTree,
 };
 
 define_pushable!();
@@ -196,8 +198,11 @@ impl PendingExit {
         p: &PoolParams,
         witness: &[Vec<u8>],
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let r_prime = w32(witness, 2)?;
-        let ingrid_pk = super::wpk(witness, 4)?;
+        let mut w = WitnessReader::new(witness);
+        w.skip(2)?; // unwind_taptree, r
+        let r_prime = w.bytes32()?;
+        w.skip(1)?; // s_root
+        let ingrid_pk = w.xonly()?;
         Ok(vec![
             ClauseOutput::pay_key(0, ingrid_pk),
             ClauseOutput::at(1)
@@ -248,19 +253,22 @@ impl PendingExit {
         let state = state.ok_or_else(|| {
             ClauseError::Other("challenge_state needs the claim state".to_string())
         })?;
+        let mut w = WitnessReader::new(witness);
+        w.skip(7)?; // the state fields; `state` already carries them decoded
         let ctx = ChallengeContext {
             resume_state: state.clone(),
-            pe_taptree: w32(witness, 7)?,
-            challenger_pk: w32(witness, 8)?,
+            pe_taptree: w.bytes32()?,
+            challenger_pk: w.bytes32()?,
         };
         let b1_state = ExitBisect1State {
             h_start: step_h(&state.r, 0),
             h_end_i: step_h(&state.r_prime, state.x),
-            h_end_c: w32(witness, 9)?,
+            h_end_c: w.bytes32()?,
             trace_i: state.trace_i,
-            trace_c: w32(witness, 10)?,
+            trace_c: w.bytes32()?,
             ctx,
         };
+        w.expect_end()?;
         Ok(vec![ClauseOutput::at(0)
             .to(ExitBisect1::new(BisectRangeParams::entry(p)).as_erased())
             .with_state(&b1_state)
@@ -317,12 +325,17 @@ impl PendingExit {
         let state = state.ok_or_else(|| {
             ClauseError::Other("challenge_delegation needs the claim state".to_string())
         })?;
+        let mut w = WitnessReader::new(witness);
+        w.skip(7)?; // the state fields; `state` already carries them decoded
+        let pe_taptree = w.bytes32()?;
+        let challenger_pk = w.bytes32()?;
         let dc_state = DelegationChallengeState {
-            user_pk: w32(witness, 9)?,
+            // `bal` and the membership proof follow; the script verified them.
+            user_pk: w.bytes32()?,
             ctx: ChallengeContext {
                 resume_state: state.clone(),
-                pe_taptree: w32(witness, 7)?,
-                challenger_pk: w32(witness, 8)?,
+                pe_taptree,
+                challenger_pk,
             },
         };
         Ok(vec![ClauseOutput::at(0)

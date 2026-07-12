@@ -426,10 +426,11 @@ impl ContractManager {
                 }
             }
         }
+        let txid = tx.compute_txid();
         for (builder, next) in builders.iter().zip(&nexts) {
             if let NextOutputs::Join { index } = next {
                 let outpoint = OutPoint {
-                    txid: tx.compute_txid(),
+                    txid,
                     vout: *index,
                 };
                 let child = self
@@ -908,6 +909,11 @@ impl ContractManager {
     /// Returns the child handles (empty for terminal and CTV-template clauses).
     /// If the instance is already marked spent by this same transaction, the
     /// previously materialized children are returned.
+    ///
+    /// A `NextOutputs::Join` input's child is defined by *another* input of the
+    /// same transaction: observing the joining input before the defining one
+    /// yields no children yet — re-observe it after the defining input to link
+    /// and return the shared child ([`crate::testutil::apply_batch`] does this).
     pub fn observe_spend(
         &mut self,
         handle: &InstanceHandle,
@@ -915,20 +921,29 @@ impl ContractManager {
     ) -> Result<Children, ManagerError> {
         let txid = spending_tx.compute_txid();
 
-        {
+        let already_spent = {
             let inst = handle.instance.borrow();
             if inst.status() == InstanceStatus::Spent {
-                if inst.spent_in_tx() == Some(txid) {
-                    return Ok(handle.outputs());
+                if inst.spent_in_tx() != Some(txid) {
+                    return Err(ManagerError::InvalidInstance(
+                        "Instance already spent by a different transaction".to_string(),
+                    ));
                 }
-                return Err(ManagerError::InvalidInstance(
-                    "Instance already spent by a different transaction".to_string(),
-                ));
-            }
-            if inst.status() != InstanceStatus::Funded {
+                // Re-observation: return the cached children — unless there are
+                // none, which for a joining input observed before its defining
+                // input means the link may still be missing; fall through and
+                // retry it (a no-op for genuinely childless clauses).
+                let outputs = handle.outputs();
+                if !outputs.is_empty() {
+                    return Ok(outputs);
+                }
+                true
+            } else if inst.status() != InstanceStatus::Funded {
                 return Err(ManagerError::NotFunded);
+            } else {
+                false
             }
-        }
+        };
         let outpoint = handle
             .instance
             .borrow()
@@ -989,20 +1004,26 @@ impl ContractManager {
             (clause.name().to_string(), next)
         };
 
-        handle
-            .instance
-            .borrow_mut()
-            .mark_spent(spending_tx.clone(), vin, clause_name, witness_args);
+        if !already_spent {
+            handle
+                .instance
+                .borrow_mut()
+                .mark_spent(spending_tx.clone(), vin, clause_name, witness_args);
+        }
 
         let children = match &next {
+            // A re-observed instance with no cached children got here only to
+            // retry a join link; its (childless) non-join clause has nothing
+            // to re-materialize.
+            NextOutputs::Contracts(_) if already_spent => Vec::new(),
             NextOutputs::Contracts(outputs) => {
                 self.materialize_outputs(&handle.instance, outputs, spending_tx, vin)?
             }
             NextOutputs::Template(_) => Vec::new(),
             // A joining input contributes to a child another input's clause
             // defines: link it when that input's observation already
-            // materialized the child; otherwise return nothing (observe the
-            // defining input first to get the shared child).
+            // materialized the child; otherwise return nothing (a later
+            // re-observation — after the defining input's — repairs the link).
             NextOutputs::Join { index } => {
                 let outpoint = OutPoint { txid, vout: *index };
                 match self.find_instance_by_outpoint(outpoint) {
@@ -1803,6 +1824,60 @@ mod tests {
             .build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hj)])
             .unwrap_err();
         assert!(matches!(err, ManagerError::MixedOutputSemantics { index: 0 }));
+    }
+
+    /// A defining input and a joining input funded and batched, for the
+    /// observation-order tests.
+    fn join_fixture() -> (InstanceHandle, InstanceHandle) {
+        let dest = test_contract(90, None);
+        let defining = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(dest).preserve_amount().build()],
+        );
+        let joining = test_contract(
+            2,
+            Some(Arc::new(|_: &(), _: &RawArgs, _: Option<&()>| {
+                Ok(NextOutputs::join(0))
+            })),
+        );
+        (
+            fund_fake(defining, None, sat(100_000), 1),
+            fund_fake(joining, None, sat(60_000), 2),
+        )
+    }
+
+    #[test]
+    fn join_link_survives_observation_order() {
+        let (hd, hj) = join_fixture();
+        let mut manager = offline_manager();
+        let tx = manager.build_batch_tx(&[spend(&hd), spend(&hj)]).unwrap();
+
+        // The joining input observed first: the shared child does not exist yet.
+        assert!(manager.observe_spend(&hj, &tx).unwrap().is_empty());
+        // The defining input's observation materializes it...
+        let children = manager.observe_spend(&hd, &tx).unwrap();
+        assert_eq!(children.len(), 1);
+        // ...and re-observing the joining input repairs its link.
+        let relinked = manager.observe_spend(&hj, &tx).unwrap();
+        assert_eq!(relinked.len(), 1);
+        assert_eq!(relinked[0], children[0]);
+        assert_eq!(hj.outputs().len(), 1);
+        // A further re-observation serves the cached link, without duplicating it.
+        assert_eq!(manager.observe_spend(&hj, &tx).unwrap().len(), 1);
+        assert_eq!(hj.outputs().len(), 1);
+    }
+
+    #[test]
+    fn apply_batch_links_joins_regardless_of_parent_order() {
+        let (hd, hj) = join_fixture();
+        let mut manager = offline_manager();
+        // The joining parent listed first must not lose its link to the child.
+        let (_, children) =
+            crate::testutil::apply_batch(&mut manager, &[&hj, &hd], &[spend(&hd), spend(&hj)])
+                .unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(hd.outputs().len(), 1);
+        assert_eq!(hj.outputs().len(), 1);
     }
 
     #[test]

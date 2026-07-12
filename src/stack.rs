@@ -14,6 +14,11 @@
 //! extra opcodes in exchange for scripts that read as a sequence of
 //! intentions. See `examples/aggregate_exits/contracts/` for contracts written
 //! entirely this way.
+//!
+//! Relative timelocks are deliberately not offered here: declare them with the
+//! `contract!` DSL's `timelock` section, which prepends the
+//! [`older`](crate::script_helpers::older) fragment *and* seeds the spend's
+//! `nSequence`, so the script and the transaction cannot disagree.
 
 use crate::contracts::ArgSpec;
 use crate::script_helpers::{concat, drop as script_drop, merkle_root};
@@ -216,11 +221,6 @@ impl StackScript {
         for _ in 0..5 {
             self.stack.pop();
         }
-    }
-
-    /// A relative timelock: `<blocks> CSV DROP`.
-    pub fn older(&mut self, blocks: u32) {
-        self.parts.push(crate::script_helpers::older(blocks));
     }
 
     /// Finish the script: drop everything still tracked on the stack and leave

@@ -396,38 +396,8 @@ pub(crate) fn dual_proof_layer() -> bitcoin::ScriptBuf {
 }
 
 // ============================================================================
-// Raw-witness parsing helpers
+// ArgSpec helpers
 // ============================================================================
-
-pub(crate) fn w32(witness: &[Vec<u8>], index: usize) -> Result<[u8; 32], ClauseError> {
-    let element = witness
-        .get(index)
-        .ok_or(ClauseError::Witness(WitnessError::StackUnderflow))?;
-    element.as_slice().try_into().map_err(|_| {
-        ClauseError::Witness(WitnessError::InvalidValue(format!(
-            "witness element {index} is not 32 bytes"
-        )))
-    })
-}
-
-pub(crate) fn wnum(witness: &[Vec<u8>], index: usize) -> Result<i64, ClauseError> {
-    let element = witness
-        .get(index)
-        .ok_or(ClauseError::Witness(WitnessError::StackUnderflow))?;
-    mattrs::script_utils::vch2bn(element).map_err(|e| {
-        ClauseError::Witness(WitnessError::DecodingFailed(format!(
-            "witness element {index}: {e}"
-        )))
-    })
-}
-
-pub(crate) fn wpk(witness: &[Vec<u8>], index: usize) -> Result<XOnlyPublicKey, ClauseError> {
-    XOnlyPublicKey::from_slice(&w32(witness, index)?).map_err(|e| {
-        ClauseError::Witness(WitnessError::InvalidValue(format!(
-            "witness element {index} is not an x-only key: {e}"
-        )))
-    })
-}
 
 /// A named single-element bytes argument.
 pub(crate) fn spec(name: &str) -> mattrs::contracts::ArgSpec {

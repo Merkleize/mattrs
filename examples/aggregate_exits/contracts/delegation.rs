@@ -4,7 +4,8 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, ClauseError, ClauseOutput, WitnessReader, CCV_FLAG_CHECK_INPUT,
+    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
 };
 use mattrs::manager::SpendBuilder;
 
@@ -166,7 +167,9 @@ impl DelegationChallenge {
         let state = state.ok_or_else(|| {
             ClauseError::Other("defend needs the challenge state".to_string())
         })?;
-        let ingrid_pk = super::wpk(witness, 4)?;
+        let mut w = WitnessReader::new(witness);
+        w.skip(4)?; // resume, pe_taptree, unwind_taptree, r
+        let ingrid_pk = w.xonly()?;
         Ok(vec![
             ClauseOutput::pay_key(0, ingrid_pk),
             ClauseOutput::burn(1),
@@ -223,7 +226,10 @@ impl DelegationChallenge {
         let state = state.ok_or_else(|| {
             ClauseError::Other("challenger_wins needs the challenge state".to_string())
         })?;
-        let challenger_pk = super::wpk(witness, 6)?;
+        let mut w = WitnessReader::new(witness);
+        w.skip(6)?; // all STATE_ITEMS up to challenger_pk
+        let challenger_pk = w.xonly()?;
+        w.expect_end()?;
         Ok(vec![
             ClauseOutput::pay_key(0, challenger_pk),
             ClauseOutput::burn(1),

@@ -25,7 +25,8 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, ClauseError, ClauseOutput, WitnessReader, CCV_FLAG_CHECK_INPUT,
+    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
 };
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{get_directions, is_power_of_2, MerkleTree, NIL};
@@ -36,8 +37,7 @@ use super::pending_exit::PendingExit;
 use mattrs::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
 use super::{
-    reveal_mids, spec, spec_num, w32, ChallengeContext, ExitClaim, PoolParams, PoolTree,
-    CARRY_ITEMS,
+    reveal_mids, spec, spec_num, ChallengeContext, ExitClaim, PoolParams, PoolTree, CARRY_ITEMS,
 };
 
 define_pushable!();
@@ -379,17 +379,20 @@ impl ExitBisect1 {
         let state = state.ok_or_else(|| {
             ClauseError::Other("ingrid_reveal needs the bisection state".to_string())
         })?;
+        let mut w = WitnessReader::new(witness);
+        w.skip(6)?; // the six state leaves; `state` already carries them decoded
         let next = ExitBisect2State {
             h_start: state.h_start,
             h_end_i: state.h_end_i,
             h_end_c: state.h_end_c,
             trace_i: state.trace_i,
             trace_c: state.trace_c,
-            h_mid_i: w32(witness, 6)?,
-            trace_left_i: w32(witness, 7)?,
-            trace_right_i: w32(witness, 8)?,
+            h_mid_i: w.bytes32()?,
+            trace_left_i: w.bytes32()?,
+            trace_right_i: w.bytes32()?,
             ctx: state.ctx.clone(),
         };
+        w.expect_end()?;
         Ok(vec![ClauseOutput::at_same_index()
             .to(ExitBisect2::new(p.clone()).as_erased())
             .with_state(&next)
@@ -598,9 +601,12 @@ impl ExitBisect2 {
         let state = state.ok_or_else(|| {
             ClauseError::Other("challenger reveal needs the bisection state".to_string())
         })?;
-        let h_mid_c = w32(witness, 9)?;
-        let t_left_c = w32(witness, 10)?;
-        let t_right_c = w32(witness, 11)?;
+        let mut w = WitnessReader::new(witness);
+        w.skip(9)?; // the nine state leaves; `state` already carries them decoded
+        let h_mid_c = w.bytes32()?;
+        let t_left_c = w.bytes32()?;
+        let t_right_c = w.bytes32()?;
+        w.expect_end()?;
 
         let (h_start, h_end_i, h_end_c, trace_i, trace_c) = match side {
             Side::Left => (
