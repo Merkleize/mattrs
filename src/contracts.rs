@@ -1551,6 +1551,10 @@ struct P2trContractCore {
     /// A human-readable contract name (e.g. `"Vault"`), for introspection and
     /// display; not consensus-visible.
     name: &'static str,
+    /// Nominal identity supplied by the contract definition. Generated
+    /// contracts use a fresh private marker type, so definitions cannot collide
+    /// merely because they share params/state types or a display name.
+    kind_id: std::any::TypeId,
     taptree: Arc<TapTree>,
     clauses: Vec<Arc<dyn ErasedClause>>,
     /// Encoded params, so the contract is self-describing and child instances can
@@ -1564,7 +1568,7 @@ struct P2trContractCore {
 impl P2trContractCore {
     /// Derive the script taptree and the clause list from one `clause_tree`, so
     /// they cannot drift apart.
-    fn new<P: ContractParams + 'static>(
+    fn new<P: ContractParams + 'static, I: 'static>(
         name: &'static str,
         params: &P,
         clause_tree: ClauseTree,
@@ -1574,6 +1578,7 @@ impl P2trContractCore {
         debug_assert_no_duplicate_clauses(&clauses);
         Self {
             name,
+            kind_id: std::any::TypeId::of::<I>(),
             taptree,
             clauses,
             params_bytes: params.encode(),
@@ -1616,9 +1621,23 @@ impl<P: ContractParams + 'static> StandardP2TR<P> {
         params: &P,
         clause_tree: ClauseTree,
     ) -> Self {
+        Self::new_with_identity::<Self>(name, internal_pubkey, params, clause_tree)
+    }
+
+    /// Build a contract with nominal identity `I`.
+    ///
+    /// This is used by `contract!`, which supplies a fresh private marker for
+    /// every definition. Direct users normally want [`Self::new`].
+    #[doc(hidden)]
+    pub fn new_with_identity<I: 'static>(
+        name: &'static str,
+        internal_pubkey: XOnlyPublicKey,
+        params: &P,
+        clause_tree: ClauseTree,
+    ) -> Self {
         Self {
             internal_pubkey,
-            core: P2trContractCore::new(name, params, clause_tree),
+            core: P2trContractCore::new::<P, I>(name, params, clause_tree),
             _phantom: PhantomData,
         }
     }
@@ -1692,7 +1711,7 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
     }
 
     fn contract_type_id(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<Self>()
+        self.core.kind_id
     }
 
     fn contract_name(&self) -> &'static str {
@@ -1735,7 +1754,7 @@ pub struct StandardAugmentedP2TR<P: ContractParams, S: ContractState> {
     _phantom: PhantomData<(P, S)>,
 }
 
-impl<P: ContractParams + 'static, S: ContractState> StandardAugmentedP2TR<P, S> {
+impl<P: ContractParams + 'static, S: ContractState + 'static> StandardAugmentedP2TR<P, S> {
     /// Build an augmented contract from its params and a clause tree. The script
     /// taptree and the clause list are both derived from `clause_tree`, so they
     /// cannot drift apart; the encoded params are stored to be self-describing.
@@ -1745,9 +1764,23 @@ impl<P: ContractParams + 'static, S: ContractState> StandardAugmentedP2TR<P, S> 
         params: &P,
         clause_tree: ClauseTree,
     ) -> Self {
+        Self::new_with_identity::<Self>(name, naked_internal_pubkey, params, clause_tree)
+    }
+
+    /// Build an augmented contract with nominal identity `I`.
+    ///
+    /// This is used by `contract!`, which supplies a fresh private marker for
+    /// every definition. Direct users normally want [`Self::new`].
+    #[doc(hidden)]
+    pub fn new_with_identity<I: 'static>(
+        name: &'static str,
+        naked_internal_pubkey: XOnlyPublicKey,
+        params: &P,
+        clause_tree: ClauseTree,
+    ) -> Self {
         Self {
             naked_internal_pubkey,
-            core: P2trContractCore::new(name, params, clause_tree),
+            core: P2trContractCore::new::<P, I>(name, params, clause_tree),
             _phantom: PhantomData,
         }
     }
@@ -1843,7 +1876,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
     }
 
     fn contract_type_id(&self) -> std::any::TypeId {
-        std::any::TypeId::of::<Self>()
+        self.core.kind_id
     }
 
     fn contract_name(&self) -> &'static str {

@@ -121,7 +121,8 @@ impl Vault {
         ctv_hash: [u8; 32],
         out_i: i32,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let unvaulting = Unvaulting::new(Self::unvaulting_params(&self.params));
+        let params = self.params();
+        let unvaulting = Unvaulting::new(Self::unvaulting_params(&params));
         let state = UnvaultingState { ctv_hash };
 
         Ok(vec![ClauseOutput::at(out_i as u32)
@@ -137,12 +138,13 @@ impl Vault {
         out_i: i32,
         revault_out_i: i32,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let unvaulting = Unvaulting::new(Self::unvaulting_params(&self.params));
+        let params = self.params();
+        let unvaulting = Unvaulting::new(Self::unvaulting_params(&params));
         let state = UnvaultingState { ctv_hash };
 
         Ok(vec![
             ClauseOutput::at(revault_out_i as u32)
-                .to(Vault::new(self.params.clone()).as_erased())
+                .to(Vault::new(params).as_erased())
                 .deduct_amount()
                 .build(),
             ClauseOutput::at(out_i as u32)

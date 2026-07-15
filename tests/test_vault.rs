@@ -37,8 +37,8 @@ fn test_vault_address_matches_reference() {
         unvault_pk: alice_pk(),
     });
 
-    let internal_key = vault.contract.internal_pubkey();
-    let taptree_hash = TapNodeHash::from_byte_array(vault.contract.taptree().root_hash());
+    let internal_key = vault.contract().internal_pubkey();
+    let taptree_hash = TapNodeHash::from_byte_array(vault.contract().taptree().root_hash());
 
     let address = Address::p2tr(&secp, internal_key, Some(taptree_hash), KnownHrp::Regtest);
 
@@ -273,8 +273,9 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let vault_contract = Vault::new(params.clone());
-    let internal_key = vault_contract.contract.internal_pubkey();
-    let taptree_hash = TapNodeHash::from_byte_array(vault_contract.contract.taptree().root_hash());
+    let internal_key = vault_contract.contract().internal_pubkey();
+    let taptree_hash =
+        TapNodeHash::from_byte_array(vault_contract.contract().taptree().root_hash());
 
     let address = Address::p2tr(&secp, internal_key, Some(taptree_hash), KnownHrp::Regtest);
 

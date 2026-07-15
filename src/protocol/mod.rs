@@ -64,16 +64,29 @@ pub trait TypedContract {
     }
 }
 
-/// The key a [`Role`] dispatches on: the erased contract's `TypeId` *and* its
-/// name. Two `contract!` definitions sharing parameter and state types share a
-/// `TypeId` (they erase to the same `StandardP2TR`/`StandardAugmentedP2TR`
-/// instantiation), so the name disambiguates them.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// The nominal key a [`Role`] dispatches on. Every `contract!` definition gets
+/// a fresh private marker type, so its `TypeId` is unique even when another
+/// definition has the same name, params, state, and underlying contract shape.
+#[derive(Clone, Copy, Debug)]
 pub struct ContractKey {
-    /// The erased contract's `TypeId`.
+    /// The generated contract definition's nominal `TypeId`.
     pub type_id: TypeId,
-    /// The contract's name.
+    /// Human-readable name, used only for diagnostics.
     pub name: &'static str,
+}
+
+impl PartialEq for ContractKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_id == other.type_id
+    }
+}
+
+impl Eq for ContractKey {}
+
+impl std::hash::Hash for ContractKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.type_id, state);
+    }
 }
 
 impl ContractKey {
@@ -478,8 +491,8 @@ mod tests {
         pub tag: i64,
     }
 
-    // Two distinct contracts sharing the params type: they erase to the same
-    // `StandardP2TR<PairParams>`, so only the name tells them apart.
+    // Two distinct contracts sharing the params type still receive distinct
+    // nominal identities from the macro.
     contract! {
         contract KeyA {
             params PairParams;
@@ -488,6 +501,36 @@ mod tests {
                 script |_p| ScriptBuf::from(vec![0x51u8]);
             }
             tree [noop];
+        }
+    }
+
+    mod first {
+        use super::*;
+
+        contract! {
+            contract SameName {
+                params PairParams;
+                clause noop {
+                    args { x: i64, }
+                    script |_p| ScriptBuf::from(vec![0x53u8]);
+                }
+                tree [noop];
+            }
+        }
+    }
+
+    mod second {
+        use super::*;
+
+        contract! {
+            contract SameName {
+                params PairParams;
+                clause noop {
+                    args { x: i64, }
+                    script |_p| ScriptBuf::from(vec![0x54u8]);
+                }
+                tree [noop];
+            }
         }
     }
 
@@ -523,13 +566,15 @@ mod tests {
     }
 
     #[test]
-    fn contract_key_disambiguates_shared_type_ids() {
-        assert_eq!(KeyA::kind_id(), KeyB::kind_id());
+    fn contract_keys_are_nominal() {
+        assert_ne!(KeyA::kind_id(), KeyB::kind_id());
         assert_ne!(KeyA::kind(), KeyB::kind());
+        assert_ne!(first::SameName::kind_id(), second::SameName::kind_id());
+        assert_ne!(first::SameName::kind(), second::SameName::kind());
     }
 
     #[test]
-    fn typed_handles_key_on_name_too() {
+    fn typed_handles_use_nominal_identity() {
         let a = fund_fake(
             KeyA::new(PairParams { tag: 42 }).as_erased(),
             None,
@@ -539,8 +584,17 @@ mod tests {
         assert_eq!(ContractKey::of_handle(&a), KeyA::kind());
         let typed: KeyAHandle = a.clone().try_into().expect("same contract");
         assert_eq!(typed.params().tag, 42);
-        // A same-TypeId instance of the *other* contract must not convert.
+        // A different contract with the same erased primitive must not convert.
         assert!(KeyBHandle::try_from(a).is_err());
+
+        let same_name = fund_fake(
+            first::SameName::new(PairParams { tag: 7 }).as_erased(),
+            None,
+            Amount::from_sat(1000),
+            2,
+        );
+        let _: first::SameNameHandle = same_name.clone().try_into().expect("same definition");
+        assert!(second::SameNameHandle::try_from(same_name).is_err());
     }
 
     #[test]
