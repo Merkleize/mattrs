@@ -375,7 +375,7 @@ fn fraudulent_claim_loses_the_bisection() {
             pending.challenge_state(&honest, &xonly(&challenger)),
             cbond
                 .stake()
-                .sign(HotSigner::new(challenger.clone())),
+                .sign(HotSigner::new(challenger)),
         ],
     );
     assert_eq!(tx.output.len(), 1);
@@ -425,7 +425,7 @@ fn false_challenge_loses_and_the_claim_resumes() {
             pending.challenge_state(&fabricated, &xonly(&challenger)),
             cbond
                 .stake()
-                .sign(HotSigner::new(challenger.clone())),
+                .sign(HotSigner::new(challenger)),
         ],
     );
 
@@ -477,7 +477,7 @@ fn stalled_turns_forfait_both_ways() {
             pending.challenge_state(&honest, &xonly(&challenger)),
             cbond
                 .stake()
-                .sign(HotSigner::new(challenger.clone())),
+                .sign(HotSigner::new(challenger)),
         ],
     );
 
@@ -508,7 +508,7 @@ fn stalled_turns_forfait_both_ways() {
             pending.challenge_state(&honest, &xonly(&challenger)),
             cbond
                 .stake()
-                .sign(HotSigner::new(challenger.clone())),
+                .sign(HotSigner::new(challenger)),
         ],
     );
     let b1: ExitBisect1Handle = try_handle(children[0].clone());
@@ -545,7 +545,7 @@ fn delegation_challenge_defended() {
             pending.challenge_delegation(&pool, &honest.bits, 2, &xonly(&challenger)),
             cbond
                 .stake()
-                .sign(HotSigner::new(challenger.clone())),
+                .sign(HotSigner::new(challenger)),
         ],
     );
     assert_eq!(
@@ -590,7 +590,7 @@ fn unanswerable_delegation_challenge_reverts_the_claim() {
             pending.challenge_delegation(&pool, &claim.bits, 3, &xonly(&challenger)),
             cbond
                 .stake()
-                .sign(HotSigner::new(challenger.clone())),
+                .sign(HotSigner::new(challenger)),
         ],
     );
 
@@ -633,7 +633,7 @@ fn nil_step_dispute_is_defensible() {
             pending.challenge_state(&honest, &xonly(&challenger)),
             cbond
                 .stake()
-                .sign(HotSigner::new(challenger.clone())),
+                .sign(HotSigner::new(challenger)),
         ],
     );
     let leaf = bisect_to_leaf(&mut manager, children[0].clone(), &lie.hs, &honest.hs);
@@ -766,7 +766,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         pending.challenge_state(&honest, &xonly(&challenger)),
         cbond
             .stake()
-            .sign(HotSigner::new(challenger.clone())),
+            .sign(HotSigner::new(challenger)),
     ])?;
     report_spend(&mut report, "AggregateExits", "challenge_state + bond", pending.handle());
 
@@ -825,7 +825,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         pending.challenge_delegation(&pool, &honest.bits, 2, &xonly(&challenger)),
         cbond
             .stake()
-            .sign(HotSigner::new(challenger.clone())),
+            .sign(HotSigner::new(challenger)),
     ])?;
     let dc: DelegationChallengeHandle = try_handle(children[0].clone());
 

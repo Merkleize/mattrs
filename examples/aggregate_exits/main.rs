@@ -377,7 +377,7 @@ fn scenario_delegation_timeout(wallet: &str) -> DemoResult {
         pending.challenge_delegation(&stage.pool, &claim.bits, 3, &xonly(&challenger)),
         cbond
             .stake()
-            .sign(HotSigner::new(challenger.clone())),
+            .sign(HotSigner::new(challenger)),
     ])?;
     println!("  user 3 disputes their delegation (bond: {} sats)", BOND);
 
