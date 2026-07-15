@@ -54,6 +54,8 @@ use mattrs::protocol::{RpcChain, Runner};
 use contracts::roles::{alice_role, bob_role, clause_of, AliceData, BobData};
 use contracts::{alice_move_commitment, RpsGameS0, RpsParams, DEFAULT_STAKE};
 
+type AppResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
 // Demo keys (the pymatt reference fixtures; never use on mainnet).
 const ALICE_XPRIV: &str = "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN";
 const BOB_XPRIV: &str = "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ";
@@ -102,7 +104,7 @@ fn recv_json(reader: &mut BufReader<TcpStream>) -> std::io::Result<serde_json::V
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-fn hex32(value: &serde_json::Value, key: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+fn hex32(value: &serde_json::Value, key: &str) -> AppResult<[u8; 32]> {
     let bytes = hex::decode(
         value
             .get(key)
@@ -123,7 +125,7 @@ fn run_alice(
     addr: &str,
     wallet: &str,
     inspector: Option<u16>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> AppResult {
     let xpriv = Xpriv::from_str(ALICE_XPRIV)?;
     let pk_a = xonly(&xpriv);
 
@@ -197,7 +199,7 @@ fn run_bob(
     addr: &str,
     wallet: &str,
     inspector: Option<u16>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> AppResult {
     let xpriv = Xpriv::from_str(BOB_XPRIV)?;
     let pk_b = xonly(&xpriv);
 
@@ -300,7 +302,7 @@ fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> AppResult {
     let mut role: Option<&str> = None;
     let mut mv: Option<i64> = None;
     let mut addr = "127.0.0.1:12345".to_string();
