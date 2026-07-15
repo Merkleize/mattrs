@@ -55,16 +55,16 @@ pub use dispute::{
 pub use pending_exit::{PendingExit, PendingExitHandle, PendingExitState};
 pub use unwind::{Unwind, UnwindHandle, UnwindState};
 
-use bitcoin::hashes::{sha256, Hash};
+use bitcoin::XOnlyPublicKey;
+use bitcoin::hashes::{Hash, sha256};
 use bitcoin::key::{Keypair, Secp256k1};
 use bitcoin::secp256k1::Message;
-use bitcoin::XOnlyPublicKey;
 use bitcoin_script::{define_pushable, script};
+use mattrs::ContractParams;
 use mattrs::contracts::{ClauseError, WitnessError};
 use mattrs::fraud::trace;
-use mattrs::merkle::{ceil_lg, MerkleProof, MerkleTree, NIL};
+use mattrs::merkle::{MerkleProof, MerkleTree, NIL, ceil_lg};
 use mattrs::script_utils::{bn2vch, commit_int};
-use mattrs::ContractParams;
 
 define_pushable!();
 
@@ -129,7 +129,10 @@ pub fn bit_leaf(bit: bool) -> [u8; 32] {
 impl PoolTree {
     /// Build the pool over `accounts`, padding to `params.padded_size()`.
     pub fn new(params: &PoolParams, accounts: &[(XOnlyPublicKey, i64)]) -> Self {
-        assert!(accounts.len() <= params.n_users as usize, "too many accounts");
+        assert!(
+            accounts.len() <= params.n_users as usize,
+            "too many accounts"
+        );
         let mut slots: Vec<Option<(XOnlyPublicKey, i64)>> =
             accounts.iter().map(|a| Some(*a)).collect();
         slots.resize(params.padded_size(), None);

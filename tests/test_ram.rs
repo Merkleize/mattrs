@@ -95,10 +95,7 @@ fn proving_checks_bounds_and_retains_non_power_of_two_indices() {
     for index in 0..tree.len() {
         let proof = tree.prove_leaf(index).unwrap();
         assert_eq!(proof.leaf_index(), index);
-        assert_eq!(
-            proof.get_new_root_after_update(proof.leaf()),
-            tree.root()
-        );
+        assert_eq!(proof.get_new_root_after_update(proof.leaf()), tree.root());
     }
     assert!(matches!(
         tree.prove_leaf(5),

@@ -10,13 +10,13 @@
 
 use std::rc::Rc;
 
-use bitcoin::bip32::Xpriv;
-use bitcoin::hashes::{sha256, Hash};
 use bitcoin::ScriptBuf;
+use bitcoin::bip32::Xpriv;
+use bitcoin::hashes::{Hash, sha256};
 
 use mattrs::fraud::roles::{
-    alice_role as fraud_alice_role, bob_role as fraud_bob_role, pot, FraudOutcome, FraudPartyData,
-    OffChainComputer,
+    FraudOutcome, FraudPartyData, OffChainComputer, alice_role as fraud_alice_role,
+    bob_role as fraud_bob_role, pot,
 };
 use mattrs::fraud::trace;
 use mattrs::protocol::{Action, ProtocolError, Role};
@@ -24,8 +24,7 @@ use mattrs::script_utils::{bn2vch, commit_int, vch2bn};
 use mattrs::signer::HotSigner;
 
 use super::game256::{
-    G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Clause, G256S2Handle,
-    FORFAIT_TIMEOUT,
+    FORFAIT_TIMEOUT, G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Clause, G256S2Handle,
 };
 
 /// How the game ended, from one party's perspective.
@@ -158,9 +157,7 @@ pub fn alice_game_role() -> Role<AliceGameData, GameOutcome> {
 pub fn bob_game_role() -> Role<BobGameData, GameOutcome> {
     Role::new()
         .on::<G256S0, _>(|d: &mut BobGameData, h: G256S0Handle, _cx| {
-            Ok(Action::Send(
-                h.choose(d.x).sign(HotSigner::new(d.xpriv)),
-            ))
+            Ok(Action::Send(h.choose(d.x).sign(HotSigner::new(d.xpriv))))
         })
         .on::<G256S1, _>(|_d, _h: G256S1Handle, _cx| Ok(Action::Wait))
         .on::<G256S2, _>(|d, h: G256S2Handle, _cx| {

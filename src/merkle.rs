@@ -5,9 +5,9 @@
 //! the off-chain half of the RAM / fraud-proof contracts: it produces the root that
 //! a contract commits to, and the membership proofs a spend reveals.
 
-use bitcoin::hashes::{sha256, Hash};
 use crate::contracts::{ArgType, WitnessEncodable, WitnessError};
 use crate::script_utils::{bn2vch, vch2bn};
+use bitcoin::hashes::{Hash, sha256};
 
 /// Errors produced while constructing or converting Merkle proofs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,10 +37,9 @@ impl std::fmt::Display for MerkleError {
             Self::InvalidDirection(direction) => {
                 write!(f, "Merkle proof direction must be 0 or 1, got {direction}")
             }
-            Self::InvalidProofDepth { expected, actual } => write!(
-                f,
-                "Merkle proof has depth {actual}, expected {expected}"
-            ),
+            Self::InvalidProofDepth { expected, actual } => {
+                write!(f, "Merkle proof has depth {actual}, expected {expected}")
+            }
             Self::LeafIndexOverflow => write!(f, "Merkle proof leaf index overflows usize"),
         }
     }
@@ -397,12 +396,19 @@ impl<const N: usize> WitnessEncodable for WitProof<N> {
                 other => {
                     return Err(WitnessError::InvalidValue(format!(
                         "proof direction must be 0 or 1, got {other}"
-                    )))
+                    )));
                 }
             };
         }
         let x = as_hash(&witness[2 * N])?;
-        Ok((WitProof { hashes, directions, x }, needed))
+        Ok((
+            WitProof {
+                hashes,
+                directions,
+                x,
+            },
+            needed,
+        ))
     }
 }
 

@@ -946,7 +946,6 @@ impl ContractManager {
 
         let mut children = Vec::with_capacity(resolved.len());
         for (clause_out, outpoint) in resolved {
-
             let child = match self.find_instance_by_outpoint(outpoint) {
                 Some(existing) => existing,
                 None => {

@@ -62,9 +62,9 @@ pub mod argtypes;
 pub mod contracts;
 pub mod ctv;
 pub mod fraud;
-pub mod key_payout;
 #[cfg(feature = "inspector")]
 pub mod inspector;
+pub mod key_payout;
 #[macro_use]
 pub mod macros;
 pub mod manager;

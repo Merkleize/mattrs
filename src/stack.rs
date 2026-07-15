@@ -134,7 +134,9 @@ impl StackScript {
     pub fn raw(&mut self, fragment: ScriptBuf, pops: usize, pushes: &[&str]) {
         self.parts.push(fragment);
         for _ in 0..pops {
-            self.stack.pop().expect("raw fragment pops past stack bottom");
+            self.stack
+                .pop()
+                .expect("raw fragment pops past stack bottom");
         }
         for name in pushes {
             self.stack.push(name.to_string());
@@ -211,7 +213,14 @@ impl StackScript {
     /// Emit a full `OP_CHECKCONTRACTVERIFY`: `<data> <index> <pk> <taptree>
     /// <flags>`, each argument sourced independently. `index` and `flags` are
     /// numeric (`-1` index = same as this input).
-    pub fn ccv(&mut self, data: Source<'_>, index: i64, pk: Source<'_>, taptree: Source<'_>, flags: i32) {
+    pub fn ccv(
+        &mut self,
+        data: Source<'_>,
+        index: i64,
+        pk: Source<'_>,
+        taptree: Source<'_>,
+        flags: i32,
+    ) {
         self.push_source(data);
         self.push_num("<index>", index);
         self.push_source(pk);

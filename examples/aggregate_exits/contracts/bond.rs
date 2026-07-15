@@ -8,8 +8,8 @@
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::{contract, ContractParams, Signature};
 use mattrs::contracts::NextOutputs;
+use mattrs::{ContractParams, Signature, contract};
 
 use super::PoolParams;
 

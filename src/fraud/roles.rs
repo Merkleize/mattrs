@@ -27,8 +27,8 @@ use crate::protocol::{Action, ProtocolError, Role, StepCtx};
 use crate::signer::HotSigner;
 
 use super::{
-    trace, Bisect1, Bisect1Clause, Bisect1Handle, Bisect2, Bisect2Clause, Bisect2Handle,
-    BisectParams, Leaf, LeafClause, LeafHandle,
+    Bisect1, Bisect1Clause, Bisect1Handle, Bisect2, Bisect2Clause, Bisect2Handle, BisectParams,
+    Leaf, LeafClause, LeafHandle, trace,
 };
 
 /// The party a fraud-proof outcome favors.
@@ -194,7 +194,9 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
 /// reveal at a [`Leaf`], or its `forfait` collection on a stalled stage (a
 /// stalled [`Bisect1`] was Alice's turn, so it forfaits to Bob — and the other
 /// way around for [`Bisect2`]).
-fn with_settlements(role: Role<FraudPartyData, FraudOutcome>) -> Role<FraudPartyData, FraudOutcome> {
+fn with_settlements(
+    role: Role<FraudPartyData, FraudOutcome>,
+) -> Role<FraudPartyData, FraudOutcome> {
     role.on_settled::<Leaf, _>(|_d, h: LeafHandle, cx| settled_leaf(&h, cx))
         .on_settled::<Bisect1, _>(|_d, h: Bisect1Handle, _cx| match h.spent_clause() {
             Some(Bisect1Clause::Forfait) => Ok(forfait_outcome(&h.params(), FraudWinner::Bob)),
@@ -254,7 +256,11 @@ fn wait_or_forfait(
     };
     // `wait_or_send_final` sets the builder's CSV sequence from the same
     // timeout that drives the deadline.
-    Ok(Action::wait_or_send_final(d.forfait_timeout, builder, outcome))
+    Ok(Action::wait_or_send_final(
+        d.forfait_timeout,
+        builder,
+        outcome,
+    ))
 }
 
 /// Re-run the disputed step on-chain and take the pot.

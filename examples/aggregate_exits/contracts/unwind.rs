@@ -147,7 +147,7 @@ impl Unwind {
                 other => {
                     return Err(ClauseError::Other(format!(
                         "withdraw_direct: proof direction must be 0 or 1, got {other}"
-                    )))
+                    )));
                 }
             }
         }

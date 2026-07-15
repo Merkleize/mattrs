@@ -122,8 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    Building performs no RPC, so an unreachable client works offline.
     let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
-    let dest = bitcoin::Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")
-        ?
+    let dest = bitcoin::Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?
         .assume_checked();
     let tx = handle
         .withdraw()
@@ -144,12 +143,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tx.input[0].witness.len()
     );
     assert_eq!(tx.input[0].witness.len(), 3);
-    assert!(!tx.input[0]
-        .witness
-        .iter()
-        .next()
-        .ok_or("the signed witness is empty")?
-        .is_empty());
+    assert!(
+        !tx.input[0]
+            .witness
+            .iter()
+            .next()
+            .ok_or("the signed witness is empty")?
+            .is_empty()
+    );
     println!("done — the signature was auto-filled and the spend is fully signed.");
     Ok(())
 }

@@ -262,8 +262,10 @@ cargo run -p mattrs-inspector       # or: nc localhost 34443
 ## Testing
 
 ```sh
-cargo test                # unit + integration tests (no node required)
-cargo test -- --ignored   # also runs the end-to-end tests against a regtest bitcoind
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
+cargo test --all-targets --all-features
 ```
 
 The end-to-end tests are `#[ignore]`d by default because they need a configured
@@ -271,5 +273,12 @@ regtest `bitcoind` with a funded `testwallet` (cookie or env-var RPC auth; see
 `tests/support/testkit.rs`). They also write markdown reports of every
 transaction they broadcast (inputs, outputs, per-input witness breakdown with
 sizes) to `reports/` — see `mattrs::report`.
+
+Run the end-to-end tests serially so that they do not interfere with each
+other's chain state:
+
+```sh
+cargo test --tests -- --ignored --test-threads=1
+```
 
 [`ClauseTree`]: src/contracts.rs

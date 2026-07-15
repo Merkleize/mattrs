@@ -231,11 +231,7 @@ fn illegal_moves_are_rejected_when_building() {
 /// A strategy playing a fixed sequence of cells.
 fn scripted(moves: &[usize]) -> Strategy {
     let mut moves = Box::<[usize]>::from(moves).into_iter();
-    Box::new(move |_board| {
-        Ok(moves
-            .next()
-            .expect("the scripted game should be over"))
-    })
+    Box::new(move |_board| Ok(moves.next().expect("the scripted game should be over")))
 }
 
 #[test]

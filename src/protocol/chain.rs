@@ -6,16 +6,16 @@
 //! ([`LocalChain`]).
 
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use bitcoin::{OutPoint, Transaction, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
 
 use super::ProtocolError;
 use crate::manager::{
-    find_spending_tx_once, is_tx_not_found, spend_scan_start, tx_confirmation_height, BlockCache,
-    ManagerError,
+    BlockCache, ManagerError, find_spending_tx_once, is_tx_not_found, spend_scan_start,
+    tx_confirmation_height,
 };
 
 /// The chain operations a protocol runner performs. Methods take `&self`

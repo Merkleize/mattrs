@@ -668,7 +668,10 @@ fn extract_leaf_kind(field: &syn::Field) -> syn::Result<LeafKind> {
                 "each" => Ok(LeafKind::Each),
                 other => Err(syn::Error::new(
                     ident.span(),
-                    format!("unknown leaf kind `{}` (expected `sha256` or `each`)", other),
+                    format!(
+                        "unknown leaf kind `{}` (expected `sha256` or `each`)",
+                        other
+                    ),
                 )),
             };
         }

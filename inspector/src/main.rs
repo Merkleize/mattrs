@@ -21,7 +21,10 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 
 #[derive(Parser)]
-#[command(name = "mattrs-inspector", about = "Real-time TUI for mattrs manager state")]
+#[command(
+    name = "mattrs-inspector",
+    about = "Real-time TUI for mattrs manager state"
+)]
 struct Args {
     /// Host to connect to
     #[arg(long, default_value = "127.0.0.1")]
@@ -151,12 +154,27 @@ fn ui(f: &mut Frame, app: &AppState, table_state: &mut TableState) {
         .split(f.area());
 
     // Header
-    let conn_status = if app.connected { "Connected" } else { "Disconnected" };
-    let conn_color = if app.connected { Color::Green } else { Color::Red };
-    let instance_count = app.snapshot.as_ref().map(|s| s.instances.len()).unwrap_or(0);
+    let conn_status = if app.connected {
+        "Connected"
+    } else {
+        "Disconnected"
+    };
+    let conn_color = if app.connected {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    let instance_count = app
+        .snapshot
+        .as_ref()
+        .map(|s| s.instances.len())
+        .unwrap_or(0);
 
     let header = Line::from(vec![
-        Span::styled("mattrs inspector", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "mattrs inspector",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Span::raw("    "),
         Span::styled(conn_status, Style::default().fg(conn_color)),
         Span::raw(format!("    {} instances", instance_count)),
@@ -186,12 +204,7 @@ fn ui(f: &mut Frame, app: &AppState, table_state: &mut TableState) {
                         Cell::from(inst.index.to_string()),
                         Cell::from(inst.contract_name.clone()),
                         Cell::from(inst.status.clone()).style(Style::default().fg(color)),
-                        Cell::from(
-                            inst.outpoint
-                                .as_deref()
-                                .unwrap_or_default()
-                                .to_string(),
-                        ),
+                        Cell::from(inst.outpoint.as_deref().unwrap_or_default().to_string()),
                         Cell::from(
                             inst.funding_amount_sat
                                 .map(|a| a.to_string())
@@ -231,8 +244,8 @@ fn ui(f: &mut Frame, app: &AppState, table_state: &mut TableState) {
         "Waiting for data...".to_string()
     };
 
-    let detail_widget = Paragraph::new(detail)
-        .block(Block::default().borders(Borders::ALL).title("Detail"));
+    let detail_widget =
+        Paragraph::new(detail).block(Block::default().borders(Borders::ALL).title("Detail"));
     f.render_widget(detail_widget, chunks[2]);
 }
 
@@ -267,7 +280,11 @@ fn format_detail(inst: &InstanceSnapshot) -> String {
     if let Some(args) = &inst.spending_args {
         lines.push(format!("  Spending args ({}):", args.len()));
         for (i, arg) in args.iter().enumerate() {
-            let shown = if arg.is_empty() { "<empty>" } else { arg.as_str() };
+            let shown = if arg.is_empty() {
+                "<empty>"
+            } else {
+                arg.as_str()
+            };
             lines.push(format!("    [{}] {}", i, truncate(shown, 96)));
         }
     }
