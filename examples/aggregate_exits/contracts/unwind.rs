@@ -141,17 +141,22 @@ impl Unwind {
         let mut directions = Vec::with_capacity(depth);
         for _ in 0..depth {
             hashes.push(w.bytes32()?);
-            directions.push(w.num()? as u8);
+            let direction = w.num()?;
+            match direction {
+                0 | 1 => directions.push(direction as u8),
+                other => {
+                    return Err(ClauseError::Other(format!(
+                        "withdraw_direct: proof direction must be 0 or 1, got {other}"
+                    )))
+                }
+            }
         }
         let root = w.bytes32()?;
         w.expect_end()?;
 
-        let proof = MerkleProof {
-            hashes,
-            directions,
-            x: super::balance_leaf(&pk, bal),
-        };
-        if proof.get_new_root_after_update(proof.x) != root {
+        let proof = MerkleProof::new(hashes, directions, super::balance_leaf(&pk, bal))
+            .map_err(|e| ClauseError::Other(format!("withdraw_direct: {e}")))?;
+        if proof.get_new_root_after_update(proof.leaf()) != root {
             return Err(ClauseError::Other(
                 "withdraw_direct: invalid membership proof".to_string(),
             ));
@@ -292,7 +297,7 @@ impl UnwindHandle {
         let (pk, bal) = pool.accounts[index].expect("withdrawing an empty slot");
         let proof = pool.prove(index);
         let mut witness = vec![pk.serialize().to_vec(), bn2vch(bal)];
-        for (h, d) in proof.hashes.iter().zip(&proof.directions) {
+        for (h, d) in proof.hashes().iter().zip(proof.directions()) {
             witness.push(h.to_vec());
             witness.push(bn2vch(*d as i64));
         }

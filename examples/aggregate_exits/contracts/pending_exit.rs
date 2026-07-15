@@ -449,8 +449,10 @@ impl PendingExitHandle {
         let account_proof = pool.prove(index);
         let bit_tree =
             mattrs::merkle::MerkleTree::new(bits.iter().map(|b| super::bit_leaf(*b)).collect());
-        let bit_proof = bit_tree.prove_leaf(index);
-        assert_eq!(account_proof.directions, bit_proof.directions);
+        let bit_proof = bit_tree
+            .prove_leaf(index)
+            .expect("challenged index is within the bit tree");
+        assert_eq!(account_proof.directions(), bit_proof.directions());
 
         let pe_taptree = PendingExit::new(self.params())
             .expect("PendingExit contract definition is valid")
@@ -460,10 +462,10 @@ impl PendingExitHandle {
         witness.push(challenger_pk.serialize().to_vec());
         witness.push(user_pk.serialize().to_vec());
         witness.push(bn2vch(bal));
-        for l in 0..account_proof.hashes.len() {
-            witness.push(account_proof.hashes[l].to_vec());
-            witness.push(bit_proof.hashes[l].to_vec());
-            witness.push(bn2vch(account_proof.directions[l] as i64));
+        for l in 0..account_proof.hashes().len() {
+            witness.push(account_proof.hashes()[l].to_vec());
+            witness.push(bit_proof.hashes()[l].to_vec());
+            witness.push(bn2vch(account_proof.directions()[l] as i64));
         }
         self.0.spend_clause("challenge_delegation", witness)
     }

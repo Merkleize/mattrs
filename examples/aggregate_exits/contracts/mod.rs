@@ -159,7 +159,9 @@ impl PoolTree {
 
     /// A membership proof for slot `index`.
     pub fn prove(&self, index: usize) -> MerkleProof {
-        self.tree().prove_leaf(index)
+        self.tree()
+            .prove_leaf(index)
+            .expect("pool proof index is within the padded tree")
     }
 
     /// Zero slot `index` (a completed withdrawal).

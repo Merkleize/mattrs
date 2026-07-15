@@ -833,6 +833,7 @@ fn fixed_walk(s: &mut StackScript, start: &str, sib_prefix: &str, directions: &[
 impl ExitLeaf {
     fn directions(p: &LeafStepParams) -> Vec<u8> {
         get_directions(p.pool.padded_size(), p.k as usize)
+            .expect("leaf step index is within the padded pool")
     }
 
     fn case_specs(p: &LeafStepParams, case: StepCase) -> Vec<ArgSpec> {
@@ -1008,11 +1009,14 @@ impl ExitLeafHandle {
             }
         }
         let bit_tree = MerkleTree::new(claim.bits.iter().map(|b| super::bit_leaf(*b)).collect());
-        for sib in bit_tree.prove_leaf(k).hashes {
+        let bit_proof = bit_tree
+            .prove_leaf(k)
+            .expect("exit bit index is within the padded pool");
+        for sib in bit_proof.hashes() {
             witness.push(sib.to_vec());
         }
         if case != StepCase::Noop {
-            for sib in working.prove(k).hashes {
+            for sib in working.prove(k).hashes() {
                 witness.push(sib.to_vec());
             }
         }

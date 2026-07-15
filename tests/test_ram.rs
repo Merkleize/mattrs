@@ -6,7 +6,12 @@
 
 mod support;
 
-use mattrs::merkle::{MerkleProofType, MerkleTree, WitProof, ceil_lg, floor_lg, get_directions};
+use mattrs::contracts::{WitnessEncodable, WitnessError};
+use mattrs::merkle::{
+    MerkleError, MerkleProof, MerkleProofType, MerkleTree, WitProof, ceil_lg, floor_lg,
+    get_directions,
+};
+use mattrs::script_utils::bn2vch;
 use support::ram::{Ram, RamHandle, RamParams, RamState};
 
 fn ref_leaves() -> Vec<[u8; 32]> {
@@ -25,9 +30,9 @@ fn test_merkle_root_matches_reference() {
 #[test]
 fn test_merkle_proof_matches_reference() {
     let tree = MerkleTree::new(ref_leaves());
-    let proof = tree.prove_leaf(2);
+    let proof = tree.prove_leaf(2).unwrap();
 
-    let hashes: Vec<String> = proof.hashes.iter().map(hex::encode).collect();
+    let hashes: Vec<String> = proof.hashes().iter().map(hex::encode).collect();
     assert_eq!(
         hashes,
         vec![
@@ -35,12 +40,12 @@ fn test_merkle_proof_matches_reference() {
             "0303030303030303030303030303030303030303030303030303030303030303".to_string(),
         ]
     );
-    assert_eq!(proof.directions, vec![1, 0]);
+    assert_eq!(proof.directions(), [1, 0]);
     assert_eq!(
-        hex::encode(proof.x),
+        hex::encode(proof.leaf()),
         "0202020202020202020202020202020202020202020202020202020202020202"
     );
-    assert_eq!(proof.get_leaf_index(), 2);
+    assert_eq!(proof.leaf_index(), 2);
 
     // Updating leaf 2 to 0xaa..aa yields the pymatt reference root.
     assert_eq!(
@@ -50,8 +55,64 @@ fn test_merkle_proof_matches_reference() {
 
     // Re-applying the current leaf value reconstructs the tree's own root, and the
     // witness stack has the expected 2n+1 shape.
-    assert_eq!(proof.get_new_root_after_update(proof.x), tree.root());
-    assert_eq!(proof.to_wit_stack().len(), 2 * proof.hashes.len() + 1);
+    assert_eq!(proof.get_new_root_after_update(proof.leaf()), tree.root());
+    assert_eq!(proof.to_wit_stack().len(), 2 * proof.hashes().len() + 1);
+}
+
+#[test]
+fn merkle_proof_construction_rejects_malformed_paths() {
+    assert!(matches!(
+        MerkleProof::new(vec![[0; 32]], vec![], [1; 32]),
+        Err(MerkleError::MismatchedProofLengths {
+            hashes: 1,
+            directions: 0
+        })
+    ));
+    assert!(matches!(
+        MerkleProof::new(vec![[0; 32]], vec![2], [1; 32]),
+        Err(MerkleError::InvalidDirection(2))
+    ));
+
+    let proof = MerkleTree::new(ref_leaves()).prove_leaf(2).unwrap();
+    assert!(matches!(
+        proof.to_wit_proof::<3>(),
+        Err(MerkleError::InvalidProofDepth {
+            expected: 3,
+            actual: 2
+        })
+    ));
+}
+
+#[test]
+fn proving_checks_bounds_and_retains_non_power_of_two_indices() {
+    let empty = MerkleTree::new(vec![]);
+    assert!(matches!(
+        empty.prove_leaf(0),
+        Err(MerkleError::LeafIndexOutOfBounds { index: 0, len: 0 })
+    ));
+
+    let tree = MerkleTree::new((0..5u8).map(|i| [i; 32]).collect());
+    for index in 0..tree.len() {
+        let proof = tree.prove_leaf(index).unwrap();
+        assert_eq!(proof.leaf_index(), index);
+        assert_eq!(
+            proof.get_new_root_after_update(proof.leaf()),
+            tree.root()
+        );
+    }
+    assert!(matches!(
+        tree.prove_leaf(5),
+        Err(MerkleError::LeafIndexOutOfBounds { index: 5, len: 5 })
+    ));
+}
+
+#[test]
+fn wit_proof_decode_rejects_non_binary_directions() {
+    for direction in [-1, 2, 256] {
+        let stack = vec![[0u8; 32].to_vec(), bn2vch(direction), [1u8; 32].to_vec()];
+        let err = WitProof::<1>::decode_from_witness(&stack).unwrap_err();
+        assert!(matches!(err, WitnessError::InvalidValue(_)));
+    }
 }
 
 // Regenerate the pinned root with pymatt (from the repo root):
@@ -72,11 +133,9 @@ fn test_ram_taptree_matches_reference() {
 
 #[test]
 fn test_wit_proof_witness_roundtrip() {
-    use mattrs::contracts::WitnessEncodable;
-
     let tree = MerkleTree::new((0..4u8).map(|i| [i; 32]).collect());
-    let proof = tree.prove_leaf(2);
-    let wp: WitProof<2> = proof.to_wit_proof();
+    let proof = tree.prove_leaf(2).unwrap();
+    let wp: WitProof<2> = proof.to_wit_proof().unwrap();
 
     // The typed encoding is exactly the raw 2n+1 witness-stack layout.
     let stack = wp.encode_to_witness();
@@ -101,7 +160,7 @@ fn test_merkle_proof_type_arg_consumes_2n_plus_1() {
 
     let mpt = MerkleProofType::new(2);
     let tree = MerkleTree::new((0..4u8).map(|i| [i; 32]).collect());
-    let mut stack = tree.prove_leaf(2).to_wit_stack();
+    let mut stack = tree.prove_leaf(2).unwrap().to_wit_stack();
     stack.push([9u8; 32].to_vec()); // a trailing argument
 
     assert_eq!(mpt.consume(&stack).unwrap(), 5);
@@ -136,7 +195,7 @@ fn test_ram_write_commits_updated_root() {
 
     // Prove cell 2 and write a new value into it.
     let tree = MerkleTree::new(leaves.clone());
-    let proof: WitProof<2> = tree.prove_leaf(2).to_wit_proof();
+    let proof: WitProof<2> = tree.prove_leaf(2).unwrap().to_wit_proof().unwrap();
     let new_value = [0xaa; 32];
 
     let tx = handle
@@ -162,9 +221,11 @@ fn test_ram_write_commits_updated_root() {
 
 #[test]
 fn test_merkle_helpers_match_reference() {
-    assert_eq!(get_directions(4, 2), vec![1, 0]);
+    assert_eq!(get_directions(4, 2).unwrap(), vec![1, 0]);
     assert_eq!(floor_lg(8), 3);
     assert_eq!(ceil_lg(5), 3);
+    assert_eq!(floor_lg(usize::MAX), usize::BITS - 1);
+    assert_eq!(ceil_lg(usize::MAX), usize::BITS);
 }
 
 // ----------------------------------------------------------------------------
@@ -195,7 +256,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     // Write cell 2, proving its current value; the node validates the tapscript's
     // in-script Merkle-root recomputation of both the old and the new root.
     let tree = MerkleTree::new(leaves.clone());
-    let proof: WitProof<2> = tree.prove_leaf(2).to_wit_proof();
+    let proof: WitProof<2> = tree.prove_leaf(2)?.to_wit_proof()?;
     let new_value = [0xaa; 32];
     let child: RamHandle = ram
         .write(proof, new_value, tree.root())
@@ -207,7 +268,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     let mut updated = leaves.clone();
     updated[2] = new_value;
     let new_tree = MerkleTree::new(updated);
-    let proof: WitProof<2> = new_tree.prove_leaf(2).to_wit_proof();
+    let proof: WitProof<2> = new_tree.prove_leaf(2)?.to_wit_proof()?;
 
     use bitcoincore_rpc::RpcApi;
     let dest = manager.rpc().get_new_address(None, None)?.assume_checked();

@@ -62,7 +62,10 @@ contract! {
                 let state = s.ok_or_else(|| {
                     ClauseError::Other("RAM write needs the cell state".to_string())
                 })?;
-                let index = a.proof.leaf_index();
+                let index = a
+                    .proof
+                    .leaf_index()
+                    .map_err(|e| ClauseError::Other(e.to_string()))?;
                 let mut leaves = state.leaves.clone();
                 if index >= leaves.len() {
                     return Err(ClauseError::Other("leaf index out of range".to_string()));
