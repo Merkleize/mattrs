@@ -75,6 +75,14 @@ pub fn vch2bn(vch: &[u8]) -> Result<i64, WitnessError> {
         return Ok(0);
     }
 
+    // Zero has exactly one minimal encoding: the empty vector. A sign bit with
+    // no magnitude is "negative zero" and is non-minimal for the same reason.
+    if vch.len() == 1 && matches!(vch[0], 0x00 | 0x80) {
+        return Err(WitnessError::InvalidValue(
+            "Non-minimal integer encoding".to_string(),
+        ));
+    }
+
     // Bitcoin script integers can be at most 4 bytes for standard operations,
     // but we allow up to 8 bytes for i64, plus one extra byte for the sign bit if needed
     if vch.len() > 9 {
@@ -244,6 +252,11 @@ mod tests {
 
     #[test]
     fn test_vch2bn_non_minimal() {
+        // Zero is encoded by the empty vector; positive and negative zero are
+        // both non-minimal.
+        assert!(vch2bn(&[0x00]).is_err());
+        assert!(vch2bn(&[0x80]).is_err());
+
         // 0x00 0x00 is non-minimal encoding of 0
         assert!(vch2bn(&[0x00, 0x00]).is_err());
 

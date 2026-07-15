@@ -278,7 +278,17 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
             where
                 Self: Sized
             {
-                let (args, _) = <Self as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(witness)?;
+                let (args, consumed) = <Self as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(witness)?;
+                if consumed != witness.len() {
+                    return Err(::mattrs::contracts::WitnessError::InvalidData(
+                        format!(
+                            "{} decoded {} of {} witness element(s)",
+                            ::core::stringify!(#name),
+                            consumed,
+                            witness.len(),
+                        ),
+                    ));
+                }
                 Ok(args)
             }
         }
@@ -510,11 +520,16 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // Encode field and prepend its element count and sizes.
             let field_elements =
                 ::mattrs::contracts::ParamEncodable::encode_param(&self.#field_name);
-            // Write number of elements as a u32.
-            bytes.extend(&(field_elements.len() as u32).to_le_bytes());
+            // The framing format uses u32 lengths. Conversion is checked so a
+            // value can never be silently truncated into a corrupt frame.
+            let element_count = u32::try_from(field_elements.len())
+                .expect("contract parameter field has more than u32::MAX elements");
+            bytes.extend(&element_count.to_le_bytes());
             // Write each element with its length prefix.
             for elem in field_elements {
-                bytes.extend(&(elem.len() as u32).to_le_bytes());
+                let elem_len = u32::try_from(elem.len())
+                    .expect("contract parameter element exceeds u32::MAX bytes");
+                bytes.extend(&elem_len.to_le_bytes());
                 bytes.extend(&elem);
             }
         }
@@ -526,33 +541,59 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
         quote! {
             let (#field_name, consumed_bytes) = {
                 // Read number of witness elements
-                if byte_offset + 4 > bytes.len() {
+                let count_end = byte_offset.checked_add(4)
+                    .ok_or_else(|| ::mattrs::contracts::WitnessError::InvalidData(
+                        "contract parameter frame offset overflow".to_string(),
+                    ))?;
+                if count_end > bytes.len() {
                     return Err(::mattrs::contracts::WitnessError::InsufficientData);
                 }
                 let mut count_bytes = [0u8; 4];
-                count_bytes.copy_from_slice(&bytes[byte_offset..byte_offset+4]);
-                let element_count = u32::from_le_bytes(count_bytes) as usize;
-                let mut local_offset = byte_offset + 4;
+                count_bytes.copy_from_slice(&bytes[byte_offset..count_end]);
+                let element_count = usize::try_from(u32::from_le_bytes(count_bytes))
+                    .map_err(|_| ::mattrs::contracts::WitnessError::InvalidData(
+                        "contract parameter element count does not fit usize".to_string(),
+                    ))?;
+                let mut local_offset = count_end;
 
                 // Read witness elements
                 let mut temp_witness = Vec::new();
                 for _ in 0..element_count {
-                    if local_offset + 4 > bytes.len() {
+                    let len_end = local_offset.checked_add(4)
+                        .ok_or_else(|| ::mattrs::contracts::WitnessError::InvalidData(
+                            "contract parameter frame offset overflow".to_string(),
+                        ))?;
+                    if len_end > bytes.len() {
                         return Err(::mattrs::contracts::WitnessError::InsufficientData);
                     }
                     let mut len_bytes = [0u8; 4];
-                    len_bytes.copy_from_slice(&bytes[local_offset..local_offset+4]);
-                    let elem_len = u32::from_le_bytes(len_bytes) as usize;
-                    local_offset += 4;
+                    len_bytes.copy_from_slice(&bytes[local_offset..len_end]);
+                    let elem_len = usize::try_from(u32::from_le_bytes(len_bytes))
+                        .map_err(|_| ::mattrs::contracts::WitnessError::InvalidData(
+                            "contract parameter element length does not fit usize".to_string(),
+                        ))?;
+                    local_offset = len_end;
 
-                    if local_offset + elem_len > bytes.len() {
+                    let elem_end = local_offset.checked_add(elem_len)
+                        .ok_or_else(|| ::mattrs::contracts::WitnessError::InvalidData(
+                            "contract parameter frame length overflow".to_string(),
+                        ))?;
+                    if elem_end > bytes.len() {
                         return Err(::mattrs::contracts::WitnessError::InsufficientData);
                     }
-                    temp_witness.push(bytes[local_offset..local_offset+elem_len].to_vec());
-                    local_offset += elem_len;
+                    temp_witness.push(bytes[local_offset..elem_end].to_vec());
+                    local_offset = elem_end;
                 }
 
-                let (value, _) = <#field_type as ::mattrs::contracts::ParamEncodable>::decode_param(&temp_witness)?;
+                let (value, consumed_elements) = <#field_type as ::mattrs::contracts::ParamEncodable>::decode_param(&temp_witness)?;
+                if consumed_elements != temp_witness.len() {
+                    return Err(::mattrs::contracts::WitnessError::InvalidData(format!(
+                        "field '{}' consumed {} of {} framed element(s)",
+                        ::core::stringify!(#field_name),
+                        consumed_elements,
+                        temp_witness.len(),
+                    )));
+                }
                 (value, local_offset - byte_offset)
             };
             byte_offset += consumed_bytes;
@@ -587,8 +628,16 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
 
             fn decode(bytes: &[u8]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError> {
-                let mut byte_offset = 0;
+                let mut byte_offset = 0usize;
                 #(#decode_from_bytes_fields)*
+
+                if byte_offset != bytes.len() {
+                    return Err(::mattrs::contracts::WitnessError::InvalidData(format!(
+                        "{} trailing byte(s) after {} parameters",
+                        bytes.len() - byte_offset,
+                        ::core::stringify!(#name),
+                    )));
+                }
 
                 Ok(Self {
                     #(#field_names_for_bytes),*
@@ -631,10 +680,11 @@ fn extract_leaf_kind(field: &syn::Field) -> syn::Result<LeafKind> {
 ///
 /// # Default: single-field identity encoding
 ///
-/// Without attributes, `encode()` is the field's raw witness bytes and `decode()`
-/// reconstructs it from them. That round-trip is only invertible when the struct
-/// has exactly one field, so the attribute-less derive rejects multi-field state
-/// at compile time.
+/// Without attributes, `encode()` is the field's one witness element and
+/// `decode()` reconstructs it from those bytes. The field type must implement
+/// `SingleWitnessElement`; variable- and multi-element encodings are rejected.
+/// The attribute-less derive accepts exactly one field. Multi-field state must
+/// use `#[commit(merkle)]` or a manual implementation.
 ///
 /// # `#[commit(merkle)]`: hash-committed (lossy) state
 ///
@@ -734,6 +784,7 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     });
 
     let field_names = fields.iter().map(|f| &f.ident);
+    let field_type = &fields.first().expect("length checked above").ty;
 
     Ok(quote! {
         impl ::mattrs::contracts::WitnessEncodable for #name {
@@ -754,17 +805,26 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
         impl ::mattrs::contracts::ContractState for #name {
             fn encode(&self) -> Vec<u8> {
-                ::mattrs::contracts::WitnessEncodable::encode_to_witness(self)
-                    .into_iter()
-                    .flatten()
-                    .collect()
+                fn assert_single<T: ::mattrs::contracts::SingleWitnessElement>() {}
+                assert_single::<#field_type>();
+                let mut elements =
+                    ::mattrs::contracts::WitnessEncodable::encode_to_witness(self);
+                debug_assert_eq!(elements.len(), 1);
+                elements.pop().expect("SingleWitnessElement produced one element")
             }
 
             fn decode(bytes: &[u8]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError> {
-                // Convert bytes to witness format (single element)
+                fn assert_single<T: ::mattrs::contracts::SingleWitnessElement>() {}
+                assert_single::<#field_type>();
                 let witness = vec![bytes.to_vec()];
-                let (state, _) =
+                let (state, consumed) =
                     <Self as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&witness)?;
+                if consumed != 1 {
+                    return Err(::mattrs::contracts::WitnessError::InvalidData(format!(
+                        "contract state consumed {} element(s), expected one",
+                        consumed,
+                    )));
+                }
                 Ok(state)
             }
         }

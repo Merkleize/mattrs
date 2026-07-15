@@ -196,6 +196,31 @@ pub trait WitnessEncodable {
         Self: Sized;
 }
 
+/// Marker for values whose [`WitnessEncodable`] representation is always
+/// exactly one element.
+///
+/// Identity [`ContractState`] commitments use that element's bytes directly,
+/// because covenant scripts re-reveal those same bytes as the Taproot state
+/// tweak. Variable- or multi-element encodings cannot be flattened without
+/// losing their element boundaries and therefore must not implement this trait.
+///
+/// # Safety
+///
+/// Implementors must return exactly one element from `encode_to_witness` and
+/// consume exactly one element from `decode_from_witness` on success.
+///
+/// Types with variable-width witness layouts cannot be used as identity state:
+///
+/// ```compile_fail
+/// use mattrs::ContractState;
+///
+/// #[derive(Debug, Clone, ContractState)]
+/// struct InvalidState {
+///     value: Option<[u8; 32]>,
+/// }
+/// ```
+pub unsafe trait SingleWitnessElement: WitnessEncodable {}
+
 /// Serialization of a **contract-params field** — the internal, round-trippable
 /// encoding the `#[derive(ContractParams)]` codec frames to carry a contract's
 /// params on its instance. It is *not* a consensus/witness format.
@@ -248,13 +273,22 @@ macro_rules! impl_scriptnum_witness {
                 }
                 let val = crate::script_utils::vch2bn(&witness[0])
                     .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
-                Ok((val as $t, 1))
+                let value = <$t>::try_from(val).map_err(|_| {
+                    WitnessError::InvalidValue(format!(
+                        "Script number {val} is out of range for {}",
+                        stringify!($t),
+                    ))
+                })?;
+                Ok((value, 1))
             }
         }
     )+};
 }
 
 impl_scriptnum_witness!(i32, i64);
+
+unsafe impl SingleWitnessElement for i32 {}
+unsafe impl SingleWitnessElement for i64 {}
 
 impl<const N: usize> WitnessEncodable for [u8; N] {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -278,6 +312,8 @@ impl<const N: usize> WitnessEncodable for [u8; N] {
     }
 }
 
+unsafe impl<const N: usize> SingleWitnessElement for [u8; N] {}
+
 impl WitnessEncodable for Vec<u8> {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
         vec![self.clone()]
@@ -290,6 +326,8 @@ impl WitnessEncodable for Vec<u8> {
         Ok((witness[0].clone(), 1))
     }
 }
+
+unsafe impl SingleWitnessElement for Vec<u8> {}
 
 /// Unsigned integers serialize as their fixed-width little-endian bytes, one
 /// element. They are [`ParamEncodable`] only — deliberately *not* witness elements,
@@ -339,6 +377,8 @@ impl WitnessEncodable for bool {
     }
 }
 
+unsafe impl SingleWitnessElement for bool {}
+
 impl WitnessEncodable for XOnlyPublicKey {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
         vec![self.serialize().to_vec()]
@@ -360,6 +400,8 @@ impl WitnessEncodable for XOnlyPublicKey {
     }
 }
 
+unsafe impl SingleWitnessElement for XOnlyPublicKey {}
+
 impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
         match self {
@@ -368,7 +410,7 @@ impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
                 result.extend(value.encode_to_witness());
                 result
             }
-            None => vec![vec![0u8]], // absence flag
+            None => vec![Vec::new()], // canonical false / absence flag
         }
     }
 
@@ -377,11 +419,15 @@ impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
             return Err(WitnessError::StackUnderflow);
         }
 
-        if witness[0].is_empty() || witness[0][0] == 0 {
-            Ok((None, 1))
-        } else {
-            let (value, consumed) = T::decode_from_witness(&witness[1..])?;
-            Ok((Some(value), consumed + 1))
+        match witness[0].as_slice() {
+            [] => Ok((None, 1)),
+            [1] => {
+                let (value, consumed) = T::decode_from_witness(&witness[1..])?;
+                Ok((Some(value), consumed + 1))
+            }
+            other => Err(WitnessError::InvalidValue(format!(
+                "not a canonical option flag: {other:02x?}",
+            ))),
         }
     }
 }
@@ -428,6 +474,8 @@ impl WitnessEncodable for Signature {
         Ok((Signature(first.clone()), 1))
     }
 }
+
+unsafe impl SingleWitnessElement for Signature {}
 
 // ============================================================================
 // Marker Trait Implementations
@@ -587,8 +635,14 @@ impl ContractParams for () {
         Vec::new()
     }
 
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Ok(())
+    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
+        if bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(WitnessError::InvalidData(
+                "parameterless contract has trailing data".to_string(),
+            ))
+        }
     }
 }
 
@@ -597,8 +651,14 @@ impl ContractState for () {
         Vec::new()
     }
 
-    fn decode(_bytes: &[u8]) -> Result<Self, WitnessError> {
-        Ok(())
+    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
+        if bytes.is_empty() {
+            Ok(())
+        } else {
+            Err(WitnessError::InvalidData(
+                "stateless contract has trailing data".to_string(),
+            ))
+        }
     }
 }
 

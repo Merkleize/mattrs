@@ -272,12 +272,17 @@ fn test_derived_state_roundtrip() {
     };
 
     let encoded = state.encode();
-    // Single 32-byte field encodes to exactly its 32 raw bytes (no framing),
-    // which is what augmented contracts commit to as the state tweak.
+    // Single-element state remains the raw element bytes: covenant scripts
+    // re-reveal this exact value as the state tweak.
     assert_eq!(encoded.len(), 32);
 
     let decoded = DerivedState::decode(&encoded).expect("Failed to decode derived state");
     assert_eq!(decoded.commitment, state.commitment);
+
+    assert!(DerivedState::decode(&encoded[..encoded.len() - 1]).is_err());
+    let mut with_tail = encoded.clone();
+    with_tail.push(0);
+    assert!(DerivedState::decode(&with_tail).is_err());
 }
 
 #[test]
@@ -519,4 +524,41 @@ fn test_contract_params_roundtrip() {
     assert_eq!(params.spend_delay, decoded.spend_delay);
     assert_eq!(params.recover_pk, decoded.recover_pk);
     assert_eq!(params.unvault_pk, decoded.unvault_pk);
+
+    let mut with_tail = params.encode();
+    with_tail.push(0);
+    assert!(RoundtripParams::decode(&with_tail).is_err());
+
+    let encoded = params.encode();
+    let truncated = &encoded[..encoded.len() - 1];
+    assert!(RoundtripParams::decode(truncated).is_err());
+
+    assert!(<() as ContractParams>::decode(&[0]).is_err());
+    assert!(<() as ContractState>::decode(&[0]).is_err());
+}
+
+#[test]
+fn test_derived_clause_args_reject_trailing_elements() {
+    let args = SampleArgs::new(7, vec![1, 2, 3], [9u8; 32]);
+    let mut witness = <SampleArgs as ClauseArgs>::encode_to_witness(&args);
+    witness.push(vec![0xaa]);
+    assert!(<SampleArgs as ClauseArgs>::decode_from_witness(&witness).is_err());
+}
+
+#[test]
+fn test_canonical_option_flags_and_checked_script_numbers() {
+    let none = <Option<i64> as WitnessEncodable>::encode_to_witness(&None);
+    assert_eq!(none, vec![Vec::<u8>::new()]);
+    assert_eq!(
+        <Option<i64> as WitnessEncodable>::decode_from_witness(&none)
+            .unwrap()
+            .0,
+        None
+    );
+
+    assert!(<Option<i64> as WitnessEncodable>::decode_from_witness(&[vec![0]]).is_err());
+    assert!(<Option<i64> as WitnessEncodable>::decode_from_witness(&[vec![2]]).is_err());
+
+    let too_large = script_utils::bn2vch(i64::from(i32::MAX) + 1);
+    assert!(<i32 as WitnessEncodable>::decode_from_witness(&[too_large]).is_err());
 }
