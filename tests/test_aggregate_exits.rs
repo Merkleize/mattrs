@@ -733,7 +733,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
     let continued: UnwindHandle = try_handle(children[1].clone());
     assert_eq!(continued.state().unwrap().root, claim.r_prime);
 
-    report.finalize("reports/report_aggregate_exits_happy.md");
+    report.finalize("reports/report_aggregate_exits_happy.md")?;
     Ok(())
 }
 
@@ -794,7 +794,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let reverted: UnwindHandle = try_handle(children[2].clone());
     assert_eq!(reverted.state().unwrap().root, pool.root());
 
-    report.finalize("reports/report_aggregate_exits_fraud.md");
+    report.finalize("reports/report_aggregate_exits_fraud.md")?;
     Ok(())
 }
 
@@ -847,6 +847,6 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .exec(&mut manager)?;
     report_spend(&mut report, "AggregateExits", "finalize (resumed)", resumed.handle());
 
-    report.finalize("reports/report_aggregate_exits_delegation.md");
+    report.finalize("reports/report_aggregate_exits_delegation.md")?;
     Ok(())
 }

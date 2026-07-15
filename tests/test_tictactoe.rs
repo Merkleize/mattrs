@@ -420,7 +420,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
         won.handle(),
     );
 
-    report.finalize("reports/report_tictactoe.md");
+    report.finalize("reports/report_tictactoe.md")?;
     Ok(())
 }
 

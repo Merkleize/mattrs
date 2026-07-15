@@ -140,6 +140,6 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     assert_eq!(payout.output[0].script_pubkey, p2tr(bob_pk()));
     assert_eq!(payout.output[0].value, Amount::from_sat(AMOUNT));
 
-    report.finalize("reports/report_game256.md");
+    report.finalize("reports/report_game256.md")?;
     Ok(())
 }

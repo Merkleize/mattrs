@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
+use std::path::Path;
 
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hex::DisplayHex;
@@ -93,7 +95,12 @@ impl Report {
     }
 
     /// Write the report to `path`, creating parent directories as needed.
-    pub fn finalize(&self, path: &str) {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a parent directory cannot be created or the report
+    /// cannot be written.
+    pub fn finalize(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let mut out = String::new();
         for (section, contents) in &self.sections {
             out += &format!("## {}\n", section);
@@ -104,10 +111,36 @@ impl Report {
             out += "\n";
         }
 
-        let path = std::path::Path::new(path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("Failed to create parent directory");
+        let path = path.as_ref();
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
         }
-        fs::write(path, out).expect("Failed to write report");
+        fs::write(path, out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finalize_creates_parent_directories_and_writes_the_report() -> io::Result<()> {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "mattrs-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after Unix epoch")
+                .as_nanos(),
+        ));
+        let path = temp_dir.join("nested/report.md");
+
+        let mut report = Report::new();
+        report.write("Example", "content".to_string());
+        report.finalize(&path)?;
+
+        assert_eq!(fs::read_to_string(path)?, "## Example\ncontent\n\n");
+        fs::remove_dir_all(temp_dir)?;
+        Ok(())
     }
 }

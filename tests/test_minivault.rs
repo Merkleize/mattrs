@@ -175,7 +175,7 @@ fn test_minivault_early_recover_on_regtest() -> Result<(), Box<dyn std::error::E
         "recover (straight from the vault)",
         vault.handle(),
     );
-    report.finalize("reports/report_minivault_recover.md");
+    report.finalize("reports/report_minivault_recover.md")?;
     Ok(())
 }
 
@@ -212,7 +212,7 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
         "recover (from the unvaulting)",
         unvaulting.handle(),
     );
-    report.finalize("reports/report_minivault_trigger_recover.md");
+    report.finalize("reports/report_minivault_trigger_recover.md")?;
     Ok(())
 }
 
@@ -261,7 +261,7 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
         "withdraw (after the delay)",
         unvaulting.handle(),
     );
-    report.finalize("reports/report_minivault_trigger_withdraw.md");
+    report.finalize("reports/report_minivault_trigger_withdraw.md")?;
     Ok(())
 }
 
@@ -332,6 +332,6 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
         "withdraw of the merged unvaulting",
         unvaulting.handle(),
     );
-    report.finalize("reports/report_minivault_revault.md");
+    report.finalize("reports/report_minivault_revault.md")?;
     Ok(())
 }

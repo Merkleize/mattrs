@@ -227,6 +227,6 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
         child.handle(),
     );
 
-    report.finalize("reports/report_ram.md");
+    report.finalize("reports/report_ram.md")?;
     Ok(())
 }

@@ -200,7 +200,6 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         s1.handle(),
     );
 
-    report.finalize("reports/report_rps.md");
+    report.finalize("reports/report_rps.md")?;
     Ok(())
 }
-
