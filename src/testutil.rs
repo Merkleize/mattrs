@@ -13,8 +13,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use bitcoin::hashes::Hash;
-use bitcoin::{Amount, OutPoint, Transaction, TxOut, Txid};
+use bitcoin::{Amount, OutPoint, Transaction, TxOut};
 use bitcoincore_rpc::{Auth, Client};
 
 use crate::contracts::{ContractInstance, ErasedContract, ErasedState};
@@ -40,27 +39,27 @@ pub fn fund_fake(
     amount: Amount,
     seed: u8,
 ) -> InstanceHandle {
-    let instance = Rc::new(RefCell::new(ContractInstance::new(contract, expanded)));
+    let instance = Rc::new(RefCell::new(
+        ContractInstance::new(contract, expanded).expect("state matches contract"),
+    ));
     let script_pubkey = instance
         .borrow()
         .script_pubkey()
         .expect("contract script_pubkey");
     let funding_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+        lock_time: bitcoin::locktime::absolute::LockTime::from_consensus(seed.into()),
         input: vec![],
         output: vec![TxOut {
             script_pubkey,
             value: amount,
         }],
     };
-    instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: Txid::from_byte_array([seed; 32]),
-            vout: 0,
-        },
-        funding_tx,
-    );
+    let outpoint = OutPoint {
+        txid: funding_tx.compute_txid(),
+        vout: 0,
+    };
+    instance.borrow_mut().mark_funded(outpoint, funding_tx);
     InstanceHandle::new(instance)
 }
 

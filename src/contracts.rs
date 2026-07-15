@@ -108,6 +108,11 @@ impl From<ContractError> for ClauseError {
 pub enum ContractError {
     /// An augmented-contract operation needs state but none was provided.
     MissingState,
+    /// A stateless contract was given logical state.
+    UnexpectedState,
+    /// The logical state has a different concrete type from the augmented
+    /// contract's declared state type.
+    WrongStateType,
     /// Failed to decode the contract state.
     StateDecoding(WitnessError),
     /// A taproot / secp256k1 key operation failed (tweak, parse, ...).
@@ -128,6 +133,10 @@ impl fmt::Display for ContractError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ContractError::MissingState => write!(f, "state required for augmented contract"),
+            ContractError::UnexpectedState => write!(f, "stateless contract cannot carry state"),
+            ContractError::WrongStateType => {
+                write!(f, "logical state type does not match the contract")
+            }
             ContractError::StateDecoding(e) => write!(f, "failed to decode state: {}", e),
             ContractError::Key(msg) => write!(f, "key operation failed: {}", msg),
             ContractError::DuplicateClauseName(name) => {
@@ -230,10 +239,10 @@ pub trait WitnessEncodable {
 /// tweak. Variable- or multi-element encodings cannot be flattened without
 /// losing their element boundaries and therefore must not implement this trait.
 ///
-/// # Safety
-///
-/// Implementors must return exactly one element from `encode_to_witness` and
-/// consume exactly one element from `decode_from_witness` on success.
+/// Implementors opt into identity-state use. The checked helpers verify that
+/// the underlying codec actually produces and consumes exactly one element,
+/// so an incorrect implementation is an ordinary decoding error rather than
+/// an unsafe-code contract.
 ///
 /// Types with variable-width witness layouts cannot be used as identity state:
 ///
@@ -245,7 +254,33 @@ pub trait WitnessEncodable {
 ///     value: Option<[u8; 32]>,
 /// }
 /// ```
-pub unsafe trait SingleWitnessElement: WitnessEncodable {}
+pub trait SingleWitnessElement: WitnessEncodable {
+    /// Encode and verify that exactly one element was produced.
+    fn encode_single(&self) -> Result<Vec<u8>, WitnessError> {
+        let mut elements = self.encode_to_witness();
+        if elements.len() != 1 {
+            return Err(WitnessError::InvalidData(format!(
+                "single-element codec produced {} elements",
+                elements.len()
+            )));
+        }
+        Ok(elements.pop().expect("length checked"))
+    }
+
+    /// Decode and verify that exactly one element was consumed.
+    fn decode_single(element: Vec<u8>) -> Result<Self, WitnessError>
+    where
+        Self: Sized,
+    {
+        let (value, consumed) = Self::decode_from_witness(&[element])?;
+        if consumed != 1 {
+            return Err(WitnessError::InvalidData(format!(
+                "single-element codec consumed {consumed} elements"
+            )));
+        }
+        Ok(value)
+    }
+}
 
 /// Serialization of a **contract-params field** — the internal, round-trippable
 /// encoding the `#[derive(ContractParams)]` codec frames to carry a contract's
@@ -313,8 +348,8 @@ macro_rules! impl_scriptnum_witness {
 
 impl_scriptnum_witness!(i32, i64);
 
-unsafe impl SingleWitnessElement for i32 {}
-unsafe impl SingleWitnessElement for i64 {}
+impl SingleWitnessElement for i32 {}
+impl SingleWitnessElement for i64 {}
 
 impl<const N: usize> WitnessEncodable for [u8; N] {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -338,7 +373,7 @@ impl<const N: usize> WitnessEncodable for [u8; N] {
     }
 }
 
-unsafe impl<const N: usize> SingleWitnessElement for [u8; N] {}
+impl<const N: usize> SingleWitnessElement for [u8; N] {}
 
 impl WitnessEncodable for Vec<u8> {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -353,7 +388,7 @@ impl WitnessEncodable for Vec<u8> {
     }
 }
 
-unsafe impl SingleWitnessElement for Vec<u8> {}
+impl SingleWitnessElement for Vec<u8> {}
 
 /// Unsigned integers serialize as their fixed-width little-endian bytes, one
 /// element. They are [`ParamEncodable`] only — deliberately *not* witness elements,
@@ -407,7 +442,7 @@ impl WitnessEncodable for bool {
     }
 }
 
-unsafe impl SingleWitnessElement for bool {}
+impl SingleWitnessElement for bool {}
 
 impl WitnessEncodable for XOnlyPublicKey {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -430,7 +465,7 @@ impl WitnessEncodable for XOnlyPublicKey {
     }
 }
 
-unsafe impl SingleWitnessElement for XOnlyPublicKey {}
+impl SingleWitnessElement for XOnlyPublicKey {}
 
 impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -469,12 +504,18 @@ impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
 /// clause's `SignerType` pubkey against the registered signers, so callers never
 /// build a placeholder signature by hand. It occupies exactly one witness element.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Signature(pub Vec<u8>);
+pub struct Signature(Vec<u8>);
 
 impl Signature {
     /// Wrap raw signature bytes.
-    pub fn new(bytes: Vec<u8>) -> Self {
-        Signature(bytes)
+    pub fn new(bytes: Vec<u8>) -> Result<Self, WitnessError> {
+        if !bytes.is_empty() && !matches!(bytes.len(), 64 | 65) {
+            return Err(WitnessError::InvalidValue(format!(
+                "taproot signature must be 64 or 65 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        Ok(Signature(bytes))
     }
 
     /// The signature bytes.
@@ -488,9 +529,11 @@ impl Signature {
     }
 }
 
-impl From<Vec<u8>> for Signature {
-    fn from(bytes: Vec<u8>) -> Self {
-        Signature(bytes)
+impl TryFrom<Vec<u8>> for Signature {
+    type Error = WitnessError;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        Signature::new(bytes)
     }
 }
 
@@ -501,11 +544,11 @@ impl WitnessEncodable for Signature {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
         let first = witness.first().ok_or(WitnessError::StackUnderflow)?;
-        Ok((Signature(first.clone()), 1))
+        Ok((Signature::new(first.clone())?, 1))
     }
 }
 
-unsafe impl SingleWitnessElement for Signature {}
+impl SingleWitnessElement for Signature {}
 
 // ============================================================================
 // Marker Trait Implementations
@@ -1295,6 +1338,12 @@ pub trait ArgType: Debug + Send + Sync {
     /// witness elements it occupies.
     fn consume(&self, witness: &[Vec<u8>]) -> Result<usize, WitnessError>;
 
+    /// Static number of witness elements represented by this argument. This is
+    /// used by symbolic script builders before an actual witness exists.
+    fn witness_elements(&self) -> usize {
+        1
+    }
+
     /// If this argument is a signature, the x-only pubkey expected to sign it.
     ///
     /// Returns `Some(pubkey)` for signature arguments (so the manager knows which
@@ -1543,6 +1592,10 @@ pub trait ErasedContract: Debug + Send + Sync {
     /// display; not consensus-visible.
     fn contract_name(&self) -> &'static str;
 
+    /// Concrete logical-state type required by this contract, or `None` for a
+    /// stateless contract.
+    fn state_type_id(&self) -> Option<std::any::TypeId>;
+
     /// Get the script pubkey for this contract (with optional state).
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError>;
 
@@ -1745,6 +1798,10 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         self.core.name
     }
 
+    fn state_type_id(&self) -> Option<std::any::TypeId> {
+        None
+    }
+
     fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
         Ok(self.script_pubkey())
     }
@@ -1910,6 +1967,10 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         self.core.name
     }
 
+    fn state_type_id(&self) -> Option<std::any::TypeId> {
+        Some(std::any::TypeId::of::<S>())
+    }
+
     fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
         let committed = state_bytes.ok_or(ContractError::MissingState)?;
         let internal_key = self.internal_key_from_committed(committed)?;
@@ -1996,8 +2057,19 @@ pub struct ContractInstance {
 impl ContractInstance {
     /// Create a new unfunded instance. The params are taken from the contract,
     /// which is self-describing; the committed state bytes derive from `state`.
-    pub fn new(contract: Arc<dyn ErasedContract>, state: Option<Box<dyn ErasedState>>) -> Self {
-        Self {
+    pub(crate) fn new(
+        contract: Arc<dyn ErasedContract>,
+        state: Option<Box<dyn ErasedState>>,
+    ) -> Result<Self, ContractError> {
+        match (contract.state_type_id(), state.as_deref()) {
+            (None, Some(_)) => return Err(ContractError::UnexpectedState),
+            (Some(_), None) => return Err(ContractError::MissingState),
+            (Some(expected), Some(actual)) if actual.as_any().type_id() != expected => {
+                return Err(ContractError::WrongStateType);
+            }
+            _ => {}
+        }
+        Ok(Self {
             contract,
             state,
             outpoint: None,
@@ -2008,7 +2080,7 @@ impl ContractInstance {
             clause_name: None,
             spending_args: None,
             outputs: Vec::new(),
-        }
+        })
     }
 
     /// The contract template.
@@ -2093,7 +2165,7 @@ impl ContractInstance {
     }
 
     /// Mark the instance as funded with the given outpoint and transaction.
-    pub fn mark_funded(&mut self, outpoint: OutPoint, funding_tx: Transaction) {
+    pub(crate) fn mark_funded(&mut self, outpoint: OutPoint, funding_tx: Transaction) {
         self.outpoint = Some(outpoint);
         self.funding_tx = Some(funding_tx);
         self.status = InstanceStatus::Funded;
@@ -2101,7 +2173,7 @@ impl ContractInstance {
 
     /// Mark the instance as spent: by which transaction (and input index within
     /// it), through which clause, and with which witness arguments.
-    pub fn mark_spent(
+    pub(crate) fn mark_spent(
         &mut self,
         spending_tx: Transaction,
         vin: usize,
@@ -2116,8 +2188,14 @@ impl ContractInstance {
     }
 
     /// Add a child instance created from spending this instance.
-    pub fn add_output(&mut self, instance: Rc<RefCell<ContractInstance>>) {
-        self.outputs.push(instance);
+    pub(crate) fn add_output(&mut self, instance: Rc<RefCell<ContractInstance>>) {
+        if !self
+            .outputs
+            .iter()
+            .any(|existing| Rc::ptr_eq(existing, &instance))
+        {
+            self.outputs.push(instance);
+        }
     }
 }
 

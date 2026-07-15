@@ -9,6 +9,18 @@ use bitcoin::{
     sighash::{Prevouts, SighashCache, TapSighashType},
 };
 
+/// A signer refused or failed to produce a valid Taproot signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignerError(pub String);
+
+impl std::fmt::Display for SignerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SignerError {}
+
 /// Trait for signing Bitcoin transactions.
 pub trait Signer {
     /// Sign a message (sighash) and return the signature bytes.
@@ -18,7 +30,7 @@ pub trait Signer {
     ///
     /// # Returns
     /// The signature as a byte vector (64 bytes for schnorr)
-    fn sign(&self, sighash: &[u8]) -> Vec<u8>;
+    fn sign(&self, sighash: &[u8; 32]) -> Result<crate::contracts::Signature, SignerError>;
 
     /// Get the public key associated with this signer.
     fn public_key(&self) -> XOnlyPublicKey;
@@ -27,7 +39,7 @@ pub trait Signer {
 /// Boxed signers sign like the signer they box (so a `Box<dyn Signer>` can be
 /// passed wherever an `impl Signer` is expected).
 impl<S: Signer + ?Sized> Signer for Box<S> {
-    fn sign(&self, sighash: &[u8]) -> Vec<u8> {
+    fn sign(&self, sighash: &[u8; 32]) -> Result<crate::contracts::Signature, SignerError> {
         (**self).sign(sighash)
     }
 
@@ -54,19 +66,20 @@ impl HotSigner {
 }
 
 impl Signer for HotSigner {
-    fn sign(&self, sighash: &[u8]) -> Vec<u8> {
+    fn sign(&self, sighash: &[u8; 32]) -> Result<crate::contracts::Signature, SignerError> {
         let secp = Secp256k1::new();
         let secret_key = self.secret_key();
         let keypair = bitcoin::key::Keypair::from_secret_key(&secp, &secret_key);
 
         // Create message from sighash
-        let msg = Message::from_digest_slice(sighash).expect("sighash is 32 bytes");
+        let msg = Message::from_digest(*sighash);
 
         // Sign with schnorr
         let sig = secp.sign_schnorr(&msg, &keypair);
 
         // Return signature bytes (64 bytes, no sighash type byte for SIGHASH_DEFAULT)
-        sig.as_ref().to_vec()
+        crate::contracts::Signature::new(sig.as_ref().to_vec())
+            .map_err(|e| SignerError(e.to_string()))
     }
 
     fn public_key(&self) -> XOnlyPublicKey {

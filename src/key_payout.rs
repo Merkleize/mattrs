@@ -87,6 +87,10 @@ impl ErasedContract for KeyPayout {
         self.name
     }
 
+    fn state_type_id(&self) -> Option<std::any::TypeId> {
+        None
+    }
+
     fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
         Ok(opaque_p2tr(self.pk))
     }

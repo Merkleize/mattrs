@@ -17,7 +17,7 @@ use bitcoin::{
 /// - nLockTime: 0
 /// - scriptSig_hash: 0 (all empty)
 /// - num_inputs: 1
-/// - nIn: 0xFFFFFFFF
+/// - nIn: 0 (the only input)
 ///
 /// # Arguments
 /// * `outputs` - The transaction outputs

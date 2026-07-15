@@ -342,12 +342,9 @@ fn test_derived_state_roundtrip() {
 
 #[test]
 fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    use bitcoin::{Address, Amount, OutPoint, Sequence, Transaction, TxOut, Txid, hashes::Hash};
+    use bitcoin::{Address, Amount, Sequence, TxOut};
     use bitcoincore_rpc::{Auth, Client};
-    use mattrs::manager::{ContractManager, InstanceHandle};
+    use mattrs::manager::ContractManager;
 
     // The exact outputs + input sequence the clause commits to.
     let dest = Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")
@@ -386,27 +383,8 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
         StandardP2TR::<()>::new("Pay", owner, &(), ClauseTree::leaf(clause))
             .expect("contract definition is valid"),
     );
-    let script_pubkey = erased.script_pubkey(None).unwrap();
-
     // Fake a funded instance (building the tx does no RPC).
-    let instance = Rc::new(RefCell::new(ContractInstance::new(erased, None)));
-    let funding_tx = Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![TxOut {
-            script_pubkey,
-            value: Amount::from_sat(100_000),
-        }],
-    };
-    instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: Txid::all_zeros(),
-            vout: 0,
-        },
-        funding_tx,
-    );
-    let handle = InstanceHandle::new(instance);
+    let handle = mattrs::testutil::fund_fake(erased, None, Amount::from_sat(100_000), 0);
 
     let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
     let manager = ContractManager::new(client, bitcoin::Network::Regtest);
