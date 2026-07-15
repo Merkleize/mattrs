@@ -10,9 +10,9 @@ use bitcoin::{
 };
 
 use mattrs::{
-    contracts::{InstanceStatus, OutputIndex},
+    contracts::{ClauseError, InstanceStatus, OutputIndex},
     ctv::create_ctv_template,
-    manager::ContractManager,
+    manager::{ContractManager, ManagerError},
     signer::HotSigner,
 };
 use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client};
@@ -112,6 +112,29 @@ fn test_vault_trigger_outputs() {
         outputs[0].next_state.is_some(),
         "Unvaulting should have state"
     );
+}
+
+#[test]
+fn test_vault_rejects_negative_output_indices() {
+    use support::testkit::{fund_fake, offline_client, try_handle};
+    use support::vault::VaultHandle;
+
+    let vault = Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })
+    .unwrap();
+    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, 9));
+    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
+
+    let err = handle.trigger([0; 32], -1).build_tx(&manager).unwrap_err();
+    assert!(matches!(
+        err,
+        ManagerError::ClauseError(ClauseError::Other(message))
+            if message.contains("out_i")
+    ));
 }
 
 #[test]

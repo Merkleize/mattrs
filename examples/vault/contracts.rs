@@ -28,6 +28,11 @@ use mattrs::{
 
 define_pushable!();
 
+fn output_index(value: i64, name: &str) -> Result<u32, ClauseError> {
+    u32::try_from(value)
+        .map_err(|_| ClauseError::Other(format!("{name} must be between 0 and u32::MAX")))
+}
+
 // ============================================================================
 // Vault Parameters & State
 // ============================================================================
@@ -71,7 +76,10 @@ contract! {
             }
             script Vault::trigger_script;
             next(p, a) {
-                Vault::new(p.clone())?.trigger_outputs(a.ctv_hash, a.out_i as i32)
+                Vault::new(p.clone())?.trigger_outputs(
+                    a.ctv_hash,
+                    output_index(a.out_i, "out_i")?,
+                )
             }
         }
 
@@ -88,8 +96,8 @@ contract! {
             next(p, a) {
                 Vault::new(p.clone())?.trigger_and_revault_outputs(
                     a.ctv_hash,
-                    a.out_i as i32,
-                    a.revault_out_i as i32,
+                    output_index(a.out_i, "out_i")?,
+                    output_index(a.revault_out_i, "revault_out_i")?,
                 )
             }
         }
@@ -119,14 +127,14 @@ impl Vault {
     pub fn trigger_outputs(
         &self,
         ctv_hash: [u8; 32],
-        out_i: i32,
+        out_i: u32,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let params = self.params();
         let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
         let state = UnvaultingState { ctv_hash };
 
         Ok(vec![
-            ClauseOutput::at(out_i as u32)
+            ClauseOutput::at(out_i)
                 .to(unvaulting.as_erased())
                 .with_state(&state)
                 .preserve_amount()
@@ -137,19 +145,19 @@ impl Vault {
     pub fn trigger_and_revault_outputs(
         &self,
         ctv_hash: [u8; 32],
-        out_i: i32,
-        revault_out_i: i32,
+        out_i: u32,
+        revault_out_i: u32,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let params = self.params();
         let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
         let state = UnvaultingState { ctv_hash };
 
         Ok(vec![
-            ClauseOutput::at(revault_out_i as u32)
+            ClauseOutput::at(revault_out_i)
                 .to(Vault::new(params)?.as_erased())
                 .deduct_amount()
                 .build(),
-            ClauseOutput::at(out_i as u32)
+            ClauseOutput::at(out_i)
                 .to(unvaulting.as_erased())
                 .with_state(&state)
                 .preserve_amount()

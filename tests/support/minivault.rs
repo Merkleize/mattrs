@@ -33,13 +33,20 @@
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseOutput};
+use mattrs::contracts::{
+    CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
+};
 use mattrs::{
     ContractParams, ContractState, Signature, clause_tree, contract, internal_key_or_nums,
     optional_key_script,
 };
 
 define_pushable!();
+
+fn output_index(value: i64, name: &str) -> Result<u32, ClauseError> {
+    u32::try_from(value)
+        .map_err(|_| ClauseError::Other(format!("{name} must be between 0 and u32::MAX")))
+}
 
 // ============================================================================
 // MiniUnvaulting — fixed clause set, so the contract! DSL applies
@@ -150,7 +157,7 @@ contract! {
             script MiniVault::trigger_script;
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
-                Ok(vec![ClauseOutput::at(a.out_i as u32)
+                Ok(vec![ClauseOutput::at(output_index(a.out_i, "out_i")?)
                     .to(unvaulting.as_erased())
                     .with_state(&MiniUnvaultingState {
                         withdrawal_pk: a.withdrawal_pk,
@@ -173,11 +180,11 @@ contract! {
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
                 Ok(vec![
-                    ClauseOutput::at(a.revault_out_i as u32)
+                    ClauseOutput::at(output_index(a.revault_out_i, "revault_out_i")?)
                         .to(MiniVault::new(p.clone())?.as_erased())
                         .deduct_amount()
                         .build(),
-                    ClauseOutput::at(a.out_i as u32)
+                    ClauseOutput::at(output_index(a.out_i, "out_i")?)
                         .to(unvaulting.as_erased())
                         .with_state(&MiniUnvaultingState {
                             withdrawal_pk: a.withdrawal_pk,

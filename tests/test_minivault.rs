@@ -9,7 +9,8 @@
 mod support;
 
 use bitcoin::{Amount, TxOut, XOnlyPublicKey};
-use mattrs::manager::ContractManager;
+use mattrs::contracts::ClauseError;
+use mattrs::manager::{ContractManager, ManagerError};
 use mattrs::report::Report;
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
@@ -124,6 +125,28 @@ fn test_minivault_trigger_commits_unvaulting_state() {
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, expected);
     assert_eq!(tx.output[0].value, Amount::from_sat(100_000));
+}
+
+#[test]
+fn test_minivault_rejects_negative_output_indices() {
+    let params = make_params(true, false);
+    let handle = try_handle::<MiniVaultHandle>(fund_fake(
+        MiniVault::new(params).unwrap().as_erased(),
+        None,
+        100_000,
+        8,
+    ));
+    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
+
+    let err = handle
+        .trigger_and_revault(withdrawal_pk(), 0, -1)
+        .build_tx(&manager)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ManagerError::ClauseError(ClauseError::Other(message))
+            if message.contains("revault_out_i")
+    ));
 }
 
 // ----------------------------------------------------------------------------

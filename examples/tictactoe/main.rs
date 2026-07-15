@@ -42,7 +42,7 @@ use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
 use mattrs::contracts::ErasedState;
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{RpcChain, Runner};
+use mattrs::protocol::{ProtocolError, RpcChain, Runner};
 
 use contracts::roles::{PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role};
 use contracts::{
@@ -97,11 +97,16 @@ fn prompt_strategy() -> Strategy {
         let stdin = std::io::stdin();
         loop {
             print!("Your move [0-8]: ");
-            std::io::stdout().flush().unwrap();
+            std::io::stdout()
+                .flush()
+                .map_err(|e| ProtocolError::Other(format!("failed to flush the prompt: {e}")))?;
             let mut line = String::new();
-            stdin.lock().read_line(&mut line).unwrap();
+            stdin
+                .lock()
+                .read_line(&mut line)
+                .map_err(|e| ProtocolError::Other(format!("failed to read a move: {e}")))?;
             match line.trim().parse::<usize>() {
-                Ok(cell) if cell < 9 && board[cell] == EMPTY => return cell,
+                Ok(cell) if cell < 9 && board[cell] == EMPTY => return Ok(cell),
                 _ => println!("Invalid or taken cell — pick an empty one from the grid."),
             }
         }
@@ -147,6 +152,24 @@ fn pubkey_of(value: &serde_json::Value, key: &str) -> AppResult<XOnlyPublicKey> 
     )?)
 }
 
+fn u32_field(value: &serde_json::Value, key: &str) -> AppResult<u32> {
+    let value = value
+        .get(key)
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| format!("missing or invalid '{key}' in peer message"))?;
+    Ok(u32::try_from(value).map_err(|_| format!("'{key}' exceeds u32::MAX"))?)
+}
+
+fn validate_terms(stake: i64, timeout_blocks: u32) -> AppResult {
+    if stake <= 0 || stake > i64::MAX / 2 {
+        return Err("stake must be positive and small enough to double".into());
+    }
+    if timeout_blocks == 0 {
+        return Err("timeout must be at least one block".into());
+    }
+    Ok(())
+}
+
 // ----------------------------------------------------------------------------
 // Alice: proposes the game, funds it, plays X
 // ----------------------------------------------------------------------------
@@ -158,6 +181,7 @@ fn run_alice(
     timeout_blocks: u32,
     inspector: Option<u16>,
 ) -> AppResult {
+    validate_terms(stake, timeout_blocks)?;
     let xpriv = Xpriv::from_str(ALICE_XPRIV)?;
     let pk_a = xonly(&xpriv);
 
@@ -231,10 +255,8 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
         .get("stake")
         .and_then(|v| v.as_i64())
         .ok_or("missing 'stake' in peer message")?;
-    let timeout_blocks = msg
-        .get("timeout_blocks")
-        .and_then(|v| v.as_u64())
-        .ok_or("missing 'timeout_blocks' in peer message")? as u32;
+    let timeout_blocks = u32_field(&msg, "timeout_blocks")?;
+    validate_terms(stake, timeout_blocks)?;
     println!("Game proposal: stake {stake} sats, forfait timeout {timeout_blocks} blocks");
     send_json(&mut stream, serde_json::json!({ "pk_b": pk_b.to_string() }))?;
 
@@ -253,10 +275,7 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'txid' in peer message")?,
         )?,
-        vout: msg
-            .get("vout")
-            .and_then(|v| v.as_u64())
-            .ok_or("missing 'vout' in peer message")? as u32,
+        vout: u32_field(&msg, "vout")?,
     };
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);

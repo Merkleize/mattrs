@@ -85,12 +85,11 @@ impl TimeLock {
 // Demo
 // ============================================================================
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Demo keys (never use these on mainnet).
     let owner_xpriv = Xpriv::from_str(
         "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
-    )
-    .unwrap();
+    )?;
     let owner_signer = HotSigner::new(owner_xpriv);
     let owner_pk = {
         use mattrs::signer::Signer;
@@ -98,8 +97,7 @@ fn main() {
     };
     let recover_pk = XOnlyPublicKey::from_str(
         "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
-    )
-    .unwrap();
+    )?;
 
     // 1. Instantiate the contract and derive its address.
     let params = TimeLockParams {
@@ -107,7 +105,7 @@ fn main() {
         recover_pk,
         delay: 10,
     };
-    let timelock = TimeLock::new(params.clone()).expect("TimeLock contract definition is valid");
+    let timelock = TimeLock::new(params.clone())?;
     println!(
         "TimeLock address (regtest): {}",
         timelock.address(bitcoin::Network::Regtest)
@@ -117,9 +115,7 @@ fn main() {
     //    `mattrs::testutil`); against a real node you would use
     //    `timelock.fund(&mut manager, amount)` instead.
     let handle: TimeLockHandle =
-        fund_fake(timelock.as_erased(), None, Amount::from_sat(100_000), 1)
-            .try_into()
-            .unwrap();
+        fund_fake(timelock.as_erased(), None, Amount::from_sat(100_000), 1).try_into()?;
 
     // 3. Build the withdraw spend. The signature argument is filled automatically
     //    from the registered signer — no placeholder is ever written by hand.
@@ -127,7 +123,7 @@ fn main() {
     let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     let dest = bitcoin::Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")
-        .unwrap()
+        ?
         .assume_checked();
     let tx = handle
         .withdraw()
@@ -137,8 +133,7 @@ fn main() {
             script_pubkey: dest.script_pubkey(),
             value: Amount::from_sat(99_000),
         }])
-        .build_tx(&manager)
-        .unwrap();
+        .build_tx(&manager)?;
 
     println!(
         "withdraw tx: {}",
@@ -149,6 +144,12 @@ fn main() {
         tx.input[0].witness.len()
     );
     assert_eq!(tx.input[0].witness.len(), 3);
-    assert!(!tx.input[0].witness.iter().next().unwrap().is_empty());
+    assert!(!tx.input[0]
+        .witness
+        .iter()
+        .next()
+        .ok_or("the signed witness is empty")?
+        .is_empty());
     println!("done — the signature was auto-filled and the spend is fully signed.");
+    Ok(())
 }

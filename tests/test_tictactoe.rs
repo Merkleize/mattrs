@@ -19,7 +19,7 @@ use std::time::Duration;
 use bitcoin::{Amount, Sequence};
 use mattrs::contracts::ContractState;
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{LocalChain, Runner};
+use mattrs::protocol::{LocalChain, ProtocolError, Runner};
 use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
@@ -231,7 +231,33 @@ fn illegal_moves_are_rejected_when_building() {
 /// A strategy playing a fixed sequence of cells.
 fn scripted(moves: &[usize]) -> Strategy {
     let mut moves = Box::<[usize]>::from(moves).into_iter();
-    Box::new(move |_board| moves.next().expect("the scripted game should be over"))
+    Box::new(move |_board| {
+        Ok(moves
+            .next()
+            .expect("the scripted game should be over"))
+    })
+}
+
+#[test]
+fn strategy_errors_propagate_from_the_role() {
+    let chain = Rc::new(LocalChain::new());
+    let entry = funded_game(TttState::initial());
+    let mut runner = Runner::new(
+        offline_manager(),
+        chain,
+        alice_role(),
+        PlayerData {
+            xpriv: alice_xpriv(),
+            strategy: Box::new(|_| Err(ProtocolError::Other("input closed".to_string()))),
+        },
+        entry.handle().clone(),
+    );
+
+    let err = runner.step().unwrap_err();
+    assert!(matches!(
+        err,
+        ProtocolError::Other(message) if message == "input closed"
+    ));
 }
 
 /// Twin runners over the same fake-funded game and a shared chain. The two

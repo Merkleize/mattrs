@@ -112,6 +112,14 @@ fn hex32(value: &serde_json::Value, key: &str) -> AppResult<[u8; 32]> {
         .map_err(|_| format!("'{}' is not 32 bytes", key))?)
 }
 
+fn u32_field(value: &serde_json::Value, key: &str) -> AppResult<u32> {
+    let value = value
+        .get(key)
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| format!("missing or invalid '{key}' in peer message"))?;
+    Ok(u32::try_from(value).map_err(|_| format!("'{key}' exceeds u32::MAX"))?)
+}
+
 // ----------------------------------------------------------------------------
 // Alice: commits to a hidden move, funds the game, adjudicates
 // ----------------------------------------------------------------------------
@@ -220,10 +228,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
                 .and_then(|v| v.as_str())
                 .ok_or("missing 'txid' in peer message")?,
         )?,
-        vout: msg
-            .get("vout")
-            .and_then(|v| v.as_u64())
-            .ok_or("missing 'vout' in peer message")? as u32,
+        vout: u32_field(&msg, "vout")?,
     };
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);

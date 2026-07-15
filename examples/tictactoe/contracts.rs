@@ -615,7 +615,7 @@ pub mod roles {
 
     /// How a player picks the next cell, given the board. Tests inject
     /// scripted sequences; the demo injects a stdin prompt.
-    pub type Strategy = Box<dyn FnMut(&[u8; 9]) -> usize>;
+    pub type Strategy = Box<dyn FnMut(&[u8; 9]) -> Result<usize, ProtocolError>>;
 
     /// A player's private side: their key and their move-picking strategy.
     pub struct PlayerData {
@@ -700,7 +700,7 @@ pub mod roles {
                             },
                         ));
                     }
-                    let cell = (d.strategy)(&s.board);
+                    let cell = (d.strategy)(&s.board)?;
                     if cell >= 9 || s.board[cell] != EMPTY {
                         return Err(ProtocolError::Other(format!(
                             "the strategy chose an invalid cell ({cell})"
