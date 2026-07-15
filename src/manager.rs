@@ -60,6 +60,31 @@ fn poll_until<T>(
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct ContractOutputIdentity {
+    contract_type: std::any::TypeId,
+    params: Vec<u8>,
+    state: Option<Vec<u8>>,
+}
+
+impl ContractOutputIdentity {
+    fn from_clause_output(output: &ClauseOutput) -> Self {
+        Self {
+            contract_type: output.next_contract.contract_type_id(),
+            params: output.next_contract.params_bytes().to_vec(),
+            state: output.committed_state_bytes(),
+        }
+    }
+
+    fn from_instance(instance: &ContractInstance) -> Self {
+        Self {
+            contract_type: instance.contract().contract_type_id(),
+            params: instance.contract().params_bytes().to_vec(),
+            state: instance.committed_state_bytes(),
+        }
+    }
+}
+
 /// Error type for manager operations.
 #[derive(Debug)]
 pub enum ManagerError {
@@ -111,6 +136,17 @@ pub enum ManagerError {
     UnusedOutputAmount {
         index: u32,
     },
+    /// Contributions merged at one output index describe different nominal
+    /// contracts, parameters, or committed states.
+    ConflictingOutputContract {
+        index: u32,
+    },
+    /// A clause describes a child at an output that the observed transaction
+    /// does not contain.
+    MissingContractOutput(OutPoint),
+    /// A clause's derived child script does not match the corresponding output
+    /// in the observed transaction.
+    WrongContractOutput(OutPoint),
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
@@ -191,6 +227,21 @@ impl std::fmt::Display for ManagerError {
                 f,
                 "An amount was set for output index {}, but no DeductOutput uses it",
                 index
+            ),
+            ManagerError::ConflictingOutputContract { index } => write!(
+                f,
+                "Output index {} merges different contracts, parameters, or states",
+                index
+            ),
+            ManagerError::MissingContractOutput(outpoint) => write!(
+                f,
+                "The observed transaction has no contract output at {}",
+                outpoint
+            ),
+            ManagerError::WrongContractOutput(outpoint) => write!(
+                f,
+                "The observed output at {} does not pay the clause's child contract",
+                outpoint
             ),
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
@@ -614,6 +665,7 @@ impl ContractManager {
             Deduct,
         }
         let mut semantics: BTreeMap<u32, Semantics> = BTreeMap::new();
+        let mut identities: BTreeMap<u32, ContractOutputIdentity> = BTreeMap::new();
         let mut outputs_map: BTreeMap<u32, TxOut> = BTreeMap::new();
         for (input_index, next) in nexts.iter().enumerate() {
             let clause_outputs = match next {
@@ -627,6 +679,14 @@ impl ContractManager {
             let mut preserve_used = false;
             for clause_output in clause_outputs {
                 let idx = clause_output.index.resolve(input_index);
+                let identity = ContractOutputIdentity::from_clause_output(clause_output);
+                if identities
+                    .get(&idx)
+                    .is_some_and(|previous| previous != &identity)
+                {
+                    return Err(ManagerError::ConflictingOutputContract { index: idx });
+                }
+                identities.entry(idx).or_insert(identity);
                 let script_pubkey = clause_output
                     .next_contract
                     .script_pubkey(clause_output.committed_state_bytes().as_deref())?;
@@ -848,11 +908,44 @@ impl ContractManager {
         vin: usize,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, ManagerError> {
         let txid = spending_tx.compute_txid();
-        let mut children = Vec::new();
+        let mut resolved = Vec::with_capacity(outputs.len());
+        let mut identities = BTreeMap::new();
 
         for clause_out in outputs {
             let vout = clause_out.index.resolve(vin);
             let outpoint = OutPoint { txid, vout };
+            let identity = ContractOutputIdentity::from_clause_output(clause_out);
+            if identities
+                .get(&vout)
+                .is_some_and(|previous| previous != &identity)
+            {
+                return Err(ManagerError::ConflictingOutputContract { index: vout });
+            }
+            identities.entry(vout).or_insert(identity);
+            let actual = spending_tx
+                .output
+                .get(vout as usize)
+                .ok_or(ManagerError::MissingContractOutput(outpoint))?;
+            let expected_script = clause_out
+                .next_contract
+                .script_pubkey(clause_out.committed_state_bytes().as_deref())?;
+            if actual.script_pubkey != expected_script {
+                return Err(ManagerError::WrongContractOutput(outpoint));
+            }
+
+            if let Some(existing) = self.find_instance_by_outpoint(outpoint) {
+                let existing = existing.borrow();
+                if ContractOutputIdentity::from_instance(&existing)
+                    != ContractOutputIdentity::from_clause_output(clause_out)
+                {
+                    return Err(ManagerError::ConflictingOutputContract { index: vout });
+                }
+            }
+            resolved.push((clause_out, outpoint));
+        }
+
+        let mut children = Vec::with_capacity(resolved.len());
+        for (clause_out, outpoint) in resolved {
 
             let child = match self.find_instance_by_outpoint(outpoint) {
                 Some(existing) => existing,
@@ -1017,15 +1110,6 @@ impl ContractManager {
             (clause.name().to_string(), next)
         };
 
-        if !already_spent {
-            handle.instance.borrow_mut().mark_spent(
-                spending_tx.clone(),
-                vin,
-                clause_name,
-                witness_args,
-            );
-        }
-
         let children = match &next {
             // A re-observed instance with no cached children got here only to
             // retry a join link; its (childless) non-join clause has nothing
@@ -1050,6 +1134,15 @@ impl ContractManager {
                 }
             }
         };
+
+        if !already_spent {
+            handle.instance.borrow_mut().mark_spent(
+                spending_tx.clone(),
+                vin,
+                clause_name,
+                witness_args,
+            );
+        }
 
         #[cfg(feature = "inspector")]
         self.notify_inspector();
@@ -1686,6 +1779,13 @@ mod tests {
         tag: i64,
         next_outputs_fn: Option<NextOutputsFn<(), (), RawArgs>>,
     ) -> Arc<dyn ErasedContract> {
+        test_contract_with_identity::<StandardP2TR<()>>(tag, next_outputs_fn)
+    }
+
+    fn test_contract_with_identity<I: 'static>(
+        tag: i64,
+        next_outputs_fn: Option<NextOutputsFn<(), (), RawArgs>>,
+    ) -> Arc<dyn ErasedContract> {
         let script = bitcoin::script::Builder::new()
             .push_int(tag)
             .push_opcode(bitcoin::opcodes::all::OP_DROP)
@@ -1698,7 +1798,7 @@ mod tests {
             next_outputs_fn,
         );
         Arc::new(
-            StandardP2TR::new(
+            StandardP2TR::new_with_identity::<I>(
                 "Test",
                 crate::nums_key(),
                 &(),
@@ -1962,6 +2062,66 @@ mod tests {
             err,
             ManagerError::MixedOutputSemantics { index: 0 }
         ));
+    }
+
+    #[test]
+    fn merged_output_requires_one_contract_identity() {
+        struct First;
+        struct Second;
+
+        let first = test_contract_with_identity::<First>(90, None);
+        let second = test_contract_with_identity::<Second>(90, None);
+        assert_eq!(spk_of(&first), spk_of(&second));
+
+        let c1 = contract_yielding(
+            1,
+            vec![ClauseOutput::at(0).to(first).preserve_amount().build()],
+        );
+        let c2 = contract_yielding(
+            2,
+            vec![ClauseOutput::at(0).to(second).preserve_amount().build()],
+        );
+        let h1 = fund_fake(c1, None, sat(50_000), 1);
+        let h2 = fund_fake(c2, None, sat(50_000), 2);
+
+        let err = offline_manager()
+            .build_batch_tx(&[spend(&h1), spend(&h2)])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ManagerError::ConflictingOutputContract { index: 0 }
+        ));
+    }
+
+    #[test]
+    fn observation_validates_child_outputs_before_marking_spent() {
+        let destination = test_contract(90, None);
+        let parent = contract_yielding(
+            1,
+            vec![
+                ClauseOutput::at(0)
+                    .to(destination)
+                    .preserve_amount()
+                    .build(),
+            ],
+        );
+        let handle = fund_fake(parent, None, sat(50_000), 1);
+        let mut manager = offline_manager();
+        let valid = spend(&handle).build_tx(&manager).unwrap();
+
+        let mut wrong_script = valid.clone();
+        wrong_script.output[0].script_pubkey = ScriptBuf::new();
+        let err = manager.observe_spend(&handle, &wrong_script).unwrap_err();
+        assert!(matches!(err, ManagerError::WrongContractOutput(_)));
+        assert_eq!(handle.status(), InstanceStatus::Funded);
+        assert!(handle.outputs().is_empty());
+
+        let mut missing = valid;
+        missing.output.clear();
+        let err = manager.observe_spend(&handle, &missing).unwrap_err();
+        assert!(matches!(err, ManagerError::MissingContractOutput(_)));
+        assert_eq!(handle.status(), InstanceStatus::Funded);
+        assert!(handle.outputs().is_empty());
     }
 
     #[test]
