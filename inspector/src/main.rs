@@ -50,30 +50,27 @@ fn main() -> io::Result<()> {
     let host = args.host.clone();
     let port = args.port;
     std::thread::spawn(move || loop {
-        match TcpStream::connect(format!("{}:{}", host, port)) {
-            Ok(stream) => {
-                {
-                    let mut s = net_state.lock().unwrap();
-                    s.connected = true;
-                }
-                let reader = BufReader::new(stream);
-                for line in reader.lines() {
-                    match line {
-                        Ok(line) => {
-                            if let Ok(snap) = serde_json::from_str::<ManagerSnapshot>(&line) {
-                                let mut s = net_state.lock().unwrap();
-                                s.snapshot = Some(snap);
-                            }
+        if let Ok(stream) = TcpStream::connect(format!("{host}:{port}")) {
+            {
+                let mut state = net_state.lock().unwrap();
+                state.connected = true;
+            }
+            let reader = BufReader::new(stream);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) => {
+                        if let Ok(snapshot) = serde_json::from_str::<ManagerSnapshot>(&line) {
+                            let mut state = net_state.lock().unwrap();
+                            state.snapshot = Some(snapshot);
                         }
-                        Err(_) => break,
                     }
-                }
-                {
-                    let mut s = net_state.lock().unwrap();
-                    s.connected = false;
+                    Err(_) => break,
                 }
             }
-            Err(_) => {}
+            {
+                let mut state = net_state.lock().unwrap();
+                state.connected = false;
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
     });
