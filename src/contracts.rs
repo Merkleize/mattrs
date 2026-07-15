@@ -2057,8 +2057,9 @@ pub enum InstanceStatus {
 ///
 /// Instances track the lifecycle of a contract from creation through funding to spending,
 /// and maintain references to child instances created when spent. Fields are private so
-/// the lifecycle invariants (status vs. outpoint/funding tx) cannot be corrupted; use
-/// the accessors and [`mark_funded`](Self::mark_funded) / [`mark_spent`](Self::mark_spent).
+/// the lifecycle invariants (status vs. outpoint/funding transaction) cannot be corrupted;
+/// callers inspect instances through the public accessors, while the manager owns lifecycle
+/// transitions.
 #[derive(Debug)]
 pub struct ContractInstance {
     /// The contract template (type-erased for runtime polymorphism).

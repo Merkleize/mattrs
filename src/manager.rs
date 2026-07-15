@@ -1122,8 +1122,11 @@ impl ContractManager {
             })?;
 
         // Split the script-path witness and identify the clause by its tapscript.
-        let (witness_args, leaf_script, control_block) =
-            parse_script_path_witness(&spending_tx.input[vin].witness)?;
+        let ParsedScriptPathWitness {
+            args: witness_args,
+            leaf_script,
+            control_block,
+        } = parse_script_path_witness(&spending_tx.input[vin].witness)?;
         let (clause_name, next) = {
             let inst = handle.instance.borrow();
             let clause = inst
@@ -1573,9 +1576,16 @@ fn validate_observed_contract_amounts(
 
 /// Split a taproot script-path witness into its clause arguments and the leaf
 /// script and control block, dropping the annex if present.
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedScriptPathWitness {
+    args: Vec<Vec<u8>>,
+    leaf_script: Vec<u8>,
+    control_block: Vec<u8>,
+}
+
 fn parse_script_path_witness(
     witness: &bitcoin::Witness,
-) -> Result<(Vec<Vec<u8>>, Vec<u8>, Vec<u8>), ManagerError> {
+) -> Result<ParsedScriptPathWitness, ManagerError> {
     let elements: Vec<Vec<u8>> = witness.iter().map(|e| e.to_vec()).collect();
     let mut n = elements.len();
     // BIP341: with at least two elements, a last element starting with 0x50 is
@@ -1591,7 +1601,11 @@ fn parse_script_path_witness(
     let leaf_script = elements[n - 2].clone();
     let control_block = elements[n - 1].clone();
     let args = elements[..n - 2].to_vec();
-    Ok((args, leaf_script, control_block))
+    Ok(ParsedScriptPathWitness {
+        args,
+        leaf_script,
+        control_block,
+    })
 }
 
 /// Error returned when converting an [`InstanceHandle`] into a typed per-contract
@@ -2692,10 +2706,10 @@ mod tests {
         // args + script + control block
         let witness =
             bitcoin::Witness::from_slice(&[arg.clone(), script.clone(), control_block.clone()]);
-        let (args, leaf, control) = parse_script_path_witness(&witness).unwrap();
-        assert_eq!(args, vec![arg.clone()]);
-        assert_eq!(leaf, script);
-        assert_eq!(control, control_block);
+        let parsed = parse_script_path_witness(&witness).unwrap();
+        assert_eq!(parsed.args, vec![arg.clone()]);
+        assert_eq!(parsed.leaf_script, script);
+        assert_eq!(parsed.control_block, control_block);
 
         // ... with a trailing annex: the annex is dropped.
         let annex = vec![0x50u8, 0xff];
@@ -2705,16 +2719,16 @@ mod tests {
             control_block.clone(),
             annex.clone(),
         ]);
-        let (args, leaf, control) = parse_script_path_witness(&witness).unwrap();
-        assert_eq!(args, vec![arg]);
-        assert_eq!(leaf, script);
-        assert_eq!(control, control_block);
+        let parsed = parse_script_path_witness(&witness).unwrap();
+        assert_eq!(parsed.args, vec![arg]);
+        assert_eq!(parsed.leaf_script, script);
+        assert_eq!(parsed.control_block, control_block);
 
         // a zero-argument clause: just script + control block.
         let witness = bitcoin::Witness::from_slice(&[script.clone(), control_block]);
-        let (args, leaf, _) = parse_script_path_witness(&witness).unwrap();
-        assert!(args.is_empty());
-        assert_eq!(leaf, script);
+        let parsed = parse_script_path_witness(&witness).unwrap();
+        assert!(parsed.args.is_empty());
+        assert_eq!(parsed.leaf_script, script);
 
         // Key-path spends (with or without an annex) carry no tapscript.
         let sig = vec![0xaau8; 64];
