@@ -6,13 +6,14 @@
 //! of the regtest end-to-end tests.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::Path;
 
+use bitcoin::Transaction;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hex::DisplayHex;
-use bitcoin::Transaction;
 
 /// Format a transaction as a collapsible markdown `<details>` block.
 pub fn format_tx_markdown(tx: &Transaction, title: &str) -> String {
@@ -23,27 +24,31 @@ pub fn format_tx_markdown(tx: &Transaction, title: &str) -> String {
         "CTransaction: (nVersion={}, {} bytes)\n",
         tx.version.0, raw_bytes
     );
-    s += "  vin:\n";
+    s.push_str("  vin:\n");
     for (i, inp) in tx.input.iter().enumerate() {
-        s += &format!(
-            "    - [{}] CTxIn(prevout=COutPoint(hash={} n={}) scriptSig={} nSequence={})\n",
+        writeln!(
+            &mut s,
+            "    - [{}] CTxIn(prevout=COutPoint(hash={} n={}) scriptSig={} nSequence={})",
             i,
             inp.previous_output.txid,
             inp.previous_output.vout,
             inp.script_sig.to_hex_string(),
             inp.sequence.0,
-        );
+        )
+        .expect("writing to a String cannot fail");
     }
-    s += "  vout:\n";
+    s.push_str("  vout:\n");
     for (i, out) in tx.output.iter().enumerate() {
-        s += &format!(
-            "    - [{}] CTxOut(nValue={:.8} scriptPubKey={})\n",
+        writeln!(
+            &mut s,
+            "    - [{}] CTxOut(nValue={:.8} scriptPubKey={})",
             i,
             out.value.to_btc(),
             out.script_pubkey.to_hex_string(),
-        );
+        )
+        .expect("writing to a String cannot fail");
     }
-    s += "  witnesses:\n";
+    s.push_str("  witnesses:\n");
     for (i, inp) in tx.input.iter().enumerate() {
         let items = inp.witness.to_vec();
         let wit_bytes: usize = items
@@ -51,18 +56,22 @@ pub fn format_tx_markdown(tx: &Transaction, title: &str) -> String {
             .map(|item| if item.is_empty() { 1 } else { item.len() })
             .sum();
         let wit_vb = wit_bytes as f64 / 4.0;
-        s += &format!("    - [{}] ({} bytes, {} vB)\n", i, wit_bytes, wit_vb);
+        writeln!(&mut s, "    - [{i}] ({wit_bytes} bytes, {wit_vb} vB)")
+            .expect("writing to a String cannot fail");
         for (j, item) in items.iter().enumerate() {
-            s += &format!(
-                "      - [{}.{}] ({} bytes) {}\n",
+            writeln!(
+                &mut s,
+                "      - [{}.{}] ({} bytes) {}",
                 i,
                 j,
                 item.len(),
                 item.to_lower_hex_string(),
-            );
+            )
+            .expect("writing to a String cannot fail");
         }
     }
-    s += &format!("  nLockTime: {}\n", tx.lock_time.to_consensus_u32());
+    writeln!(&mut s, "  nLockTime: {}", tx.lock_time.to_consensus_u32())
+        .expect("writing to a String cannot fail");
 
     format!(
         "\n<details><summary>{} <i>({} vB)</i></summary>\n\n```\n{}```\n\n</details>\n\n",
@@ -103,16 +112,19 @@ impl Report {
     pub fn finalize(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let mut out = String::new();
         for (section, contents) in &self.sections {
-            out += &format!("## {}\n", section);
+            writeln!(&mut out, "## {section}").expect("writing to a String cannot fail");
             for content in contents {
-                out += content;
-                out += "\n";
+                out.push_str(content);
+                out.push('\n');
             }
-            out += "\n";
+            out.push('\n');
         }
 
         let path = path.as_ref();
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)?;
         }
         fs::write(path, out)
@@ -122,6 +134,29 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_markdown_has_stable_layout() {
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+
+        assert_eq!(
+            format_tx_markdown(&tx, "empty"),
+            concat!(
+                "\n<details><summary>empty <i>(11 vB)</i></summary>\n\n```\n",
+                "CTransaction: (nVersion=2, 12 bytes)\n",
+                "  vin:\n",
+                "  vout:\n",
+                "  witnesses:\n",
+                "  nLockTime: 0\n",
+                "```\n\n</details>\n\n",
+            ),
+        );
+    }
 
     #[test]
     fn finalize_creates_parent_directories_and_writes_the_report() -> io::Result<()> {
