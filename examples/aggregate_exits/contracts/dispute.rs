@@ -920,11 +920,15 @@ impl ExitLeaf {
 
 /// The pool as it stands *before* step `k` of a claimed run: slots exited by
 /// earlier steps are zeroed.
+///
+/// # Panics
+///
+/// Panics if `k` exceeds the number of exit bits.
 pub fn pool_at_step(pool: &PoolTree, bits: &[bool], k: usize) -> PoolTree {
     let mut working = pool.clone();
-    for u in 0..k {
-        if bits[u] {
-            working.zero(u);
+    for (user_index, &exited) in bits[..k].iter().enumerate() {
+        if exited {
+            working.zero(user_index);
         }
     }
     working
