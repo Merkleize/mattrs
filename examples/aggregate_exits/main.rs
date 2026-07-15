@@ -33,6 +33,9 @@ use mattrs::signer::HotSigner;
 use contracts::fixture::*;
 use contracts::*;
 
+type DemoResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type Scenario = fn(&str) -> DemoResult;
+
 fn short(bytes: &[u8; 32]) -> String {
     bytes[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -57,7 +60,7 @@ struct Stage {
 }
 
 impl Stage {
-    fn new(wallet: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    fn new(wallet: &str) -> DemoResult<Self> {
         let params = params();
         let pool = pool();
 
@@ -84,7 +87,7 @@ impl Stage {
         })
     }
 
-    fn bond_for(&mut self, owner: &Xpriv) -> Result<ExitBondHandle, Box<dyn std::error::Error>> {
+    fn bond_for(&mut self, owner: &Xpriv) -> DemoResult<ExitBondHandle> {
         Ok(ExitBond::new(ExitBondParams {
             pool: self.params.clone(),
             owner_pk: xonly(owner),
@@ -96,7 +99,7 @@ impl Stage {
     fn claim(
         &mut self,
         claim: &ExitClaim,
-    ) -> Result<(PendingExitHandle, PendingExitState), Box<dyn std::error::Error>> {
+    ) -> DemoResult<(PendingExitHandle, PendingExitState)> {
         let bond = self.bond_for(&ingrid_xpriv())?;
         let claim_state = PendingExitState::for_claim(&self.params, claim, &self.ingrid_pk);
         let children = self.manager.spend_batch(&[
@@ -121,7 +124,7 @@ impl Stage {
         claim_state: &PendingExitState,
         challenger: &Xpriv,
         challenger_claim: &ExitClaim,
-    ) -> Result<InstanceHandle, Box<dyn std::error::Error>> {
+    ) -> DemoResult<InstanceHandle> {
         let cbond = self.bond_for(challenger)?;
         let children = self.manager.spend_batch(&[
             pending.challenge_state(challenger_claim, &xonly(challenger)),
@@ -144,7 +147,7 @@ impl Stage {
         entry: InstanceHandle,
         ingrid_hs: &[[u8; 32]],
         challenger_hs: &[[u8; 32]],
-    ) -> Result<ExitLeafHandle, Box<dyn std::error::Error>> {
+    ) -> DemoResult<ExitLeafHandle> {
         let mut current = entry;
         loop {
             let b1: ExitBisect1Handle = current.clone().try_into().unwrap();
@@ -173,7 +176,7 @@ impl Stage {
         }
     }
 
-    fn mine(&mut self, blocks: u32, why: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn mine(&mut self, blocks: u32, why: &str) -> DemoResult {
         println!("  ... {blocks} blocks pass ({why})");
         self.manager.mine_blocks(blocks as u64)?;
         Ok(())
@@ -184,7 +187,7 @@ impl Stage {
 // Scenarios
 // ============================================================================
 
-fn scenario_direct(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn scenario_direct(wallet: &str) -> DemoResult {
     println!("\n=== direct: user 2 exits with a Merkle proof ===");
     let mut stage = Stage::new(wallet)?;
 
@@ -220,7 +223,7 @@ fn scenario_direct(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn scenario_happy(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn scenario_happy(wallet: &str) -> DemoResult {
     println!("\n=== happy: users 1, 2 and 4 exit through Ingrid, unchallenged ===");
     let mut stage = Stage::new(wallet)?;
     let claim = compute_claim(&stage.pool, &exit_bits());
@@ -245,7 +248,7 @@ fn scenario_happy(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn scenario_fraud(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn scenario_fraud(wallet: &str) -> DemoResult {
     println!("\n=== fraud: Ingrid inflates the aggregate; user 0 proves it ===");
     let mut stage = Stage::new(wallet)?;
     let lie = compute_claim_with_lie(&stage.pool, &exit_bits(), Some((4, 2_000)));
@@ -280,7 +283,7 @@ fn scenario_fraud(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn scenario_false_challenge(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn scenario_false_challenge(wallet: &str) -> DemoResult {
     println!("\n=== false-challenge: a bogus challenge against an honest claim ===");
     let mut stage = Stage::new(wallet)?;
     let honest = compute_claim(&stage.pool, &exit_bits());
@@ -314,7 +317,7 @@ fn scenario_false_challenge(wallet: &str) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-fn scenario_delegation_defend(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn scenario_delegation_defend(wallet: &str) -> DemoResult {
     println!("\n=== delegation-defend: \"user 2 never delegated!\" — but they did ===");
     let mut stage = Stage::new(wallet)?;
     let honest = compute_claim(&stage.pool, &exit_bits());
@@ -360,7 +363,7 @@ fn scenario_delegation_defend(wallet: &str) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
-fn scenario_delegation_timeout(wallet: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn scenario_delegation_timeout(wallet: &str) -> DemoResult {
     println!("\n=== delegation-timeout: Ingrid claims for user 3, who never delegated ===");
     let mut stage = Stage::new(wallet)?;
     let mut bits = exit_bits();
@@ -400,7 +403,7 @@ fn scenario_delegation_timeout(wallet: &str) -> Result<(), Box<dyn std::error::E
 // Entry point
 // ============================================================================
 
-const SCENARIOS: [(&str, fn(&str) -> Result<(), Box<dyn std::error::Error>>); 6] = [
+const SCENARIOS: [(&str, Scenario); 6] = [
     ("direct", scenario_direct),
     ("happy", scenario_happy),
     ("fraud", scenario_fraud),
