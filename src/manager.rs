@@ -365,17 +365,7 @@ impl ContractManager {
 
     #[cfg(feature = "inspector")]
     fn build_snapshot(&self) -> crate::inspector::ManagerSnapshot {
-        crate::inspector::ManagerSnapshot {
-            timestamp_ms: crate::inspector::now_ms(),
-            instances: self
-                .instances
-                .iter()
-                .enumerate()
-                .map(|(i, inst)| {
-                    crate::inspector::snapshot_instance(i, &inst.borrow(), self.network)
-                })
-                .collect(),
-        }
+        crate::inspector::snapshot_instances(&self.instances, self.network)
     }
 
     /// Refresh the shared snapshot and wake the inspector's client threads.

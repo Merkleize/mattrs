@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>mattrs inspector</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark">M</span>
+      <div><h1>mattrs inspector</h1><p>Live contract graph</p></div>
+    </div>
+    <div class="status-row">
+      <span id="connection-dot" class="connection-dot"></span>
+      <span id="connection-label">Waiting for manager</span>
+      <span class="divider"></span>
+      <span id="graph-counts">0 contracts · 0 terminal UTXOs</span>
+    </div>
+  </header>
+  <main class="workspace">
+    <section class="graph-panel" aria-label="Contract instance graph">
+      <canvas id="contract-canvas" tabindex="0"></canvas>
+      <div class="toolbar">
+        <button id="fit-button" type="button" title="Fit graph in view">Fit</button>
+        <button id="reset-button" type="button" title="Reset layout">Reset layout</button>
+      </div>
+      <div class="legend" aria-label="Graph legend">
+        <span><i class="swatch funded"></i>Funded</span>
+        <span><i class="swatch spent"></i>Spent</span>
+        <span><i class="swatch terminal"></i>Terminal UTXO</span>
+      </div>
+      <div id="empty-state" class="empty-state">
+        <strong>Waiting for contract instances</strong>
+        <span>The graph updates as the manager funds and spends contracts.</span>
+      </div>
+    </section>
+    <aside id="detail-panel" class="detail-panel">
+      <div class="detail-empty">
+        <span class="detail-icon">↖</span>
+        <strong>Select a node</strong>
+        <p>Click a contract instance or terminal UTXO to inspect it.</p>
+      </div>
+    </aside>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

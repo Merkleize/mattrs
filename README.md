@@ -231,14 +231,23 @@ cargo run --example aggregate_exits -- --scenario fraud
 
 **Live inspector** — the rps and vault demos take `--inspector` (or `--inspector-port <P>`)
 when built with the `inspector` feature: the manager then serves a JSON snapshot
-of every tracked instance over TCP on each state change, and the
-`mattrs-inspector` workspace crate renders it as a live TUI (instance table +
-detail pane). In two terminals:
+of every tracked instance over TCP on each state change. The `mattrs-inspector`
+workspace crate serves an interactive browser graph at `http://127.0.0.1:34444`:
+contract instances point to the instances and terminal UTXOs created by their
+spends, and selecting a node opens its contract and transaction details. In two
+terminals:
 
 ```sh
 cargo run --example vault --features inspector -- --inspector
-cargo run -p mattrs-inspector       # or: nc localhost 34443
+cargo run -p mattrs-inspector       # then open http://127.0.0.1:34444
 ```
+
+The browser bridge reconnects automatically and retains the last snapshot while
+the manager is unavailable. Its history covers the current manager run only;
+terminal outputs are leaves and are not monitored for later external spends.
+Use `--listen <ADDR>` to change the web listener (it has no authentication, so
+the loopback default is recommended). The raw snapshot stream remains available
+with `nc localhost 34443`.
 
 ## Spend-API features
 

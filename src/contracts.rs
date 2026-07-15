@@ -1615,6 +1615,15 @@ pub trait ErasedContract: Debug + Send + Sync {
         None
     }
 
+    /// A human-readable representation of the typed parameters, when available.
+    ///
+    /// This is intended for diagnostic tools such as the live inspector. The
+    /// encoded bytes from [`params_bytes`](Self::params_bytes) remain the exact,
+    /// round-trippable representation.
+    fn params_debug(&self) -> Option<String> {
+        None
+    }
+
     /// Get a clause by name.
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>>;
 
@@ -1686,6 +1695,8 @@ struct P2trContractCore {
     /// The typed params value behind `params_bytes`, so typed handles read
     /// them back without a decode round-trip (see [`ErasedContract::params_any`]).
     params_any: Arc<dyn std::any::Any + Send + Sync>,
+    /// Pretty `Debug` output retained for type-erased inspection.
+    params_debug: String,
 }
 
 impl P2trContractCore {
@@ -1706,6 +1717,7 @@ impl P2trContractCore {
             clauses,
             params_bytes: params.encode(),
             params_any: Arc::new(params.clone()),
+            params_debug: format!("{params:#?}"),
         })
     }
 
@@ -1817,6 +1829,10 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
 
     fn params_any(&self) -> Option<&dyn std::any::Any> {
         Some(self.core.params_any.as_ref())
+    }
+
+    fn params_debug(&self) -> Option<String> {
+        Some(self.core.params_debug.clone())
     }
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
@@ -1986,6 +2002,10 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
 
     fn params_any(&self) -> Option<&dyn std::any::Any> {
         Some(self.core.params_any.as_ref())
+    }
+
+    fn params_debug(&self) -> Option<String> {
+        Some(self.core.params_debug.clone())
     }
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {

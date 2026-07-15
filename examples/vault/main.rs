@@ -14,11 +14,11 @@
 //! ```
 //!
 //! With `--inspector` (and a build with `--features inspector`) the manager
-//! also serves live state snapshots for the `mattrs-inspector` TUI:
+//! also serves live state snapshots for the `mattrs-inspector` browser GUI:
 //!
 //! ```sh
 //! cargo run --example vault --features inspector -- --inspector
-//! cargo run -p mattrs-inspector
+//! cargo run -p mattrs-inspector # open http://127.0.0.1:34444
 //! ```
 //!
 //! Commands:

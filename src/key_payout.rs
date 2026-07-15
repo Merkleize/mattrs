@@ -63,6 +63,10 @@ impl ErasedContract for KeyPayout {
         &self.params_bytes
     }
 
+    fn params_debug(&self) -> Option<String> {
+        Some(format!("output_key: {}", self.pk))
+    }
+
     fn get_clause(&self, _name: &str) -> Option<&Arc<dyn ErasedClause>> {
         None
     }

@@ -1,334 +1,276 @@
-//! Real-time TUI for a `mattrs` manager's state.
-//!
-//! Connects to the TCP snapshot server a `ContractManager` starts when
-//! `enable_inspector` is called (the `inspector` feature of `mattrs`), and
-//! renders the instance table live: one row per contract instance, with a
-//! detail pane for the selected one. Reconnects automatically.
+//! Local browser bridge for a `mattrs` manager's live inspector snapshots.
 
-use std::io::{self, BufRead, BufReader};
-use std::net::TcpStream;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use crossterm::ExecutableCommand;
-use mattrs::inspector::{InstanceSnapshot, ManagerSnapshot};
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
+use mattrs::inspector::ManagerSnapshot;
+use serde::Serialize;
 
-#[derive(Parser)]
+const INDEX_HTML: &str = include_str!("../web/index.html");
+const APP_JS: &str = include_str!("../web/app.js");
+const STYLE_CSS: &str = include_str!("../web/style.css");
+
+#[derive(Parser, Debug)]
 #[command(
     name = "mattrs-inspector",
-    about = "Real-time TUI for mattrs manager state"
+    about = "Browser graph inspector for a live mattrs manager"
 )]
 struct Args {
-    /// Host to connect to
+    /// Manager inspector host to connect to.
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
-    /// Port to connect to
+    /// Manager inspector TCP port to connect to.
     #[arg(long, default_value_t = 34443)]
     port: u16,
+    /// Address on which to serve the browser interface.
+    #[arg(long, default_value = "127.0.0.1:34444")]
+    listen: SocketAddr,
 }
 
-#[derive(Clone)]
-struct AppState {
-    snapshot: Option<ManagerSnapshot>,
+#[derive(Clone, Serialize)]
+struct BrowserState {
     connected: bool,
+    snapshot: Option<ManagerSnapshot>,
 }
 
-fn lock_app(state: &Mutex<AppState>) -> MutexGuard<'_, AppState> {
-    state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+struct VersionedState {
+    browser: BrowserState,
+    revision: u64,
 }
 
-struct TerminalCleanup;
+struct SharedState {
+    state: Mutex<VersionedState>,
+    changed: Condvar,
+}
 
-impl TerminalCleanup {
-    fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        if let Err(error) = io::stdout().execute(EnterAlternateScreen) {
-            let _ = disable_raw_mode();
-            return Err(error);
+impl SharedState {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(VersionedState {
+                browser: BrowserState {
+                    connected: false,
+                    snapshot: None,
+                },
+                revision: 0,
+            }),
+            changed: Condvar::new(),
         }
-        Ok(Self)
     }
-}
 
-impl Drop for TerminalCleanup {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        let _ = io::stdout().execute(LeaveAlternateScreen);
+    fn lock(&self) -> MutexGuard<'_, VersionedState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_connected(&self, connected: bool) {
+        let mut state = self.lock();
+        if state.browser.connected != connected {
+            state.browser.connected = connected;
+            state.revision = state.revision.wrapping_add(1);
+            self.changed.notify_all();
+        }
+    }
+
+    fn set_snapshot(&self, snapshot: ManagerSnapshot) {
+        let mut state = self.lock();
+        state.browser.snapshot = Some(snapshot);
+        state.revision = state.revision.wrapping_add(1);
+        self.changed.notify_all();
     }
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+    let shared = Arc::new(SharedState::new());
+    spawn_manager_reader(Arc::clone(&shared), args.host.clone(), args.port);
 
-    let state = Arc::new(Mutex::new(AppState {
-        snapshot: None,
-        connected: false,
-    }));
+    let listener = TcpListener::bind(args.listen)?;
+    println!("mattrs inspector: http://{}", listener.local_addr()?);
+    println!("manager snapshots:  {}:{}", args.host, args.port);
 
-    // Network thread
-    let net_state = Arc::clone(&state);
-    let host = args.host.clone();
-    let port = args.port;
-    std::thread::spawn(move || loop {
-        if let Ok(stream) = TcpStream::connect(format!("{host}:{port}")) {
-            {
-                let mut state = lock_app(&net_state);
-                state.connected = true;
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let shared = Arc::clone(&shared);
+                std::thread::spawn(move || {
+                    let _ = handle_http(stream, &shared);
+                });
             }
-            let reader = BufReader::new(stream);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        if let Ok(snapshot) = serde_json::from_str::<ManagerSnapshot>(&line) {
-                            let mut state = lock_app(&net_state);
-                            state.snapshot = Some(snapshot);
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            {
-                let mut state = lock_app(&net_state);
-                state.connected = false;
-            }
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    });
-
-    // Terminal setup
-    let _cleanup = TerminalCleanup::enter()?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-
-    let mut table_state = TableState::default();
-
-    loop {
-        let app = lock_app(&state).clone();
-        clamp_selection(
-            &mut table_state,
-            app.snapshot
-                .as_ref()
-                .map_or(0, |snapshot| snapshot.instances.len()),
-        );
-
-        terminal.draw(|f| {
-            ui(f, &app, &mut table_state);
-        })?;
-
-        if event::poll(Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        let i = table_state.selected().unwrap_or(0);
-                        table_state.select(Some(i.saturating_sub(1)));
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        let count = app
-                            .snapshot
-                            .as_ref()
-                            .map(|s| s.instances.len())
-                            .unwrap_or(0);
-                        let i = table_state.selected().unwrap_or(0);
-                        if count > 0 {
-                            table_state.select(Some((i + 1).min(count - 1)));
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            Err(error) => eprintln!("inspector HTTP accept error: {error}"),
         }
     }
-
     Ok(())
 }
 
-fn clamp_selection(state: &mut TableState, count: usize) {
-    if count == 0 {
-        state.select(None);
-    } else if let Some(selected) = state.selected() {
-        state.select(Some(selected.min(count - 1)));
-    }
-}
-
-fn status_color(status: &str) -> Color {
-    match status {
-        "Unfunded" => Color::Yellow,
-        "Funded" => Color::Green,
-        "Spent" => Color::DarkGray,
-        _ => Color::White,
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else if max <= 3 {
-        ".".repeat(max)
-    } else {
-        format!("{}...", s.chars().take(max - 3).collect::<String>())
-    }
-}
-
-fn ui(f: &mut Frame, app: &AppState, table_state: &mut TableState) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),  // header
-            Constraint::Min(5),     // table
-            Constraint::Length(12), // detail
-        ])
-        .split(f.area());
-
-    // Header
-    let conn_status = if app.connected {
-        "Connected"
-    } else {
-        "Disconnected"
-    };
-    let conn_color = if app.connected {
-        Color::Green
-    } else {
-        Color::Red
-    };
-    let instance_count = app
-        .snapshot
-        .as_ref()
-        .map(|s| s.instances.len())
-        .unwrap_or(0);
-
-    let header = Line::from(vec![
-        Span::styled(
-            "mattrs inspector",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("    "),
-        Span::styled(conn_status, Style::default().fg(conn_color)),
-        Span::raw(format!("    {} instances", instance_count)),
-    ]);
-    f.render_widget(Paragraph::new(header), chunks[0]);
-
-    // Table
-    let header_row = Row::new(vec![
-        Cell::from("#"),
-        Cell::from("Contract"),
-        Cell::from("Status"),
-        Cell::from("Outpoint"),
-        Cell::from("Amount"),
-    ])
-    .style(Style::default().add_modifier(Modifier::BOLD))
-    .bottom_margin(0);
-
-    let rows: Vec<Row> = app
-        .snapshot
-        .as_ref()
-        .map(|s| {
-            s.instances
-                .iter()
-                .map(|inst| {
-                    let color = status_color(&inst.status);
-                    Row::new(vec![
-                        Cell::from(inst.index.to_string()),
-                        Cell::from(inst.contract_name.clone()),
-                        Cell::from(inst.status.clone()).style(Style::default().fg(color)),
-                        Cell::from(inst.outpoint.as_deref().unwrap_or_default().to_string()),
-                        Cell::from(
-                            inst.funding_amount_sat
-                                .map(|a| a.to_string())
-                                .unwrap_or_default(),
-                        ),
-                    ])
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(4),
-            Constraint::Length(18),
-            Constraint::Length(10),
-            Constraint::Min(18),
-            Constraint::Length(12),
-        ],
-    )
-    .header(header_row)
-    .block(Block::default().borders(Borders::ALL))
-    .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-
-    f.render_stateful_widget(table, chunks[1], table_state);
-
-    // Detail panel
-    let detail = if let Some(snap) = &app.snapshot {
-        let sel = table_state.selected().unwrap_or(0);
-        if let Some(inst) = snap.instances.get(sel) {
-            format_detail(inst)
-        } else {
-            "No instances".to_string()
+fn spawn_manager_reader(shared: Arc<SharedState>, host: String, port: u16) {
+    std::thread::spawn(move || loop {
+        match TcpStream::connect((host.as_str(), port)) {
+            Ok(stream) => {
+                shared.set_connected(true);
+                let reader = BufReader::new(stream);
+                for line in reader.lines() {
+                    let Ok(line) = line else {
+                        break;
+                    };
+                    match serde_json::from_str::<ManagerSnapshot>(&line) {
+                        Ok(snapshot) => shared.set_snapshot(snapshot),
+                        Err(error) => eprintln!("invalid manager snapshot: {error}"),
+                    }
+                }
+                shared.set_connected(false);
+            }
+            Err(_) => shared.set_connected(false),
         }
-    } else {
-        "Waiting for data...".to_string()
-    };
-
-    let detail_widget =
-        Paragraph::new(detail).block(Block::default().borders(Borders::ALL).title("Detail"));
-    f.render_widget(detail_widget, chunks[2]);
+        std::thread::sleep(Duration::from_secs(2));
+    });
 }
 
-fn format_detail(inst: &InstanceSnapshot) -> String {
-    let mut lines = vec![
-        format!("Instance #{}", inst.index),
-        format!("  Contract: {}", inst.contract_name),
-        format!("  Status: {}", inst.status),
-        format!("  Address: {}", inst.address.as_deref().unwrap_or("-")),
-        format!(
-            "  State data: {} ({} bytes)",
-            truncate(&inst.data_hex, 96),
-            inst.data_hex.len() / 2
-        ),
-    ];
+fn handle_http(mut stream: TcpStream, shared: &SharedState) -> io::Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let request = read_request(&stream)?;
+    let Some((method, target)) = request else {
+        return Ok(());
+    };
+    let path = target.split('?').next().unwrap_or(target.as_str());
 
-    if let Some(op) = &inst.outpoint {
-        lines.push(format!("  Outpoint: {}", op));
+    if method != "GET" && method != "HEAD" {
+        return write_response(
+            &mut stream,
+            "405 Method Not Allowed",
+            "text/plain; charset=utf-8",
+            b"method not allowed\n",
+            method == "HEAD",
+        );
     }
-    if let Some(txid) = &inst.funding_txid {
-        lines.push(format!("  Funding txid: {}", txid));
+
+    match path {
+        "/" | "/index.html" => write_response(
+            &mut stream,
+            "200 OK",
+            "text/html; charset=utf-8",
+            INDEX_HTML.as_bytes(),
+            method == "HEAD",
+        ),
+        "/app.js" => write_response(
+            &mut stream,
+            "200 OK",
+            "text/javascript; charset=utf-8",
+            APP_JS.as_bytes(),
+            method == "HEAD",
+        ),
+        "/style.css" => write_response(
+            &mut stream,
+            "200 OK",
+            "text/css; charset=utf-8",
+            STYLE_CSS.as_bytes(),
+            method == "HEAD",
+        ),
+        "/api/state" => {
+            let body = serde_json::to_vec(&shared.lock().browser).map_err(io::Error::other)?;
+            write_response(
+                &mut stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                &body,
+                method == "HEAD",
+            )
+        }
+        "/api/events" if method == "GET" => write_event_stream(stream, shared),
+        _ => write_response(
+            &mut stream,
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            b"not found\n",
+            method == "HEAD",
+        ),
     }
-    if let Some(amt) = inst.funding_amount_sat {
-        lines.push(format!("  Amount: {} sat", amt));
+}
+
+fn read_request(stream: &TcpStream) -> io::Result<Option<(String, String)>> {
+    let mut reader = BufReader::new(stream);
+    let mut first = String::new();
+    if reader.read_line(&mut first)? == 0 {
+        return Ok(None);
     }
-    if let Some(clause) = &inst.spending_clause {
-        lines.push(format!("  Spent via: {}", clause));
-    }
-    if let Some(txid) = &inst.spending_txid {
-        lines.push(format!("  Spending txid: {}", txid));
-    }
-    if let Some(args) = &inst.spending_args {
-        lines.push(format!("  Spending args ({}):", args.len()));
-        for (i, arg) in args.iter().enumerate() {
-            let shown = if arg.is_empty() {
-                "<empty>"
-            } else {
-                arg.as_str()
-            };
-            lines.push(format!("    [{}] {}", i, truncate(shown, 96)));
+    let mut parts = first.split_whitespace();
+    let Some(method) = parts.next() else {
+        return Ok(None);
+    };
+    let Some(target) = parts.next() else {
+        return Ok(None);
+    };
+
+    let mut total = first.len();
+    loop {
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        total += read;
+        if read == 0 || line == "\r\n" || line == "\n" {
+            break;
+        }
+        if total > 32 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "HTTP headers exceed 32 KiB",
+            ));
         }
     }
+    Ok(Some((method.to_string(), target.to_string())))
+}
 
-    lines.join("\n")
+fn write_response(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    head_only: bool,
+) -> io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    if !head_only {
+        stream.write_all(body)?;
+    }
+    stream.flush()
+}
+
+fn write_event_stream(mut stream: TcpStream, shared: &SharedState) -> io::Result<()> {
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nX-Accel-Buffering: no\r\nConnection: keep-alive\r\n\r\n",
+    )?;
+
+    let mut state = shared.lock();
+    let mut revision = state.revision;
+    write_sse_state(&mut stream, &state.browser)?;
+    loop {
+        let (next, timeout) = shared
+            .changed
+            .wait_timeout_while(state, Duration::from_secs(15), |candidate| {
+                candidate.revision == revision
+            })
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state = next;
+        if timeout.timed_out() {
+            stream.write_all(b": keep-alive\n\n")?;
+            stream.flush()?;
+            continue;
+        }
+        revision = state.revision;
+        write_sse_state(&mut stream, &state.browser)?;
+    }
+}
+
+fn write_sse_state(stream: &mut TcpStream, state: &BrowserState) -> io::Result<()> {
+    let json = serde_json::to_string(state).map_err(io::Error::other)?;
+    write!(stream, "event: state\ndata: {json}\n\n")?;
+    stream.flush()
 }
 
 #[cfg(test)]
@@ -336,19 +278,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncate_respects_character_boundaries_and_width() {
-        assert_eq!(truncate("abcdef", 6), "abcdef");
-        assert_eq!(truncate("abcdef", 5), "ab...");
-        assert_eq!(truncate("éclair", 5), "éc...");
-        assert_eq!(truncate("abcdef", 2), "..");
+    fn embedded_assets_are_present() {
+        assert!(INDEX_HTML.contains("contract-canvas"));
+        assert!(APP_JS.contains("EventSource"));
+        assert!(STYLE_CSS.contains("detail-panel"));
     }
 
     #[test]
-    fn selection_is_cleared_or_clamped_to_the_snapshot() {
-        let mut state = TableState::default().with_selected(4);
-        clamp_selection(&mut state, 2);
-        assert_eq!(state.selected(), Some(1));
-        clamp_selection(&mut state, 0);
-        assert_eq!(state.selected(), None);
+    fn state_revision_changes_only_for_connection_transitions() {
+        let state = SharedState::new();
+        assert_eq!(state.lock().revision, 0);
+        state.set_connected(false);
+        assert_eq!(state.lock().revision, 0);
+        state.set_connected(true);
+        assert_eq!(state.lock().revision, 1);
+        state.set_connected(true);
+        assert_eq!(state.lock().revision, 1);
     }
 }

@@ -29,11 +29,11 @@
 //!
 //! Omit the move flag to be prompted for one. With `--inspector` (and a build
 //! with `--features inspector`) the manager also serves live state snapshots
-//! for the `mattrs-inspector` TUI:
+//! for the `mattrs-inspector` browser GUI:
 //!
 //! ```sh
 //! cargo run --example rps --features inspector -- --alice --inspector
-//! cargo run -p mattrs-inspector
+//! cargo run -p mattrs-inspector # open http://127.0.0.1:34444
 //! ```
 
 #[allow(dead_code)]
