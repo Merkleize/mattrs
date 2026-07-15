@@ -38,7 +38,7 @@
 //! sub-protocol's roles (e.g. [`fraud::roles`]) inside a larger one, mapping its
 //! outcomes — see `tests/support/game256_roles.rs`.
 //!
-//! Start with `examples/getting_started.rs` (runs offline); `tests/support/vault.rs`
+//! Start with `examples/getting_started.rs` (runs offline); `examples/vault/contracts.rs`
 //! is a complete two-stage vault, and `examples/rps/` a complete two-party
 //! protocol on roles.
 
