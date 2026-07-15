@@ -19,8 +19,7 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::argtypes::IntType;
 use mattrs::contracts::{ArgSpec, ClauseOutput};
-use mattrs::{contract, Signature};
-use mattrs_derive::{ContractParams, ContractState};
+use mattrs::{contract, ContractParams, ContractState, Signature};
 
 // Re-exported so tests can import the whole game through this module; each test
 // binary uses a subset, so per-binary "unused import" warnings are structural.

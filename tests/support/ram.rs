@@ -14,8 +14,7 @@
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, ClauseOutput};
-use mattrs::contract;
-use mattrs_derive::{ContractParams, ContractState};
+use mattrs::{contract, ContractParams, ContractState};
 
 use mattrs::merkle::{floor_lg, WitProof};
 use mattrs::script_helpers::{check_input_contract, concat};

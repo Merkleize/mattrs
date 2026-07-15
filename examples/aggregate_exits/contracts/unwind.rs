@@ -10,7 +10,7 @@ use mattrs::contracts::{
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{MerkleProof, NIL};
 use mattrs::script_utils::bn2vch;
-use mattrs_derive::ContractState;
+use mattrs::ContractState;
 
 use super::pending_exit::{PendingExit, PendingExitState};
 use mattrs::stack::{Source, StackScript};

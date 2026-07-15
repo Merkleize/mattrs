@@ -64,7 +64,7 @@ use mattrs::contracts::{ClauseError, WitnessError};
 use mattrs::fraud::trace;
 use mattrs::merkle::{ceil_lg, MerkleProof, MerkleTree, NIL};
 use mattrs::script_utils::{bn2vch, commit_int};
-use mattrs_derive::ContractParams;
+use mattrs::ContractParams;
 
 define_pushable!();
 

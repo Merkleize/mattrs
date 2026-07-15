@@ -11,8 +11,9 @@
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseOutput, CtvTemplate};
-use mattrs::{contract, script_utils::commit_int, Signature};
-use mattrs_derive::{ContractParams, ContractState};
+use mattrs::{
+    contract, script_utils::commit_int, ContractParams, ContractState, Signature,
+};
 
 use mattrs::script_helpers::{check_input_contract, check_output_contract, key_path_p2tr};
 

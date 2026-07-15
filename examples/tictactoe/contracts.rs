@@ -36,8 +36,7 @@ use mattrs::contracts::{
 };
 use mattrs::manager::{MissingStateError, SpendBuilder};
 use mattrs::script_helpers::{check_input_contract, concat, dup, key_path_p2tr, older};
-use mattrs::{contract, Signature};
-use mattrs_derive::ContractParams;
+use mattrs::{contract, ContractParams, Signature};
 
 define_pushable!();
 

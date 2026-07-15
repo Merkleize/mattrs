@@ -625,7 +625,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             quote! { #(#attrs)* pub #fname: #fty }
         });
         args_structs.push(quote! {
-            #[derive(::core::fmt::Debug, ::core::clone::Clone, ::mattrs_derive::ClauseArgs)]
+            #[derive(::core::fmt::Debug, ::core::clone::Clone, ::mattrs::ClauseArgs)]
             #[clause_args(params = #params_ty)]
             pub struct #args_ident {
                 #(#struct_fields),*

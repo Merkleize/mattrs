@@ -2,7 +2,9 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use mattrs::argtypes::IntType;
 use mattrs::contracts::*;
 use mattrs::script_utils;
-use mattrs_derive::{ClauseArgs as DeriveClauseArgs, ContractParams, ContractState as DeriveContractState};
+use mattrs::{
+    ClauseArgs as DeriveClauseArgs, ContractParams, ContractState as DeriveContractState,
+};
 use std::str::FromStr;
 use std::sync::Arc;
 

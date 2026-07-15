@@ -34,8 +34,10 @@
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseOutput, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT};
-use mattrs::{clause_tree, contract, internal_key_or_nums, optional_key_script, Signature};
-use mattrs_derive::{ContractParams, ContractState};
+use mattrs::{
+    clause_tree, contract, internal_key_or_nums, optional_key_script, ContractParams,
+    ContractState, Signature,
+};
 
 define_pushable!();
 

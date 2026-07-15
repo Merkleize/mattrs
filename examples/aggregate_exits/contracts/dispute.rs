@@ -31,7 +31,7 @@ use mattrs::contracts::{
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{get_directions, is_power_of_2, MerkleTree, NIL};
 use mattrs::script_utils::{bn2vch, commit_int};
-use mattrs_derive::ContractParams;
+use mattrs::ContractParams;
 
 use super::pending_exit::PendingExit;
 use mattrs::stack::{Source, StackScript};

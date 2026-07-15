@@ -9,7 +9,7 @@ use mattrs::contracts::{
 };
 use mattrs::manager::SpendBuilder;
 use mattrs::script_utils::{bn2vch, commit_int};
-use mattrs_derive::ContractState;
+use mattrs::ContractState;
 
 use super::delegation::{DelegationChallenge, DelegationChallengeState};
 use super::dispute::{BisectRangeParams, ExitBisect1, ExitBisect1State};
