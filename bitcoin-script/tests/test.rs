@@ -82,14 +82,14 @@ fn test_minimal_byte_opcode() {
 }
 
 fn script_from_func() -> ScriptBuf {
-    return script! { OP_ADD };
+    script! { OP_ADD }
 }
 
 #[test]
 fn test_for_loop() {
     let script = script! {
         for i in 0..3 {
-            for k in 0..(3 as u32) {
+            for k in 0..3_u32 {
                 OP_ADD
                 script_from_func
                 OP_SWAP
