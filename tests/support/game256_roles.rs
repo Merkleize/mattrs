@@ -127,7 +127,8 @@ pub fn alice_game_role() -> Role<AliceGameData, GameOutcome> {
             let vals = (d.claim)(x);
             let n = vals.len() - 1;
             fill_fraud_data(&mut d.fraud, &vals);
-            let t_a = trace(&d.fraud.hs, 0, n - 1);
+            let t_a = trace(&d.fraud.hs, 0, n - 1)
+                .map_err(|error| ProtocolError::Other(error.to_string()))?;
             let builder = h
                 .reveal(t_a, vals[n], vals[0])
                 .sign(HotSigner::new(d.xpriv));
@@ -169,7 +170,8 @@ pub fn bob_game_role() -> Role<BobGameData, GameOutcome> {
                 // Alice's claim checks out: nothing to dispute.
                 return Ok(Action::Finish(GameOutcome::AliceHonest));
             }
-            let t_b = trace(&d.fraud.hs, 0, n - 1);
+            let t_b = trace(&d.fraud.hs, 0, n - 1)
+                .map_err(|error| ProtocolError::Other(error.to_string()))?;
             let builder = h
                 .start_challenge(s.t_a, s.y, s.x, d.vals[n], t_b)
                 .sign(HotSigner::new(d.xpriv));

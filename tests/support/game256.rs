@@ -66,10 +66,8 @@ pub fn leaf(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> Leaf {
 
 /// The game256 [`BisectCtx`]: [`leaf_factory`] leaves and the standard timeout.
 fn bisect_ctx(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> BisectCtx {
-    BisectCtx {
-        leaf_factory: leaf_factory(alice_pk, bob_pk),
-        forfait_timeout: FORFAIT_TIMEOUT,
-    }
+    BisectCtx::new(leaf_factory(alice_pk, bob_pk), FORFAIT_TIMEOUT)
+        .expect("the game256 forfait timeout is non-zero")
 }
 
 /// A game256 [`Bisect1`] over the given step range.
@@ -101,12 +99,7 @@ pub struct G256Params {
 
 impl G256Params {
     fn bisect(&self) -> BisectParams {
-        BisectParams {
-            alice_pk: self.alice_pk,
-            bob_pk: self.bob_pk,
-            i: 0,
-            j: 7,
-        }
+        BisectParams::new(self.alice_pk, self.bob_pk, 0, 7).expect("game256 disputes eight steps")
     }
 }
 

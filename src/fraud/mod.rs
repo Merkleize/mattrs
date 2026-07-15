@@ -55,7 +55,10 @@ use bitcoin_script::{define_pushable, script};
 
 use crate::Signature;
 use crate::argtypes::{BytesType, SignerType};
-use crate::contracts::{ArgSpec, ClauseError, ClauseOutput};
+use crate::contracts::{
+    ArgSpec, ClauseError, ClauseOutput, ContractParams as ContractParamsTrait, ParamEncodable,
+    WitnessError,
+};
 pub use crate::manager::MissingStateError;
 use crate::manager::SpendBuilder;
 use crate::merkle::is_power_of_2;
@@ -66,6 +69,45 @@ use crate::script_helpers::{
 use mattrs_derive::{ContractParams, ContractState, contract};
 
 define_pushable!();
+
+/// Invalid public input to the generic fraud-proof construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FraudError {
+    /// A bisection must cover at least two non-negative steps, and its size
+    /// must be a power of two.
+    InvalidBisectRange { i: i64, j: i64 },
+    /// A trace range is not backed by endpoint commitments in the supplied slice.
+    InvalidTraceRange {
+        i: usize,
+        j: usize,
+        commitments: usize,
+    },
+    /// A trace range's number of steps must be a power of two.
+    TraceRangeNotPowerOfTwo { i: usize, j: usize },
+    /// A forfait must require at least one confirmation block.
+    ZeroForfaitTimeout,
+}
+
+impl std::fmt::Display for FraudError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidBisectRange { i, j } => write!(
+                f,
+                "a bisection range must cover 2+ non-negative steps and have power-of-two size (got [{i}, {j}])"
+            ),
+            Self::InvalidTraceRange { i, j, commitments } => write!(
+                f,
+                "trace range [{i}, {j}] is invalid for {commitments} commitment(s)"
+            ),
+            Self::TraceRangeNotPowerOfTwo { i, j } => {
+                write!(f, "trace range [{i}, {j}] does not have power-of-two size")
+            }
+            Self::ZeroForfaitTimeout => write!(f, "forfait timeout must be at least one block"),
+        }
+    }
+}
+
+impl std::error::Error for FraudError {}
 
 // ============================================================================
 // The computation being adjudicated
@@ -95,9 +137,32 @@ pub type LeafFactory = Arc<dyn Fn(i64) -> Leaf + Send + Sync>;
 #[derive(Clone)]
 pub struct BisectCtx {
     /// Produces the [`Leaf`] contract adjudicating a given step.
-    pub leaf_factory: LeafFactory,
+    leaf_factory: LeafFactory,
     /// The blocks after which a stalled turn forfaits the pot.
-    pub forfait_timeout: u32,
+    forfait_timeout: u32,
+}
+
+impl BisectCtx {
+    /// Construct a bisection context with a non-zero forfait timeout.
+    pub fn new(leaf_factory: LeafFactory, forfait_timeout: u32) -> Result<Self, FraudError> {
+        if forfait_timeout == 0 {
+            return Err(FraudError::ZeroForfaitTimeout);
+        }
+        Ok(Self {
+            leaf_factory,
+            forfait_timeout,
+        })
+    }
+
+    /// The configured forfait timeout in blocks.
+    pub fn forfait_timeout(&self) -> u32 {
+        self.forfait_timeout
+    }
+
+    /// Build the leaf contract adjudicating `step`.
+    pub fn leaf(&self, step: i64) -> Leaf {
+        (self.leaf_factory)(step)
+    }
 }
 
 /// The trace commitment `t[i,j]` over the hashed step states `hs`, where
@@ -113,25 +178,29 @@ pub struct BisectCtx {
 /// `Bisect` reveal clauses re-check on-chain; each party derives the reveal
 /// arguments for range `[i, j]` from its own claimed `hs`.
 ///
-/// # Panics
-///
-/// Panics if the range falls outside `hs` (`j + 1 >= hs.len()`) or its size
-/// `j - i + 1` is not a power of two — both protocol invariants of the ranges
-/// the bisection visits.
-pub fn trace(hs: &[[u8; 32]], i: usize, j: usize) -> [u8; 32] {
-    assert!(i <= j && j + 1 < hs.len(), "trace range out of bounds");
+pub fn trace(hs: &[[u8; 32]], i: usize, j: usize) -> Result<[u8; 32], FraudError> {
+    let endpoint = j.checked_add(1);
+    if i > j || endpoint.is_none_or(|end| end >= hs.len()) {
+        return Err(FraudError::InvalidTraceRange {
+            i,
+            j,
+            commitments: hs.len(),
+        });
+    }
     let size = j - i + 1;
-    assert!(is_power_of_2(size), "trace range must be a power of two");
+    if !is_power_of_2(size) {
+        return Err(FraudError::TraceRangeNotPowerOfTwo { i, j });
+    }
 
     let mut preimage = Vec::with_capacity(128);
     preimage.extend_from_slice(&hs[i]);
     preimage.extend_from_slice(&hs[j + 1]);
     if i != j {
         let m = size / 2;
-        preimage.extend_from_slice(&trace(hs, i, i + m - 1));
-        preimage.extend_from_slice(&trace(hs, i + m, j));
+        preimage.extend_from_slice(&trace(hs, i, i + m - 1)?);
+        preimage.extend_from_slice(&trace(hs, i + m, j)?);
     }
-    sha256::Hash::hash(&preimage).to_byte_array()
+    Ok(sha256::Hash::hash(&preimage).to_byte_array())
 }
 
 // ============================================================================
@@ -262,48 +331,111 @@ impl LeafHandle {
 // ============================================================================
 
 /// The two parties of a bisection stage and the step range it disputes.
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct BisectParams {
     pub alice_pk: XOnlyPublicKey,
     pub bob_pk: XOnlyPublicKey,
     /// The disputed step range [i, j] (inclusive), `n = j - i + 1` a power of two.
-    pub i: i64,
-    pub j: i64,
+    i: i64,
+    j: i64,
 }
 
 impl BisectParams {
+    /// Construct a validated bisection range.
+    pub fn new(
+        alice_pk: XOnlyPublicKey,
+        bob_pk: XOnlyPublicKey,
+        i: i64,
+        j: i64,
+    ) -> Result<Self, FraudError> {
+        let size = j
+            .checked_sub(i)
+            .and_then(|difference| difference.checked_add(1))
+            .and_then(|size| usize::try_from(size).ok());
+        if i < 0 || j <= i || size.is_none_or(|size| !is_power_of_2(size)) {
+            return Err(FraudError::InvalidBisectRange { i, j });
+        }
+        Ok(Self {
+            alice_pk,
+            bob_pk,
+            i,
+            j,
+        })
+    }
+
+    /// First disputed step (inclusive).
+    pub fn i(&self) -> i64 {
+        self.i
+    }
+
+    /// Last disputed step (inclusive).
+    pub fn j(&self) -> i64 {
+        self.j
+    }
+
     /// Half the range size, `m = n/2`. The children cover [i, i+m-1] and [i+m, j].
-    ///
-    /// # Panics
-    ///
-    /// Panics unless `j > i` and `n = j - i + 1` is a power of two — the
-    /// protocol invariant of every range a `Bisect` stage disputes (as in the
-    /// pymatt reference). Every clause script derives from `m`, so a bad range
-    /// fails at construction rather than producing a garbage midpoint.
     pub fn m(&self) -> i64 {
-        let n = self.j - self.i + 1;
-        assert!(
-            self.j > self.i && is_power_of_2(n as usize),
-            "a Bisect range must span 2+ steps, a power of two (got [{}, {}])",
-            self.i,
-            self.j
-        );
-        n / 2
+        (self.j - self.i + 1) / 2
     }
 
     /// Whether the two children are single steps (Leaves) rather than sub-Bisects.
     pub fn children_are_leaves(&self) -> bool {
         self.m() == 1
     }
+}
 
-    /// The same keys over the sub-range [i, j].
-    pub fn child(&self, i: i64, j: i64) -> BisectParams {
-        BisectParams {
-            alice_pk: self.alice_pk,
-            bob_pk: self.bob_pk,
-            i,
-            j,
+// The derived codec handles framing; the public wrapper validates decoded
+// ranges before they can re-enter contract construction.
+#[derive(Debug, Clone, ContractParams)]
+struct EncodedBisectParams {
+    alice_pk: XOnlyPublicKey,
+    bob_pk: XOnlyPublicKey,
+    i: i64,
+    j: i64,
+}
+
+impl From<&BisectParams> for EncodedBisectParams {
+    fn from(params: &BisectParams) -> Self {
+        Self {
+            alice_pk: params.alice_pk,
+            bob_pk: params.bob_pk,
+            i: params.i,
+            j: params.j,
         }
+    }
+}
+
+impl TryFrom<EncodedBisectParams> for BisectParams {
+    type Error = FraudError;
+
+    fn try_from(params: EncodedBisectParams) -> Result<Self, Self::Error> {
+        Self::new(params.alice_pk, params.bob_pk, params.i, params.j)
+    }
+}
+
+impl ParamEncodable for BisectParams {
+    fn encode_param(&self) -> Vec<Vec<u8>> {
+        ParamEncodable::encode_param(&EncodedBisectParams::from(self))
+    }
+
+    fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        let (params, consumed) = EncodedBisectParams::decode_param(elements)?;
+        let params = params
+            .try_into()
+            .map_err(|error: FraudError| WitnessError::InvalidValue(error.to_string()))?;
+        Ok((params, consumed))
+    }
+}
+
+impl ContractParamsTrait for BisectParams {
+    fn encode(&self) -> Vec<u8> {
+        ContractParamsTrait::encode(&EncodedBisectParams::from(self))
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
+        EncodedBisectParams::decode(bytes)?
+            .try_into()
+            .map_err(|error: FraudError| WitnessError::InvalidValue(error.to_string()))
     }
 }
 
@@ -392,7 +524,7 @@ contract! {
                 #[signer(p.bob_pk)]
                 bob_sig: Signature,
             }
-            script |p, c| timeout_sig_script(c.forfait_timeout, p.bob_pk);
+            script |p, c| timeout_sig_script(c.forfait_timeout(), p.bob_pk);
         }
 
         tree [alice_reveal, forfait];
@@ -464,6 +596,14 @@ impl Bisect1 {
 enum Side {
     Left,
     Right,
+}
+
+/// A valid half of a bisection is either its single-step base case or another
+/// bisection range. Keeping those cases distinct prevents constructing a
+/// `Bisect1` with a one-step range.
+enum ChildRange {
+    Leaf(i64),
+    Bisect(BisectParams),
 }
 
 contract! {
@@ -546,7 +686,7 @@ contract! {
                 #[signer(p.alice_pk)]
                 alice_sig: Signature,
             }
-            script |p, c| timeout_sig_script(c.forfait_timeout, p.alice_pk);
+            script |p, c| timeout_sig_script(c.forfait_timeout(), p.alice_pk);
         }
 
         tree [[bob_reveal_left, bob_reveal_right], forfait];
@@ -555,24 +695,30 @@ contract! {
 
 impl Bisect2 {
     /// The child range Bob's reveal on `side` recurses into.
-    fn child_params(params: &BisectParams, side: Side) -> BisectParams {
+    fn child_range(params: &BisectParams, side: Side) -> ChildRange {
         let m = params.m();
-        match side {
-            Side::Left => params.child(params.i, params.i + m - 1),
-            Side::Right => params.child(params.i + m, params.j),
+        let (i, j) = match side {
+            Side::Left => (params.i(), params.i() + m - 1),
+            Side::Right => (params.i() + m, params.j()),
+        };
+        if i == j {
+            ChildRange::Leaf(i)
+        } else {
+            ChildRange::Bisect(
+                BisectParams::new(params.alice_pk, params.bob_pk, i, j)
+                    .expect("a non-leaf half of a valid bisection range is valid"),
+            )
         }
     }
 
     /// The taptree root committed for `side`'s child (a [`Leaf`] at a single
     /// step, else a sub-[`Bisect1`]).
     fn child_root(params: &BisectParams, side: Side, ctx: &BisectCtx) -> [u8; 32] {
-        let child = Self::child_params(params, side);
-        if params.children_are_leaves() {
-            (ctx.leaf_factory)(child.i).taptree_root()
-        } else {
-            Bisect1::new(child, ctx.clone())
+        match Self::child_range(params, side) {
+            ChildRange::Leaf(step) => ctx.leaf(step).taptree_root(),
+            ChildRange::Bisect(child) => Bisect1::new(child, ctx.clone())
                 .expect("Bisect1 contract definition is valid")
-                .taptree_root()
+                .taptree_root(),
         }
     }
 
@@ -590,17 +736,15 @@ impl Bisect2 {
         trace_alice: [u8; 32],
         trace_bob: [u8; 32],
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let child = Self::child_params(params, side);
-        let output = if params.children_are_leaves() {
-            ClauseOutput::at_same_index()
-                .to((ctx.leaf_factory)(child.i).as_erased())
+        let output = match Self::child_range(params, side) {
+            ChildRange::Leaf(step) => ClauseOutput::at_same_index()
+                .to(ctx.leaf(step).as_erased())
                 .with_state(&LeafState {
                     h_start,
                     h_end_alice,
                     h_end_bob,
-                })
-        } else {
-            ClauseOutput::at_same_index()
+                }),
+            ChildRange::Bisect(child) => ClauseOutput::at_same_index()
                 .to(Bisect1::new(child, ctx.clone())?.as_erased())
                 .with_state(&Bisect1State {
                     h_start,
@@ -608,7 +752,7 @@ impl Bisect2 {
                     h_end_b: h_end_bob,
                     trace_a: trace_alice,
                     trace_b: trace_bob,
-                })
+                }),
         };
         Ok(vec![output.preserve_amount().build()])
     }
@@ -668,12 +812,7 @@ mod tests {
     use super::*;
 
     fn bp(i: i64, j: i64) -> BisectParams {
-        BisectParams {
-            alice_pk: crate::nums_key(),
-            bob_pk: crate::nums_key(),
-            i,
-            j,
-        }
+        BisectParams::new(crate::nums_key(), crate::nums_key(), i, j).unwrap()
     }
 
     #[test]
@@ -685,15 +824,53 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "power of two")]
-    fn non_power_of_two_range_panics() {
-        bp(0, 5).m();
+    fn invalid_bisect_ranges_are_rejected() {
+        let key = crate::nums_key();
+        for (i, j) in [(0, 5), (3, 3), (-1, 2), (i64::MIN, i64::MAX)] {
+            assert!(matches!(
+                BisectParams::new(key, key, i, j),
+                Err(FraudError::InvalidBisectRange { .. })
+            ));
+        }
     }
 
     #[test]
-    #[should_panic(expected = "power of two")]
-    fn single_step_range_panics() {
-        // A single step is a Leaf, never a Bisect range.
-        bp(3, 3).m();
+    fn invalid_trace_ranges_are_rejected() {
+        let hs = [[0u8; 32]; 5];
+        assert!(matches!(
+            trace(&hs, 3, 2),
+            Err(FraudError::InvalidTraceRange { .. })
+        ));
+        assert!(matches!(
+            trace(&hs, 0, usize::MAX),
+            Err(FraudError::InvalidTraceRange { .. })
+        ));
+        assert!(matches!(
+            trace(&hs, 0, 2),
+            Err(FraudError::TraceRangeNotPowerOfTwo { .. })
+        ));
+        assert!(trace(&hs, 0, 3).is_ok());
+    }
+
+    #[test]
+    fn decoded_bisect_ranges_are_validated() {
+        let key = crate::nums_key();
+        let invalid = EncodedBisectParams {
+            alice_pk: key,
+            bob_pk: key,
+            i: 0,
+            j: 2,
+        };
+        let bytes = ContractParamsTrait::encode(&invalid);
+        assert!(BisectParams::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn zero_forfait_timeout_is_rejected() {
+        let factory: LeafFactory = Arc::new(|_| panic!("factory is not called"));
+        assert!(matches!(
+            BisectCtx::new(factory, 0),
+            Err(FraudError::ZeroForfaitTimeout)
+        ));
     }
 }

@@ -98,6 +98,12 @@ pub struct FraudPartyData {
     pub forfait_timeout: u32,
 }
 
+struct RevealArgs {
+    h_mid: [u8; 32],
+    trace_left: [u8; 32],
+    trace_right: [u8; 32],
+}
+
 impl FraudPartyData {
     /// Whether this party's claim survives re-running `step`: its claimed
     /// output commitment matches what its own claimed input actually computes
@@ -113,13 +119,23 @@ impl FraudPartyData {
 
     /// This party's reveal arguments for the range `[i, j]`: the midstate
     /// commitment and the two sub-traces backing it.
-    fn reveal_args(&self, p: &BisectParams) -> ([u8; 32], [u8; 32], [u8; 32]) {
-        let (i, j, m) = (p.i as usize, p.j as usize, p.m() as usize);
-        (
-            self.hs[i + m],
-            trace(&self.hs, i, i + m - 1),
-            trace(&self.hs, i + m, j),
-        )
+    fn reveal_args(&self, p: &BisectParams) -> Result<RevealArgs, ProtocolError> {
+        let (i, j, m) = (p.i() as usize, p.j() as usize, p.m() as usize);
+        let h_mid = self.hs.get(i + m).copied().ok_or_else(|| {
+            ProtocolError::Other(format!(
+                "claimed trace has {} commitment(s), too few for range [{i}, {j}]",
+                self.hs.len()
+            ))
+        })?;
+        let t_left = trace(&self.hs, i, i + m - 1)
+            .map_err(|error| ProtocolError::Other(error.to_string()))?;
+        let t_right =
+            trace(&self.hs, i + m, j).map_err(|error| ProtocolError::Other(error.to_string()))?;
+        Ok(RevealArgs {
+            h_mid,
+            trace_left: t_left,
+            trace_right: t_right,
+        })
     }
 }
 
@@ -129,9 +145,9 @@ pub fn alice_role() -> Role<FraudPartyData, FraudOutcome> {
     with_settlements(
         Role::new()
             .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
-                let (h_mid, t_left, t_right) = d.reveal_args(&h.params());
+                let reveal = d.reveal_args(&h.params())?;
                 let builder = h
-                    .alice_reveal(h_mid, t_left, t_right)?
+                    .alice_reveal(reveal.h_mid, reveal.trace_left, reveal.trace_right)?
                     .sign(HotSigner::new(d.xpriv));
                 Ok(Action::Send(builder))
             })
@@ -168,13 +184,13 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
                 let state = h.state().ok_or_else(|| {
                     ProtocolError::Other("a Bisect2 instance carries its revealed state".into())
                 })?;
-                let (h_mid, t_left, t_right) = d.reveal_args(&p);
+                let reveal = d.reveal_args(&p)?;
                 // Recurse into the left half when the midstates differ, the right
                 // when they agree (the same comparison the scripts enforce).
-                let builder = if state.h_mid_a != h_mid {
-                    h.bob_reveal_left(h_mid, t_left, t_right)?
+                let builder = if state.h_mid_a != reveal.h_mid {
+                    h.bob_reveal_left(reveal.h_mid, reveal.trace_left, reveal.trace_right)?
                 } else {
-                    h.bob_reveal_right(h_mid, t_left, t_right)?
+                    h.bob_reveal_right(reveal.h_mid, reveal.trace_left, reveal.trace_right)?
                 };
                 Ok(Action::Send(builder.sign(HotSigner::new(d.xpriv))))
             })
@@ -217,8 +233,8 @@ fn leaf_step(cx: &StepCtx<'_>) -> Result<i64, ProtocolError> {
     let b2: Bisect2Handle = parent.clone().try_into()?;
     let p = b2.params();
     match b2.spent_clause() {
-        Some(Bisect2Clause::BobRevealLeft) => Ok(p.i),
-        Some(Bisect2Clause::BobRevealRight) => Ok(p.i + p.m()),
+        Some(Bisect2Clause::BobRevealLeft) => Ok(p.i()),
+        Some(Bisect2Clause::BobRevealRight) => Ok(p.i() + p.m()),
         other => Err(ProtocolError::Other(format!(
             "unexpected clause {:?} produced a Leaf",
             other
@@ -252,7 +268,7 @@ fn wait_or_forfait(
         .sign(HotSigner::new(d.xpriv));
     let outcome = FraudOutcome {
         winner,
-        resolution: FraudResolution::Forfait { i: p.i, j: p.j },
+        resolution: FraudResolution::Forfait { i: p.i(), j: p.j() },
     };
     // `wait_or_send_final` sets the builder's CSV sequence from the same
     // timeout that drives the deadline.
@@ -300,7 +316,7 @@ fn settled_leaf(h: &LeafHandle, cx: &StepCtx<'_>) -> Result<FraudOutcome, Protoc
 fn forfait_outcome(p: &BisectParams, winner: FraudWinner) -> FraudOutcome {
     FraudOutcome {
         winner,
-        resolution: FraudResolution::Forfait { i: p.i, j: p.j },
+        resolution: FraudResolution::Forfait { i: p.i(), j: p.j() },
     }
 }
 

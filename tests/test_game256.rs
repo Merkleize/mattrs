@@ -43,12 +43,7 @@ fn test_bisect_taptrees_match_reference() {
     // (children are sub-Bisect_1s), and the full 8-step game bisect. All roots
     // match the pymatt reference (hub/fraud.py).
     let (alice_pk, bob_pk) = keys();
-    let bp = |i, j| BisectParams {
-        alice_pk,
-        bob_pk,
-        i,
-        j,
-    };
+    let bp = |i, j| BisectParams::new(alice_pk, bob_pk, i, j).unwrap();
     let root = |b: &[u8; 32]| hex::encode(b);
 
     // base range: both children are Leaves
@@ -133,12 +128,7 @@ fn addr<S: ContractState + 'static>(
 fn test_game256_state_transitions() {
     let (alice_pk, bob_pk) = keys();
     let p = G256Params { alice_pk, bob_pk };
-    let bp = |i, j| BisectParams {
-        alice_pk,
-        bob_pk,
-        i,
-        j,
-    };
+    let bp = |i, j| BisectParams::new(alice_pk, bob_pk, i, j).unwrap();
     let client = offline_client();
     let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 

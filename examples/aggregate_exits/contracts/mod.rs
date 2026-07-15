@@ -261,7 +261,7 @@ pub fn compute_claim_with_lie(
         hs.push(step_h(&working.root(), sum));
     }
 
-    let trace = trace(&hs, 0, n - 1);
+    let trace = trace(&hs, 0, n - 1).expect("the exit trace spans a power-of-two range");
     ExitClaim {
         bits: bits.to_vec(),
         r,
@@ -281,8 +281,9 @@ pub fn reveal_mids(hs: &[[u8; 32]], i: usize, j: usize) -> ([u8; 32], [u8; 32], 
     let midpoint_offset = (j - i).div_ceil(2);
     (
         hs[i + midpoint_offset],
-        trace(hs, i, i + midpoint_offset - 1),
-        trace(hs, i + midpoint_offset, j),
+        trace(hs, i, i + midpoint_offset - 1)
+            .expect("a bisection's left half is a valid trace range"),
+        trace(hs, i + midpoint_offset, j).expect("a bisection's right half is a valid trace range"),
     )
 }
 
