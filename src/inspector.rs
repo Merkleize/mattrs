@@ -129,8 +129,8 @@ pub struct TransactionOutputSnapshot {
 
 /// Flatten one instance without graph relationships.
 ///
-/// Manager snapshots use [`snapshot_instances`] so child and terminal links can
-/// be resolved across the complete instance collection.
+/// Manager snapshots use the crate's complete-instance snapshot builder so
+/// child and terminal links can be resolved across the full collection.
 pub fn snapshot_instance(
     index: usize,
     inst: &ContractInstance,
