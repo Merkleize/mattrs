@@ -91,12 +91,20 @@ impl ChainView for RpcChain {
     }
 
     fn height(&self) -> Result<u32, ProtocolError> {
-        Ok(self.client.get_block_count().map_err(ManagerError::from)? as u32)
+        let height = self.client.get_block_count().map_err(ManagerError::from)?;
+        u32::try_from(height)
+            .map_err(|_| ProtocolError::Other(format!("block height {height} exceeds u32::MAX")))
     }
 
     fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ProtocolError> {
         match tx_confirmation_height(&self.client, &txid) {
-            Ok(height) => Ok(height.map(|h| h as u32)),
+            Ok(height) => height
+                .map(|h| {
+                    u32::try_from(h).map_err(|_| {
+                        ProtocolError::Other(format!("confirmation height {h} exceeds u32::MAX"))
+                    })
+                })
+                .transpose(),
             // A transaction the node does not know (yet) is *unknown*, not a
             // failure — the same answer `LocalChain` gives, so a role behaves
             // identically on both chain views.

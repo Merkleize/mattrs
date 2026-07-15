@@ -23,6 +23,18 @@ pub enum Progress<O> {
     Done(Vec<O>),
 }
 
+/// The externally visible lifecycle of a protocol runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerState {
+    /// At least one live token remains.
+    Running,
+    /// Every token resolved successfully.
+    Finished,
+    /// A token step failed; unprocessed tokens and the failed handle remain
+    /// inspectable, but execution cannot safely resume automatically.
+    Failed,
+}
+
 /// The runner's view of one live UTXO it follows (a *token*).
 struct TokenState<O> {
     /// The instance the token sits at.
@@ -45,9 +57,6 @@ enum Phase<O> {
 struct Timeout<O> {
     /// Confirmations of the current UTXO after which the fallback fires.
     blocks: u32,
-    /// The absolute height the fallback fires at, resolved (and then cached —
-    /// a confirmation height never changes) once the watched UTXO confirms.
-    deadline: Option<u32>,
     on_timeout: TimeoutAction<O>,
 }
 
@@ -81,9 +90,11 @@ pub struct Runner<D, O> {
     data: D,
     manager: ContractManager,
     chain: Rc<dyn ChainView>,
-    /// The live tokens; empty once the protocol resolved (or a step failed).
+    /// Live, not-yet-failed tokens.
     tokens: Vec<TokenState<O>>,
     outcomes: Vec<O>,
+    state: RunnerState,
+    failed_at: Option<InstanceHandle>,
 }
 
 impl<D: 'static, O: 'static> Runner<D, O> {
@@ -107,6 +118,8 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 phase: Phase::Arrived,
             }],
             outcomes: Vec::new(),
+            state: RunnerState::Running,
+            failed_at: None,
         }
     }
 
@@ -152,37 +165,52 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         &self.outcomes
     }
 
-    /// Step every live token at most once, without blocking: dispatch pending
-    /// arrival handlers, or poll once for counterparty spends (and timeout
-    /// deadlines).
-    ///
-    /// An error poisons the runner: the failing step is not retried (the
-    /// tokens are dropped), and stepping again returns
-    /// [`ProtocolError::Finished`].
+    /// Current runner lifecycle state.
+    pub fn state(&self) -> RunnerState {
+        self.state
+    }
+
+    /// The token whose step failed, when [`state`](Self::state) is
+    /// [`RunnerState::Failed`].
+    pub fn failed_at(&self) -> Option<&InstanceHandle> {
+        self.failed_at.as_ref()
+    }
+
+    /// Step one live token without blocking: dispatch its pending arrival
+    /// handler, or poll once for a counterparty spend and timeout. Processing a
+    /// single token makes partial failure explicit: other tokens stay queued.
+    /// A failure transitions the runner to [`RunnerState::Failed`], retains the
+    /// failed handle for inspection, and subsequent calls return
+    /// [`ProtocolError::RunnerFailed`].
     pub fn step(&mut self) -> Result<Progress<O>, ProtocolError> {
-        if self.tokens.is_empty() {
-            return Err(ProtocolError::Finished);
+        match self.state {
+            RunnerState::Finished => return Err(ProtocolError::Finished),
+            RunnerState::Failed => return Err(ProtocolError::RunnerFailed),
+            RunnerState::Running => {}
         }
-        let mut advanced = false;
-        let mut kept = Vec::new();
-        for token in std::mem::take(&mut self.tokens) {
-            match self.step_token(token)? {
-                TokenStep::Keep(t, adv) => {
-                    advanced |= adv;
-                    kept.push(t);
-                }
-                TokenStep::Fork(ts) => {
-                    advanced = true;
-                    kept.extend(ts);
-                }
-                TokenStep::Resolved(o) => {
-                    advanced = true;
-                    self.outcomes.extend(o);
-                }
+        let token = self.tokens.remove(0);
+        let failed_handle = token.current.clone();
+        let advanced = match self.step_token(token) {
+            Ok(TokenStep::Keep(token, advanced)) => {
+                self.tokens.push(token);
+                advanced
             }
-        }
-        self.tokens = kept;
+            Ok(TokenStep::Fork(tokens)) => {
+                self.tokens.extend(tokens);
+                true
+            }
+            Ok(TokenStep::Resolved(outcome)) => {
+                self.outcomes.extend(outcome);
+                true
+            }
+            Err(error) => {
+                self.state = RunnerState::Failed;
+                self.failed_at = Some(failed_handle);
+                return Err(error);
+            }
+        };
         if self.tokens.is_empty() {
+            self.state = RunnerState::Finished;
             return Ok(Progress::Done(std::mem::take(&mut self.outcomes)));
         }
         Ok(if advanced {
@@ -276,12 +304,22 @@ impl<D: 'static, O: 'static> Runner<D, O> {
     ) -> Result<TokenStep<O>, ProtocolError> {
         match action {
             Action::Send(builder) => {
+                if !builder.spends(&current) {
+                    return Err(ProtocolError::Other(
+                        "role returned a spend builder for a different instance".to_string(),
+                    ));
+                }
                 let tx = builder.build_tx(&self.manager)?;
                 self.chain.broadcast(&tx)?;
                 let children = self.manager.observe_spend(&current, &tx)?;
                 self.follow_spend(children, current, parent)
             }
             Action::SendFinal(builder, outcome) => {
+                if !builder.spends(&current) {
+                    return Err(ProtocolError::Other(
+                        "role returned a final spend builder for a different instance".to_string(),
+                    ));
+                }
                 let tx = builder.build_tx(&self.manager)?;
                 self.chain.broadcast(&tx)?;
                 self.manager.observe_spend(&current, &tx)?;
@@ -293,10 +331,13 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             Action::WaitWithTimeout { blocks, on_timeout } => self.poll_waiting(
                 current,
                 parent,
-                Some(Timeout {
-                    blocks,
-                    deadline: None,
-                    on_timeout,
+                Some({
+                    if blocks == 0 {
+                        return Err(ProtocolError::Other(
+                            "timeout duration must be greater than zero".to_string(),
+                        ));
+                    }
+                    Timeout { blocks, on_timeout }
                 }),
             ),
             Action::Finish(outcome) => Ok(TokenStep::Resolved(Some(outcome))),
@@ -309,7 +350,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         &mut self,
         current: InstanceHandle,
         parent: Option<InstanceHandle>,
-        mut timeout: Option<Timeout<O>>,
+        timeout: Option<Timeout<O>>,
     ) -> Result<TokenStep<O>, ProtocolError> {
         let outpoint = current.outpoint().ok_or(ManagerError::NotFunded)?;
 
@@ -318,15 +359,18 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             return self.follow_spend(children, current, parent);
         }
 
-        if let Some(t) = &mut timeout {
-            if t.deadline.is_none() {
-                t.deadline = self
-                    .chain
-                    .confirmation_height(outpoint.txid)?
-                    .map(|conf| conf.saturating_add(t.blocks).saturating_sub(1));
-            }
-            if let Some(d) = t.deadline
-                && self.chain.height()? >= d
+        if let Some(t) = &timeout {
+            let deadline = self
+                .chain
+                .confirmation_height(outpoint.txid)?
+                .map(|confirmed| {
+                    confirmed
+                        .checked_add(t.blocks - 1)
+                        .ok_or_else(|| ProtocolError::Other("timeout height overflow".to_string()))
+                })
+                .transpose()?;
+            if let Some(deadline) = deadline
+                && self.chain.height()? >= deadline
             {
                 let t = timeout.expect("checked above");
                 return self.execute_action(t.on_timeout.into(), current, parent);

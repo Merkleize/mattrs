@@ -40,7 +40,7 @@ use crate::manager::{
 };
 
 pub use chain::{ChainView, LocalChain, RpcChain};
-pub use runner::{Progress, Runner};
+pub use runner::{Progress, Runner, RunnerState};
 
 /// Bridge from a `contract!`-generated contract type to its typed handle and
 /// dispatch key. Implemented by the `contract!` macro; never by hand.
@@ -70,9 +70,9 @@ pub trait TypedContract {
 #[derive(Clone, Copy, Debug)]
 pub struct ContractKey {
     /// The generated contract definition's nominal `TypeId`.
-    pub type_id: TypeId,
+    type_id: TypeId,
     /// Human-readable name, used only for diagnostics.
-    pub name: &'static str,
+    name: &'static str,
 }
 
 impl PartialEq for ContractKey {
@@ -198,6 +198,10 @@ pub enum ProtocolError {
     },
     /// The runner was stepped after the protocol already resolved.
     Finished,
+    /// The runner previously failed. Create a new runner after inspecting
+    /// [`Runner::failed_at`] rather than attempting to resume a partially
+    /// executed protocol step.
+    RunnerFailed,
     /// A protocol-specific failure raised by a role handler (e.g. the
     /// counterparty broke an off-chain commitment).
     Other(String),
@@ -214,6 +218,7 @@ impl std::fmt::Display for ProtocolError {
                 write!(f, "the role has no handler for contract `{}`", contract)
             }
             ProtocolError::Finished => write!(f, "the protocol already resolved"),
+            ProtocolError::RunnerFailed => write!(f, "the protocol runner previously failed"),
             ProtocolError::Other(msg) => write!(f, "{}", msg),
         }
     }
