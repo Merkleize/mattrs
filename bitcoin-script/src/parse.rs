@@ -152,13 +152,11 @@ pub fn parse(tokens: TokenStream) -> Vec<(Syntax, Span)> {
         let token_str = token.to_string();
         syntax.push(match (&token, token_str.as_ref()) {
             // Wrap for loops such that they return a Vec<ScriptBuf>
-            (Ident(_), ident_str) if ident_str == "for" => parse_for_loop(token, &mut tokens),
+            (Ident(_), "for") => parse_for_loop(token, &mut tokens),
             // Wrap if-else statements such that they return a Vec<ScriptBuf>
-            (Ident(_), ident_str) if ident_str == "if" => parse_if(token, &mut tokens),
+            (Ident(_), "if") => parse_if(token, &mut tokens),
             // Replace DEBUG with OP_RESERVED
-            (Ident(_), ident_str) if ident_str == "DEBUG" => {
-                (Syntax::Opcode(OP_RESERVED), token.span())
-            }
+            (Ident(_), "DEBUG") => (Syntax::Opcode(OP_RESERVED), token.span()),
 
             // identifier, look up opcode
             (Ident(_), _) => {
@@ -176,7 +174,7 @@ pub fn parse(tokens: TokenStream) -> Vec<(Syntax, Span)> {
             }
 
             (Group(inner), _) => {
-                let escape = TokenStream::from(inner.stream().clone());
+                let escape = inner.stream();
                 (Syntax::Escape(escape), token.span())
             }
 
@@ -237,8 +235,7 @@ where
             #escape;
             bitcoin::script::ScriptBuf::from(script_var)
         }
-    }
-    .into();
+    };
     (Syntax::Escape(escape), token.span())
 }
 
@@ -251,7 +248,7 @@ where
     };
     escape.extend(std::iter::once(token.clone()));
 
-    while let Some(for_token) = tokens.next() {
+    for for_token in tokens.by_ref() {
         match for_token {
             Group(block) if block.delimiter() == Delimiter::Brace => {
                 let inner_block = block.stream();
@@ -273,7 +270,7 @@ where
         };
     }
 
-    (Syntax::Escape(quote! { { #escape } }.into()), token.span())
+    (Syntax::Escape(quote! { { #escape } }), token.span())
 }
 
 fn parse_escape<T>(token: TokenTree, tokens: &mut T) -> (Syntax, Span)
@@ -368,7 +365,7 @@ fn parse_int(token: TokenTree, negative: bool) -> (Syntax, Span) {
     let n: i64 = token_str.parse().unwrap_or_else(|err| {
         emit_error!(token.span(), "invalid number literal ({})", err);
     });
-    let n = if negative { n * -1 } else { n };
+    let n = if negative { -n } else { n };
     (Syntax::Int(n), token.span())
 }
 
