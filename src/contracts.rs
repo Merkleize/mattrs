@@ -73,6 +73,8 @@ impl std::error::Error for WitnessError {}
 pub enum ClauseError {
     /// The spend's witness stack could not be decoded into the clause's arguments.
     Witness(WitnessError),
+    /// Constructing a child contract exposed an invalid contract definition.
+    Contract(ContractError),
     /// Any other clause-specific failure.
     Other(String),
 }
@@ -81,6 +83,7 @@ impl fmt::Display for ClauseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ClauseError::Witness(e) => write!(f, "Witness error: {}", e),
+            ClauseError::Contract(e) => write!(f, "Contract error: {}", e),
             ClauseError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -94,6 +97,12 @@ impl From<WitnessError> for ClauseError {
     }
 }
 
+impl From<ContractError> for ClauseError {
+    fn from(e: ContractError) -> Self {
+        ClauseError::Contract(e)
+    }
+}
+
 /// Errors from contract address / key-derivation operations.
 #[derive(Debug)]
 pub enum ContractError {
@@ -103,6 +112,16 @@ pub enum ContractError {
     StateDecoding(WitnessError),
     /// A taproot / secp256k1 key operation failed (tweak, parse, ...).
     Key(String),
+    /// Two clauses in one contract have the same lookup name.
+    DuplicateClauseName(String),
+    /// Two clauses in one contract have the same tapscript and cannot be
+    /// distinguished when observing a spend.
+    DuplicateClauseScript {
+        /// The first clause with this script.
+        first: String,
+        /// The second clause with this script.
+        second: String,
+    },
 }
 
 impl fmt::Display for ContractError {
@@ -111,6 +130,13 @@ impl fmt::Display for ContractError {
             ContractError::MissingState => write!(f, "state required for augmented contract"),
             ContractError::StateDecoding(e) => write!(f, "failed to decode state: {}", e),
             ContractError::Key(msg) => write!(f, "key operation failed: {}", msg),
+            ContractError::DuplicateClauseName(name) => {
+                write!(f, "duplicate clause name in contract: {name}")
+            }
+            ContractError::DuplicateClauseScript { first, second } => write!(
+                f,
+                "clauses '{first}' and '{second}' have the same tapscript"
+            ),
         }
     }
 }
@@ -367,7 +393,11 @@ impl WitnessEncodable for bool {
     }
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        match witness.first().ok_or(WitnessError::StackUnderflow)?.as_slice() {
+        match witness
+            .first()
+            .ok_or(WitnessError::StackUnderflow)?
+            .as_slice()
+        {
             [] => Ok((false, 1)),
             [1] => Ok((true, 1)),
             other => Err(WitnessError::InvalidValue(format!(
@@ -1139,27 +1169,24 @@ impl Debug for ClauseTree {
     }
 }
 
-/// Debug-only check that clause names within a contract are unique. Duplicate
-/// names would make `get_clause` ambiguous and almost certainly indicate a bug.
-fn debug_assert_no_duplicate_clauses(clauses: &[Arc<dyn ErasedClause>]) {
-    if cfg!(debug_assertions) {
-        let mut seen_names = std::collections::HashSet::new();
-        let mut seen_scripts = std::collections::HashSet::new();
-        for clause in clauses {
-            debug_assert!(
-                seen_names.insert(clause.name()),
-                "duplicate clause name in contract: {}",
-                clause.name()
-            );
-            // An observed spend is decoded by matching the witness tapscript
-            // against the clauses, so two clauses must not share a script.
-            debug_assert!(
-                seen_scripts.insert(clause.script().clone()),
-                "two clauses share the same script (ambiguous to decode): {}",
-                clause.name()
-            );
+/// Reject ambiguous clause lookup and spend observation in every build mode.
+fn validate_unique_clauses(clauses: &[Arc<dyn ErasedClause>]) -> Result<(), ContractError> {
+    let mut seen_names = std::collections::HashSet::new();
+    let mut seen_scripts = std::collections::HashMap::new();
+    for clause in clauses {
+        if !seen_names.insert(clause.name()) {
+            return Err(ContractError::DuplicateClauseName(
+                clause.name().to_string(),
+            ));
+        }
+        if let Some(first) = seen_scripts.insert(clause.script().clone(), clause.name()) {
+            return Err(ContractError::DuplicateClauseScript {
+                first: first.to_string(),
+                second: clause.name().to_string(),
+            });
         }
     }
+    Ok(())
 }
 
 // ============================================================================
@@ -1572,18 +1599,18 @@ impl P2trContractCore {
         name: &'static str,
         params: &P,
         clause_tree: ClauseTree,
-    ) -> Self {
-        let taptree = Arc::new(clause_tree.to_script_tree());
+    ) -> Result<Self, ContractError> {
         let clauses = clause_tree.clauses();
-        debug_assert_no_duplicate_clauses(&clauses);
-        Self {
+        validate_unique_clauses(&clauses)?;
+        let taptree = Arc::new(clause_tree.to_script_tree());
+        Ok(Self {
             name,
             kind_id: std::any::TypeId::of::<I>(),
             taptree,
             clauses,
             params_bytes: params.encode(),
             params_any: Arc::new(params.clone()),
-        }
+        })
     }
 
     fn get_clause(&self, name: &str) -> Option<&Arc<dyn ErasedClause>> {
@@ -1620,7 +1647,7 @@ impl<P: ContractParams + 'static> StandardP2TR<P> {
         internal_pubkey: XOnlyPublicKey,
         params: &P,
         clause_tree: ClauseTree,
-    ) -> Self {
+    ) -> Result<Self, ContractError> {
         Self::new_with_identity::<Self>(name, internal_pubkey, params, clause_tree)
     }
 
@@ -1634,12 +1661,12 @@ impl<P: ContractParams + 'static> StandardP2TR<P> {
         internal_pubkey: XOnlyPublicKey,
         params: &P,
         clause_tree: ClauseTree,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ContractError> {
+        Ok(Self {
             internal_pubkey,
-            core: P2trContractCore::new::<P, I>(name, params, clause_tree),
+            core: P2trContractCore::new::<P, I>(name, params, clause_tree)?,
             _phantom: PhantomData,
-        }
+        })
     }
 
     /// The taproot internal key.
@@ -1763,7 +1790,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> StandardAugmentedP
         naked_internal_pubkey: XOnlyPublicKey,
         params: &P,
         clause_tree: ClauseTree,
-    ) -> Self {
+    ) -> Result<Self, ContractError> {
         Self::new_with_identity::<Self>(name, naked_internal_pubkey, params, clause_tree)
     }
 
@@ -1777,12 +1804,12 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> StandardAugmentedP
         naked_internal_pubkey: XOnlyPublicKey,
         params: &P,
         clause_tree: ClauseTree,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ContractError> {
+        Ok(Self {
             naked_internal_pubkey,
-            core: P2trContractCore::new::<P, I>(name, params, clause_tree),
+            core: P2trContractCore::new::<P, I>(name, params, clause_tree)?,
             _phantom: PhantomData,
-        }
+        })
     }
 
     /// The taproot internal key before the state tweak.

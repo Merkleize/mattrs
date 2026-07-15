@@ -49,21 +49,21 @@ pub mod roles;
 
 use std::sync::Arc;
 
-use bitcoin::hashes::{sha256, Hash};
+use bitcoin::hashes::{Hash, sha256};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 
+use crate::Signature;
 use crate::argtypes::{BytesType, SignerType};
-use crate::contracts::{ArgSpec, ClauseOutput};
+use crate::contracts::{ArgSpec, ClauseError, ClauseOutput};
+pub use crate::manager::MissingStateError;
 use crate::manager::SpendBuilder;
 use crate::merkle::is_power_of_2;
-pub use crate::manager::MissingStateError;
 use crate::script_helpers::{
     check_input_contract, check_output_contract, concat, drop as script_drop, dup, merkle_root,
     timeout_sig_script,
 };
-use crate::Signature;
-use mattrs_derive::{contract, ContractParams, ContractState};
+use mattrs_derive::{ContractParams, ContractState, contract};
 
 define_pushable!();
 
@@ -373,11 +373,13 @@ contract! {
             }
             script |p, c| Bisect1::alice_reveal_script(
                 p.alice_pk,
-                Bisect2::new(p.clone(), c.clone()).taptree_root(),
+                Bisect2::new(p.clone(), c.clone())
+                    .expect("Bisect2 contract definition is valid")
+                    .taptree_root(),
             );
             next(p, a) {
                 Ok(vec![ClauseOutput::at_same_index()
-                    .to(Bisect2::new(p.clone(), ctx.clone()).as_erased())
+                    .to(Bisect2::new(p.clone(), ctx.clone())?.as_erased())
                     .with_state(&Bisect2State::from(a))
                     .preserve_amount()
                     .build()])
@@ -499,10 +501,10 @@ contract! {
                 Bisect2::child_root(p, Side::Left, c),
             );
             next(p, a) {
-                Ok(Bisect2::child_output(
+                Bisect2::child_output(
                     p, ctx, Side::Left,
                     a.h_start, a.h_mid_a, a.h_mid_b, a.trace_left_a, a.trace_left_b,
-                ))
+                )
             }
         }
 
@@ -531,10 +533,10 @@ contract! {
                 Bisect2::child_root(p, Side::Right, c),
             );
             next(p, a) {
-                Ok(Bisect2::child_output(
+                Bisect2::child_output(
                     p, ctx, Side::Right,
                     a.h_mid_a, a.h_end_a, a.h_end_b, a.trace_right_a, a.trace_right_b,
-                ))
+                )
             }
         }
 
@@ -568,7 +570,9 @@ impl Bisect2 {
         if params.children_are_leaves() {
             (ctx.leaf_factory)(child.i).taptree_root()
         } else {
-            Bisect1::new(child, ctx.clone()).taptree_root()
+            Bisect1::new(child, ctx.clone())
+                .expect("Bisect1 contract definition is valid")
+                .taptree_root()
         }
     }
 
@@ -585,7 +589,7 @@ impl Bisect2 {
         h_end_bob: [u8; 32],
         trace_alice: [u8; 32],
         trace_bob: [u8; 32],
-    ) -> Vec<ClauseOutput> {
+    ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let child = Self::child_params(params, side);
         let output = if params.children_are_leaves() {
             ClauseOutput::at_same_index()
@@ -597,7 +601,7 @@ impl Bisect2 {
                 })
         } else {
             ClauseOutput::at_same_index()
-                .to(Bisect1::new(child, ctx.clone()).as_erased())
+                .to(Bisect1::new(child, ctx.clone())?.as_erased())
                 .with_state(&Bisect1State {
                     h_start,
                     h_end_a: h_end_alice,
@@ -606,7 +610,7 @@ impl Bisect2 {
                     trace_b: trace_bob,
                 })
         };
-        vec![output.preserve_amount().build()]
+        Ok(vec![output.preserve_amount().build()])
     }
 
     // witness: <bob_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b>

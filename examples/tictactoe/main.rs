@@ -44,10 +44,10 @@ use mattrs::contracts::ErasedState;
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{RpcChain, Runner};
 
-use contracts::roles::{alice_role, bob_role, PlayerData, Strategy, TttOutcome, TttResult};
+use contracts::roles::{PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role};
 use contracts::{
-    TicTacToe, TttParams, TttState, DEFAULT_STAKE, DEFAULT_TIMEOUT_BLOCKS, EMPTY, MARK_ALICE,
-    MARK_BOB,
+    DEFAULT_STAKE, DEFAULT_TIMEOUT_BLOCKS, EMPTY, MARK_ALICE, MARK_BOB, TicTacToe, TttParams,
+    TttState,
 };
 
 type AppResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -135,8 +135,7 @@ fn send_json(stream: &mut TcpStream, value: serde_json::Value) -> std::io::Resul
 fn recv_json(reader: &mut BufReader<TcpStream>) -> std::io::Result<serde_json::Value> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
-    serde_json::from_str(&line)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_str(&line).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 fn pubkey_of(value: &serde_json::Value, key: &str) -> AppResult<XOnlyPublicKey> {
@@ -190,7 +189,7 @@ fn run_alice(
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
-    let game = TicTacToe::new(params).fund(
+    let game = TicTacToe::new(params)?.fund(
         &mut manager,
         Amount::from_sat((2 * stake) as u64),
         TttState::initial(),
@@ -218,11 +217,7 @@ fn run_alice(
 // Bob: accepts the game, tracks the funding, plays O
 // ----------------------------------------------------------------------------
 
-fn run_bob(
-    addr: &str,
-    wallet: &str,
-    inspector: Option<u16>,
-) -> AppResult {
+fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     let xpriv = Xpriv::from_str(BOB_XPRIV)?;
     let pk_b = xonly(&xpriv);
 
@@ -267,7 +262,7 @@ fn run_bob(
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
     let entry = manager.track_instance(
-        TicTacToe::new(params).as_erased(),
+        TicTacToe::new(params)?.as_erased(),
         Some(Box::new(TttState::initial()) as Box<dyn ErasedState>),
         outpoint,
     )?;
@@ -332,7 +327,7 @@ fn main() -> AppResult {
                 return Err(format!(
                     "unknown argument `{other}` (see the module doc; --stake/--timeout are Alice's)"
                 )
-                .into())
+                .into());
             }
         }
     }

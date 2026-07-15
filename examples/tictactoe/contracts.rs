@@ -31,12 +31,10 @@
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{
-    ClauseError, ClauseOutput, ContractState, CtvTemplate, WitnessError,
-};
+use mattrs::contracts::{ClauseError, ClauseOutput, ContractState, CtvTemplate, WitnessError};
 use mattrs::manager::{MissingStateError, SpendBuilder};
 use mattrs::script_helpers::{check_input_contract, concat, dup, key_path_p2tr, older};
-use mattrs::{contract, ContractParams, Signature};
+use mattrs::{ContractParams, Signature, contract};
 
 define_pushable!();
 
@@ -137,7 +135,11 @@ impl TttState {
         let mut board = self.board;
         board[cell] = mark;
         TttState {
-            turn: if self.turn == TURN_ALICE { TURN_BOB } else { TURN_ALICE },
+            turn: if self.turn == TURN_ALICE {
+                TURN_BOB
+            } else {
+                TURN_ALICE
+            },
             board,
         }
     }
@@ -294,7 +296,8 @@ impl TicTacToe {
         turn: u8,
         mark: u8,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = s.ok_or_else(|| ClauseError::Other("a move needs the board state".to_string()))?;
+        let state =
+            s.ok_or_else(|| ClauseError::Other("a move needs the board state".to_string()))?;
         let cell = prefix.len();
         if cell >= 9 || suffix.len() != 8 - cell {
             return Err(ClauseError::Other(
@@ -302,7 +305,9 @@ impl TicTacToe {
             ));
         }
         if state.turn != turn {
-            return Err(ClauseError::Other("it is not this player's turn".to_string()));
+            return Err(ClauseError::Other(
+                "it is not this player's turn".to_string(),
+            ));
         }
         if state.board[cell] != EMPTY {
             return Err(ClauseError::Other(format!("cell {cell} is already taken")));
@@ -312,11 +317,13 @@ impl TicTacToe {
                 "the revealed board does not match the state".to_string(),
             ));
         }
-        Ok(vec![ClauseOutput::at_same_index()
-            .to(TicTacToe::new(p.clone()).as_erased())
-            .with_state(&state.after_move(cell, mark))
-            .preserve_amount()
-            .build()])
+        Ok(vec![
+            ClauseOutput::at_same_index()
+                .to(TicTacToe::new(p.clone())?.as_erased())
+                .with_state(&state.after_move(cell, mark))
+                .preserve_amount()
+                .build(),
+        ])
     }
 
     // ------------------------------------------------------------------
@@ -602,8 +609,8 @@ pub mod roles {
     use mattrs::signer::HotSigner;
 
     use super::{
-        board_full, has_line, TicTacToe, TicTacToeClause, TicTacToeHandle, EMPTY, MARK_ALICE,
-        MARK_BOB, TURN_ALICE, TURN_BOB,
+        EMPTY, MARK_ALICE, MARK_BOB, TURN_ALICE, TURN_BOB, TicTacToe, TicTacToeClause,
+        TicTacToeHandle, board_full, has_line,
     };
 
     /// How a player picks the next cell, given the board. Tests inject

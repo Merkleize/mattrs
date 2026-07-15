@@ -17,9 +17,9 @@ use mattrs::protocol::{Action, LocalChain, ProtocolError, Role, Runner};
 use mattrs::testutil::fund_fake;
 
 use support::rps::roles::{
-    alice_role, bob_role, outcome_of, AliceData, BobData, RpsOutcome, RpsResult,
+    AliceData, BobData, RpsOutcome, RpsResult, alice_role, bob_role, outcome_of,
 };
-use support::rps::{alice_move_commitment, RpsGameS0, RpsGameS0Handle, RpsParams, DEFAULT_STAKE};
+use support::rps::{DEFAULT_STAKE, RpsGameS0, RpsGameS0Handle, RpsParams, alice_move_commitment};
 use support::testkit::{alice_pk, bob_pk, bob_xpriv, drive_both, offline_manager, walk_tip};
 
 const SEED: u8 = 21;
@@ -41,8 +41,18 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
     let c_a = alice_move_commitment(m_a, &r_a);
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
 
-    let alice_entry = fund_fake(RpsGameS0::new(params(c_a)).as_erased(), None, pot, SEED);
-    let bob_entry = fund_fake(RpsGameS0::new(params(c_a)).as_erased(), None, pot, SEED);
+    let alice_entry = fund_fake(
+        RpsGameS0::new(params(c_a)).unwrap().as_erased(),
+        None,
+        pot,
+        SEED,
+    );
+    let bob_entry = fund_fake(
+        RpsGameS0::new(params(c_a)).unwrap().as_erased(),
+        None,
+        pot,
+        SEED,
+    );
 
     let mut alice = Runner::new(
         offline_manager(),
@@ -67,8 +77,7 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
         bob_entry.clone(),
     );
 
-    let (a_out, b_out) =
-        drive_both(&mut alice, &mut bob, 20, Duration::ZERO).expect("both step");
+    let (a_out, b_out) = drive_both(&mut alice, &mut bob, 20, Duration::ZERO).expect("both step");
 
     // Both parties saw the same terminal adjudication of Bob's S1 twin.
     let s1 = walk_tip(&bob_entry);
@@ -82,9 +91,9 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
 fn all_outcomes_resolve_and_agree() {
     // (m_a, m_b): rock/paper/scissors are 0/1/2.
     for (m_a, m_b, expected) in [
-        (0, 0, RpsResult::Tie),           // rock ties rock
-        (0, 1, RpsResult::BobWins),       // Bob's paper covers Alice's rock
-        (1, 0, RpsResult::AliceWins),     // Alice's paper covers Bob's rock
+        (0, 0, RpsResult::Tie),       // rock ties rock
+        (0, 1, RpsResult::BobWins),   // Bob's paper covers Alice's rock
+        (1, 0, RpsResult::AliceWins), // Alice's paper covers Bob's rock
     ] {
         let (a_out, b_out) = play(m_a, m_b);
         assert_eq!(a_out, b_out, "both parties agree");
@@ -102,15 +111,19 @@ fn missing_handler_is_reported() {
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
 
     // A truncated role: it watches S0 but has no idea what an S1 is.
-    let truncated: Role<(), RpsOutcome> = Role::new().on::<RpsGameS0, _>(
-        |_d: &mut (), _h: RpsGameS0Handle, _cx| Ok(Action::Wait),
-    );
+    let truncated: Role<(), RpsOutcome> =
+        Role::new().on::<RpsGameS0, _>(|_d: &mut (), _h: RpsGameS0Handle, _cx| Ok(Action::Wait));
     let mut watcher = Runner::new(
         offline_manager(),
         chain.clone(),
         truncated,
         (),
-        fund_fake(RpsGameS0::new(params(c_a)).as_erased(), None, pot, SEED),
+        fund_fake(
+            RpsGameS0::new(params(c_a)).unwrap().as_erased(),
+            None,
+            pot,
+            SEED,
+        ),
     );
 
     let mut bob = Runner::new(
@@ -122,7 +135,12 @@ fn missing_handler_is_reported() {
             c_a,
             xpriv: bob_xpriv(),
         },
-        fund_fake(RpsGameS0::new(params(c_a)).as_erased(), None, pot, SEED),
+        fund_fake(
+            RpsGameS0::new(params(c_a)).unwrap().as_erased(),
+            None,
+            pot,
+            SEED,
+        ),
     );
 
     // Bob moves; the watcher then observes a child it cannot follow.

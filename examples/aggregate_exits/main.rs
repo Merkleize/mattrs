@@ -27,7 +27,7 @@ mod contracts;
 
 use bitcoin::bip32::Xpriv;
 use bitcoin::{Amount, Network, XOnlyPublicKey};
-use mattrs::manager::{regtest_rpc_client, ContractManager, InstanceHandle};
+use mattrs::manager::{ContractManager, InstanceHandle, regtest_rpc_client};
 use mattrs::signer::HotSigner;
 
 use contracts::fixture::*;
@@ -64,17 +64,22 @@ impl Stage {
         let params = params();
         let pool = pool();
 
-        let mut manager =
-            ContractManager::new(regtest_rpc_client(wallet), Network::Regtest);
-        let unwind = Unwind::new(params.clone()).fund(
+        let mut manager = ContractManager::new(regtest_rpc_client(wallet), Network::Regtest);
+        let unwind = Unwind::new(params.clone())?.fund(
             &mut manager,
             Amount::from_sat(POOL_TOTAL),
             UnwindState { root: pool.root() },
         )?;
 
-        println!("  The pool holds {POOL_TOTAL} sats for 6 users (root {}):", short(&pool.root()));
+        println!(
+            "  The pool holds {POOL_TOTAL} sats for 6 users (root {}):",
+            short(&pool.root())
+        );
         for (i, balance) in BALANCES.iter().enumerate() {
-            println!("    user {i}: {balance:>5} sats  (pk {})", short(&xonly(&user_xpriv(i)).serialize()));
+            println!(
+                "    user {i}: {balance:>5} sats  (pk {})",
+                short(&xonly(&user_xpriv(i)).serialize())
+            );
         }
         println!("  Unwind funded at {}", unwind.handle().outpoint().unwrap());
 
@@ -91,21 +96,17 @@ impl Stage {
         Ok(ExitBond::new(ExitBondParams {
             pool: self.params.clone(),
             owner_pk: xonly(owner),
-        })
+        })?
         .fund(&mut self.manager, Amount::from_sat(BOND as u64))?)
     }
 
     /// Post `claim` (with Ingrid's bond) and return the pending exit.
-    fn claim(
-        &mut self,
-        claim: &ExitClaim,
-    ) -> DemoResult<(PendingExitHandle, PendingExitState)> {
+    fn claim(&mut self, claim: &ExitClaim) -> DemoResult<(PendingExitHandle, PendingExitState)> {
         let bond = self.bond_for(&ingrid_xpriv())?;
         let claim_state = PendingExitState::for_claim(&self.params, claim, &self.ingrid_pk);
         let children = self.manager.spend_batch(&[
             self.unwind.start_exit(claim, &self.ingrid_pk),
-            bond.stake()
-                .sign(HotSigner::new(ingrid_xpriv())),
+            bond.stake().sign(HotSigner::new(ingrid_xpriv())),
         ])?;
         println!(
             "  Ingrid claims X = {} sats for users {} (+{} sats bond, {}-block challenge period)",
@@ -128,9 +129,7 @@ impl Stage {
         let cbond = self.bond_for(challenger)?;
         let children = self.manager.spend_batch(&[
             pending.challenge_state(challenger_claim, &xonly(challenger)),
-            cbond
-                .stake()
-                .sign(HotSigner::new(*challenger)),
+            cbond.stake().sign(HotSigner::new(*challenger)),
         ])?;
         println!(
             "  A challenger disputes the claim (h_end {} vs Ingrid's {}), posting {} sats bond",
@@ -153,7 +152,10 @@ impl Stage {
             let b1: ExitBisect1Handle = current.clone().try_into().unwrap();
             let p = b1.params();
             let children = b1.ingrid_reveal(ingrid_hs).exec(&mut self.manager)?;
-            println!("    bisecting [{}, {}]: Ingrid reveals her midpoint", p.i, p.j);
+            println!(
+                "    bisecting [{}, {}]: Ingrid reveals her midpoint",
+                p.i, p.j
+            );
             let b2: ExitBisect2Handle = children.typed(0)?;
             let children = b2
                 .challenger_reveal(challenger_hs)
@@ -323,19 +325,23 @@ fn scenario_delegation_defend(wallet: &str) -> DemoResult {
     let honest = compute_claim(&stage.pool, &exit_bits());
     // User 2 signed a delegation off-chain before the claim (so did 1 and 4,
     // but only user 2's will be challenged).
-    let delegation_2 =
-        sign_delegation(&keypair(&user_xpriv(2)), &stage.params.pool_id, &stage.ingrid_pk);
+    let delegation_2 = sign_delegation(
+        &keypair(&user_xpriv(2)),
+        &stage.params.pool_id,
+        &stage.ingrid_pk,
+    );
     let (pending, claim_state) = stage.claim(&honest)?;
 
     let challenger = user_xpriv(2);
     let cbond = stage.bond_for(&challenger)?;
     let children = stage.manager.spend_batch(&[
         pending.challenge_delegation(&stage.pool, &honest.bits, 2, &xonly(&challenger)),
-        cbond
-            .stake()
-            .sign(HotSigner::new(challenger)),
+        cbond.stake().sign(HotSigner::new(challenger)),
     ])?;
-    println!("  user 2 disputes their own delegation (bond: {} sats)", BOND);
+    println!(
+        "  user 2 disputes their own delegation (bond: {} sats)",
+        BOND
+    );
 
     let dc: DelegationChallengeHandle = children.typed(0)?;
     let children = dc
@@ -375,13 +381,14 @@ fn scenario_delegation_timeout(wallet: &str) -> DemoResult {
     let cbond = stage.bond_for(&challenger)?;
     let children = stage.manager.spend_batch(&[
         pending.challenge_delegation(&stage.pool, &claim.bits, 3, &xonly(&challenger)),
-        cbond
-            .stake()
-            .sign(HotSigner::new(challenger)),
+        cbond.stake().sign(HotSigner::new(challenger)),
     ])?;
     println!("  user 3 disputes their delegation (bond: {} sats)", BOND);
 
-    stage.mine(stage.params.response_timeout, "Ingrid has no signature to reveal")?;
+    stage.mine(
+        stage.params.response_timeout,
+        "Ingrid has no signature to reveal",
+    )?;
     let dc: DelegationChallengeHandle = children.typed(0)?;
     let children = dc
         .challenger_wins()
@@ -430,7 +437,9 @@ fn main() {
             }
             other => {
                 eprintln!("unknown argument: {other}");
-                eprintln!("usage: aggregate_exits [--wallet <name>] [--scenario all|{scenario_names}]");
+                eprintln!(
+                    "usage: aggregate_exits [--wallet <name>] [--scenario all|{scenario_names}]"
+                );
                 std::process::exit(2);
             }
         }

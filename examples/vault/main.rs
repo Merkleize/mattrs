@@ -50,7 +50,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::{Address, Amount, Sequence, TxOut, XOnlyPublicKey};
 use mattrs::contracts::InstanceStatus;
 use mattrs::ctv::create_ctv_template;
-use mattrs::manager::{regtest_rpc_client, ContractManager, InstanceHandle};
+use mattrs::manager::{ContractManager, InstanceHandle, regtest_rpc_client};
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
@@ -93,7 +93,9 @@ impl Repl {
     }
 
     fn item(&self, idx_str: &str) -> Result<(usize, InstanceHandle), String> {
-        let idx: usize = idx_str.parse().map_err(|_| format!("bad index `{idx_str}`"))?;
+        let idx: usize = idx_str
+            .parse()
+            .map_err(|_| format!("bad index `{idx_str}`"))?;
         let handle = self
             .items
             .get(idx)
@@ -106,10 +108,7 @@ impl Repl {
             "  -> instance {}: {} at {}",
             self.items.len(),
             self.kind_str(&handle),
-            handle
-                .outpoint()
-                .map(|o| o.to_string())
-                .unwrap_or_default()
+            handle.outpoint().map(|o| o.to_string()).unwrap_or_default()
         );
         self.items.push(handle);
     }
@@ -121,7 +120,7 @@ impl Repl {
     fn fund(&mut self, amount_str: &str) -> AppResult {
         let amount: u64 = amount_str.parse()?;
         let vault =
-            Vault::new(self.params.clone()).fund(&mut self.manager, Amount::from_sat(amount))?;
+            Vault::new(self.params.clone())?.fund(&mut self.manager, Amount::from_sat(amount))?;
         self.track(vault.handle().clone());
         Ok(())
     }
@@ -132,10 +131,7 @@ impl Repl {
                 .prevout()
                 .map(|p| p.value.to_sat().to_string())
                 .unwrap_or_default();
-            let outpoint = handle
-                .outpoint()
-                .map(|o| o.to_string())
-                .unwrap_or_default();
+            let outpoint = handle.outpoint().map(|o| o.to_string()).unwrap_or_default();
             let state = handle
                 .state::<UnvaultingState>()
                 .map(|s| format!(" ctv_hash={}", hex::encode(s.ctv_hash)))
@@ -152,18 +148,17 @@ impl Repl {
         for (i, handle) in self.items.iter().enumerate() {
             match (handle.clause_name(), handle.spent_in_tx()) {
                 (Some(clause), Some(txid)) => {
-                    println!("{i} {} spent via `{clause}` in {txid}", self.kind_str(handle))
+                    println!(
+                        "{i} {} spent via `{clause}` in {txid}",
+                        self.kind_str(handle)
+                    )
                 }
                 _ => println!("{i} {} {:?}", self.kind_str(handle), handle.status()),
             }
         }
     }
 
-    fn trigger(
-        &mut self,
-        ids: &str,
-        outputs: &[&str],
-    ) -> AppResult {
+    fn trigger(&mut self, ids: &str, outputs: &[&str]) -> AppResult {
         // The vaults being unvaulted.
         let mut vaults: Vec<(usize, InstanceHandle)> = Vec::new();
         for id in ids.split(',') {
@@ -321,7 +316,9 @@ impl Repl {
             ["mine"] => self.mine(None),
             ["mine", n] => self.mine(Some(n)),
             ["help"] => {
-                println!("commands: fund <amount> | list | trigger <ids> <addr:amt>.. | withdraw <id> | recover <id> | mine [n] | printall | exit");
+                println!(
+                    "commands: fund <amount> | list | trigger <ids> <addr:amt>.. | withdraw <id> | recover <id> | mine [n] | printall | exit"
+                );
                 Ok(())
             }
             _ => Err(format!("invalid command `{line}` (try `help`)").into()),
@@ -381,7 +378,7 @@ fn main() -> AppResult {
     };
     println!(
         "Vault address: {}\n",
-        Vault::new(params.clone()).address(bitcoin::Network::Regtest)
+        Vault::new(params.clone())?.address(bitcoin::Network::Regtest)
     );
 
     let client = regtest_rpc_client(&wallet);

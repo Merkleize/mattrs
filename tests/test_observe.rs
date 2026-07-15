@@ -29,7 +29,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     let mut actor = ContractManager::new(actor_client, bitcoin::Network::Regtest);
 
     let amount = 49_999_900u64;
-    let vault_a = Vault::new(params.clone()).fund(&mut actor, Amount::from_sat(amount))?;
+    let vault_a = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
     let funding_outpoint = vault_a.handle().outpoint().unwrap();
 
     let ctv_template = vec![(
@@ -66,7 +66,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
 
     let vault_b = observer.track_instance(
-        Vault::new(params.clone()).as_erased(),
+        Vault::new(params.clone())?.as_erased(),
         None,
         funding_outpoint,
     )?;
@@ -112,8 +112,8 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
 
     let mut actor = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
     let amount = 20_000_000u64;
-    let vault_1 = Vault::new(params.clone()).fund(&mut actor, Amount::from_sat(amount))?;
-    let vault_2 = Vault::new(params.clone()).fund(&mut actor, Amount::from_sat(amount))?;
+    let vault_1 = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
+    let vault_2 = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
 
     let ctv_template = vec![(
         Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?.assume_checked(),
@@ -125,7 +125,7 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     // funding outpoints are still around to verify.
     let mut observer =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let vault_contract = Vault::new(params.clone()).as_erased();
+    let vault_contract = Vault::new(params.clone())?.as_erased();
     let tracked_1 = observer.track_instance(
         vault_contract.clone(),
         None,

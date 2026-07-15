@@ -22,8 +22,8 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, ClauseOutput};
 use mattrs::{
-    contract, contracts::CCV_FLAG_CHECK_INPUT, contracts::CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
-    internal_key_or_nums, optional_key_script, ContractParams, ContractState, Signature,
+    ContractParams, ContractState, Signature, contract, contracts::CCV_FLAG_CHECK_INPUT,
+    contracts::CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, internal_key_or_nums, optional_key_script,
 };
 
 define_pushable!();
@@ -71,7 +71,7 @@ contract! {
             }
             script Vault::trigger_script;
             next(p, a) {
-                Vault::new(p.clone()).trigger_outputs(a.ctv_hash, a.out_i as i32)
+                Vault::new(p.clone())?.trigger_outputs(a.ctv_hash, a.out_i as i32)
             }
         }
 
@@ -86,7 +86,7 @@ contract! {
             }
             script Vault::trigger_and_revault_script;
             next(p, a) {
-                Vault::new(p.clone()).trigger_and_revault_outputs(
+                Vault::new(p.clone())?.trigger_and_revault_outputs(
                     a.ctv_hash,
                     a.out_i as i32,
                     a.revault_out_i as i32,
@@ -122,14 +122,16 @@ impl Vault {
         out_i: i32,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let params = self.params();
-        let unvaulting = Unvaulting::new(Self::unvaulting_params(&params));
+        let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
         let state = UnvaultingState { ctv_hash };
 
-        Ok(vec![ClauseOutput::at(out_i as u32)
-            .to(unvaulting.as_erased())
-            .with_state(&state)
-            .preserve_amount()
-            .build()])
+        Ok(vec![
+            ClauseOutput::at(out_i as u32)
+                .to(unvaulting.as_erased())
+                .with_state(&state)
+                .preserve_amount()
+                .build(),
+        ])
     }
 
     pub fn trigger_and_revault_outputs(
@@ -139,12 +141,12 @@ impl Vault {
         revault_out_i: i32,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let params = self.params();
-        let unvaulting = Unvaulting::new(Self::unvaulting_params(&params));
+        let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
         let state = UnvaultingState { ctv_hash };
 
         Ok(vec![
             ClauseOutput::at(revault_out_i as u32)
-                .to(Vault::new(params).as_erased())
+                .to(Vault::new(params)?.as_erased())
                 .deduct_amount()
                 .build(),
             ClauseOutput::at(out_i as u32)
@@ -161,6 +163,7 @@ impl Vault {
 
     fn trigger_script(params: &VaultParams) -> ScriptBuf {
         let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
+            .expect("Unvaulting contract definition is valid")
             .taptree_root();
 
         script! {
@@ -175,6 +178,7 @@ impl Vault {
 
     fn trigger_and_revault_script(params: &VaultParams) -> ScriptBuf {
         let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
+            .expect("Unvaulting contract definition is valid")
             .taptree_root();
 
         script! {

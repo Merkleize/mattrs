@@ -51,8 +51,8 @@ use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{ProtocolError, RpcChain, Runner};
 
-use contracts::roles::{alice_role, bob_role, clause_of, AliceData, BobData};
-use contracts::{alice_move_commitment, RpsGameS0, RpsParams, DEFAULT_STAKE};
+use contracts::roles::{AliceData, BobData, alice_role, bob_role, clause_of};
+use contracts::{DEFAULT_STAKE, RpsGameS0, RpsParams, alice_move_commitment};
 
 type AppResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -97,8 +97,7 @@ fn send_json(stream: &mut TcpStream, value: serde_json::Value) -> std::io::Resul
 fn recv_json(reader: &mut BufReader<TcpStream>) -> std::io::Result<serde_json::Value> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
-    serde_json::from_str(&line)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_str(&line).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 fn hex32(value: &serde_json::Value, key: &str) -> AppResult<[u8; 32]> {
@@ -117,18 +116,17 @@ fn hex32(value: &serde_json::Value, key: &str) -> AppResult<[u8; 32]> {
 // Alice: commits to a hidden move, funds the game, adjudicates
 // ----------------------------------------------------------------------------
 
-fn run_alice(
-    m_a: i64,
-    addr: &str,
-    wallet: &str,
-    inspector: Option<u16>,
-) -> AppResult {
+fn run_alice(m_a: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     let xpriv = Xpriv::from_str(ALICE_XPRIV)?;
     let pk_a = xonly(&xpriv);
 
     let r_a: [u8; 32] = urandom()?;
     let c_a = alice_move_commitment(m_a, &r_a);
-    println!("Alice plays {} (hidden behind commitment {})", move_str(m_a), hex::encode(c_a));
+    println!(
+        "Alice plays {} (hidden behind commitment {})",
+        move_str(m_a),
+        hex::encode(c_a)
+    );
 
     println!("Waiting for Bob on {addr}...");
     let listener = TcpListener::bind(addr)?;
@@ -154,7 +152,8 @@ fn run_alice(
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
-    let s0 = RpsGameS0::new(params).fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
+    let s0 =
+        RpsGameS0::new(params)?.fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
     let entry = s0.handle().clone();
     let outpoint = entry.outpoint().expect("just funded");
     println!("Game funded at {outpoint}");
@@ -192,12 +191,7 @@ fn run_alice(
 // Bob: tracks the funded game, reveals his move, observes the outcome
 // ----------------------------------------------------------------------------
 
-fn run_bob(
-    m_b: i64,
-    addr: &str,
-    wallet: &str,
-    inspector: Option<u16>,
-) -> AppResult {
+fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     let xpriv = Xpriv::from_str(BOB_XPRIV)?;
     let pk_b = xonly(&xpriv);
 
@@ -234,7 +228,7 @@ fn run_bob(
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector);
-    let entry = manager.track_instance(RpsGameS0::new(params).as_erased(), None, outpoint)?;
+    let entry = manager.track_instance(RpsGameS0::new(params)?.as_erased(), None, outpoint)?;
     println!("Tracking the game at {outpoint}");
 
     // Bob's role does the rest: reveal the move on-chain (signed), then follow
@@ -323,7 +317,11 @@ fn main() -> AppResult {
             "--inspector-port" => {
                 inspector = Some(it.next().ok_or("--inspector-port needs a value")?.parse()?)
             }
-            other => return Err(format!("unknown argument `{other}` (see --help in the module doc)").into()),
+            other => {
+                return Err(
+                    format!("unknown argument `{other}` (see --help in the module doc)").into(),
+                );
+            }
         }
     }
 

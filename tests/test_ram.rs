@@ -6,7 +6,7 @@
 
 mod support;
 
-use mattrs::merkle::{ceil_lg, floor_lg, get_directions, MerkleProofType, MerkleTree, WitProof};
+use mattrs::merkle::{MerkleProofType, MerkleTree, WitProof, ceil_lg, floor_lg, get_directions};
 use support::ram::{Ram, RamHandle, RamParams, RamState};
 
 fn ref_leaves() -> Vec<[u8; 32]> {
@@ -63,7 +63,7 @@ fn test_merkle_proof_matches_reference() {
 fn test_ram_taptree_matches_reference() {
     // Byte-compatibility proof for the withdraw/write tapscripts: the taptree root
     // matches the pymatt reference RAM(4).get_taptree_merkle_root().
-    let ram = Ram::new(RamParams { size: 4 });
+    let ram = Ram::new(RamParams { size: 4 }).unwrap();
     assert_eq!(
         hex::encode(ram.taptree_root()),
         "c86ddcabdddb39b345fbb7bc3cc4471c4a57672dddb27615a3b7e69027cf7bad"
@@ -117,7 +117,7 @@ fn test_ram_write_commits_updated_root() {
     use support::testkit::{fund_fake, offline_client, try_handle};
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
-    let ram = Ram::new(RamParams { size: 4 });
+    let ram = Ram::new(RamParams { size: 4 }).unwrap();
 
     // The instance commits the initial leaves' Merkle root, and carries the leaves
     // themselves as expanded state.
@@ -148,7 +148,10 @@ fn test_ram_write_commits_updated_root() {
     let mut updated = leaves.clone();
     updated[2] = new_value;
     let new_root = MerkleTree::new(updated).root();
-    let expected = ram.as_erased().script_pubkey(Some(new_root.as_slice())).unwrap();
+    let expected = ram
+        .as_erased()
+        .script_pubkey(Some(new_root.as_slice()))
+        .unwrap();
 
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, expected);
@@ -181,7 +184,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     let mut report = Report::new();
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
-    let ram = Ram::new(RamParams { size: 4 }).fund(
+    let ram = Ram::new(RamParams { size: 4 })?.fund(
         &mut manager,
         Amount::from_sat(100_000),
         RamState {
@@ -198,12 +201,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
         .write(proof, new_value, tree.root())
         .exec_one(&mut manager)?
         .try_into()?;
-    report_spend(
-        &mut report,
-        "RAM",
-        "write (update cell 2)",
-        ram.handle(),
-    );
+    report_spend(&mut report, "RAM", "write (update cell 2)", ram.handle());
 
     // Withdraw from the updated RAM, proving the freshly written value.
     let mut updated = leaves.clone();

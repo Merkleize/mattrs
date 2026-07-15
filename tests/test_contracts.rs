@@ -96,7 +96,8 @@ fn test_vault_contract_creation() {
         owner_pubkey,
         &params,
         ClauseTree::leaf(trigger_erased),
-    );
+    )
+    .expect("contract definition is valid");
 
     // Create initial state
     let state = VaultState { amount: 100000 };
@@ -112,6 +113,60 @@ fn test_vault_contract_creation() {
     println!("Output key: {}", output_key);
     println!("ScriptPubKey: {}", script_pubkey);
     assert!(!script_pubkey.is_empty());
+}
+
+fn test_clause(name: &str, script_hex: &str) -> Arc<dyn ErasedClause> {
+    Arc::new(StandardClause::<(), (), TriggerArgs>::new(
+        name.to_string(),
+        ScriptBuf::from_hex(script_hex).unwrap(),
+        vec![],
+        None,
+    ))
+}
+
+#[test]
+fn contract_rejects_duplicate_clause_names() {
+    let owner = XOnlyPublicKey::from_str(
+        "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    )
+    .unwrap();
+    let result = StandardP2TR::new(
+        "DuplicateNames",
+        owner,
+        &(),
+        ClauseTree::branch(
+            ClauseTree::leaf(test_clause("spend", "51")),
+            ClauseTree::leaf(test_clause("spend", "52")),
+        ),
+    );
+
+    assert!(matches!(
+        result,
+        Err(ContractError::DuplicateClauseName(name)) if name == "spend"
+    ));
+}
+
+#[test]
+fn contract_rejects_duplicate_clause_scripts() {
+    let owner = XOnlyPublicKey::from_str(
+        "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
+    )
+    .unwrap();
+    let result = StandardP2TR::new(
+        "DuplicateScripts",
+        owner,
+        &(),
+        ClauseTree::branch(
+            ClauseTree::leaf(test_clause("first", "51")),
+            ClauseTree::leaf(test_clause("second", "51")),
+        ),
+    );
+
+    assert!(matches!(
+        result,
+        Err(ContractError::DuplicateClauseScript { first, second })
+            if first == "first" && second == "second"
+    ));
 }
 
 #[test]
@@ -290,9 +345,7 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use bitcoin::{
-        hashes::Hash, Address, Amount, OutPoint, Sequence, Transaction, TxOut, Txid,
-    };
+    use bitcoin::{Address, Amount, OutPoint, Sequence, Transaction, TxOut, Txid, hashes::Hash};
     use bitcoincore_rpc::{Auth, Client};
     use mattrs::manager::{ContractManager, InstanceHandle};
 
@@ -315,20 +368,24 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
             name: "withdraw_amount".to_string(),
             arg_type: Arc::new(IntType),
         }],
-        Some(Arc::new(move |_p: &(), _a: &TriggerArgs, _s: Option<&()>| {
-            Ok(NextOutputs::Template(CtvTemplate::new(
-                outs.clone(),
-                template_seq,
-            )))
-        })),
+        Some(Arc::new(
+            move |_p: &(), _a: &TriggerArgs, _s: Option<&()>| {
+                Ok(NextOutputs::Template(CtvTemplate::new(
+                    outs.clone(),
+                    template_seq,
+                )))
+            },
+        )),
     ));
 
     let owner = XOnlyPublicKey::from_str(
         "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
     )
     .unwrap();
-    let erased: Arc<dyn ErasedContract> =
-        Arc::new(StandardP2TR::<()>::new("Pay", owner, &(), ClauseTree::leaf(clause)));
+    let erased: Arc<dyn ErasedContract> = Arc::new(
+        StandardP2TR::<()>::new("Pay", owner, &(), ClauseTree::leaf(clause))
+            .expect("contract definition is valid"),
+    );
     let script_pubkey = erased.script_pubkey(None).unwrap();
 
     // Fake a funded instance (building the tx does no RPC).
@@ -368,7 +425,6 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
 
 #[test]
 fn test_expanded_state_flows_to_next_outputs() {
-
     // A lossy state: the commitment is a hash, so `decode` cannot recover `secret`
     // (it returns a -1 sentinel). A clause's next_outputs must therefore see the
     // real secret via the instance's logical (expanded) state, not the fallback.
@@ -399,11 +455,8 @@ fn test_expanded_state_flows_to_next_outputs() {
     );
     let erased: &dyn ErasedClause = &clause;
 
-    let witness = <SampleArgs as ClauseArgs>::encode_to_witness(&SampleArgs::new(
-        1,
-        vec![],
-        [0u8; 32],
-    ));
+    let witness =
+        <SampleArgs as ClauseArgs>::encode_to_witness(&SampleArgs::new(1, vec![], [0u8; 32]));
 
     // The commitment is a 32-byte hash and decode cannot recover the secret.
     let state = CounterState { secret: 42 };
@@ -416,14 +469,18 @@ fn test_expanded_state_flows_to_next_outputs() {
     );
 
     // With the expanded state, next_outputs sees the real secret (via downcast).
-    assert!(erased
-        .next_outputs_from_witness(&[], &witness, Some(&state))
-        .is_ok());
+    assert!(
+        erased
+            .next_outputs_from_witness(&[], &witness, Some(&state))
+            .is_ok()
+    );
 
     // Without it, next_outputs gets no state and rejects the spend.
-    assert!(erased
-        .next_outputs_from_witness(&[], &witness, None)
-        .is_err());
+    assert!(
+        erased
+            .next_outputs_from_witness(&[], &witness, None)
+            .is_err()
+    );
 }
 
 #[test]

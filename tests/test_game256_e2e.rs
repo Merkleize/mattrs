@@ -24,13 +24,13 @@ use bitcoin::Amount;
 use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{RpcChain, Runner};
-use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::report::Report;
+use mattrs::script_helpers::key_path_p2tr as p2tr;
 
 use support::game256::{G256Params, G256S0};
 use support::game256_roles::{
-    alice_game_role, bob_game_role, cheating_vals, fill_fraud_data, game_fraud_data, honest_vals,
-    AliceGameData, BobGameData, GameOutcome,
+    AliceGameData, BobGameData, GameOutcome, alice_game_role, bob_game_role, cheating_vals,
+    fill_fraud_data, game_fraud_data, honest_vals,
 };
 use support::testkit::{
     alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, regtest_client, report_spend,
@@ -49,15 +49,14 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     // Alice funds the game with the pot...
     let mut alice_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let s0 = G256S0::new(params.clone()).fund(&mut alice_manager, Amount::from_sat(AMOUNT))?;
+    let s0 = G256S0::new(params.clone())?.fund(&mut alice_manager, Amount::from_sat(AMOUNT))?;
     let alice_entry = s0.handle().clone();
     let outpoint = alice_entry.outpoint().expect("just funded");
 
     // ...and Bob, given the outpoint out-of-band, verifies and tracks it.
     let mut bob_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let bob_entry =
-        bob_manager.track_instance(G256S0::new(params).as_erased(), None, outpoint)?;
+    let bob_entry = bob_manager.track_instance(G256S0::new(params)?.as_erased(), None, outpoint)?;
 
     // The parties: Alice will cheat at step 5, Bob doubles honestly.
     let alice_data = AliceGameData {

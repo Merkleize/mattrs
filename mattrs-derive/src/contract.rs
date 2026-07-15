@@ -155,8 +155,7 @@ impl Parse for ContractDef {
             }
         }
 
-        let tree =
-            tree.ok_or_else(|| syn::Error::new(name_span, "missing `tree [ .. ];`"))?;
+        let tree = tree.ok_or_else(|| syn::Error::new(name_span, "missing `tree [ .. ];`"))?;
         // The static form's clause references are resolved at macro-expansion
         // time, so validate them here for a spanned error. The dynamic form's
         // references are ordinary locals, checked by the compiler.
@@ -282,8 +281,7 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                 while !args_body.is_empty() {
                     let field = args_body.call(Field::parse_named)?;
                     let is_signer = field.attrs.iter().any(|a| a.path().is_ident("signer"));
-                    let is_from_state =
-                        field.attrs.iter().any(|a| a.path().is_ident("from_state"));
+                    let is_from_state = field.attrs.iter().any(|a| a.path().is_ident("from_state"));
                     if is_signer && is_from_state {
                         return Err(syn::Error::new_spanned(
                             &field,
@@ -350,7 +348,12 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                     .ok_or_else(|| syn::Error::new(name_span, "next(p, a) needs an args ident"))?;
                 let s = it.next();
                 let block: Block = body.parse()?;
-                next = Some(NextDef { p, a, s, body: block });
+                next = Some(NextDef {
+                    p,
+                    a,
+                    s,
+                    body: block,
+                });
             }
             other => {
                 return Err(syn::Error::new(
@@ -380,7 +383,10 @@ fn closure_ident(c: &syn::ExprClosure) -> syn::Result<Ident> {
     }
     match &c.inputs[0] {
         Pat::Ident(pi) => Ok(pi.ident.clone()),
-        other => Err(syn::Error::new_spanned(other, "expected a simple identifier")),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "expected a simple identifier",
+        )),
     }
 }
 
@@ -876,7 +882,9 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         impl #name {
             /// Build the contract from its params (and, if the contract declares
             /// one, its construction context).
-            pub fn new(params: #params_ty #ctx_new_param) -> Self {
+            pub fn new(
+                params: #params_ty #ctx_new_param
+            ) -> ::core::result::Result<Self, ::mattrs::contracts::ContractError> {
                 #ctx_init
                 #ikey_init
                 #(#clause_locals)*
@@ -886,8 +894,8 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                     internal_key,
                     &params,
                     tree,
-                );
-                Self { #ctx_self_field contract }
+                )?;
+                ::core::result::Result::Ok(Self { #ctx_self_field contract })
             }
 
             /// The immutable parameters captured by this contract.

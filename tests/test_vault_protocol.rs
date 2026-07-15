@@ -23,10 +23,12 @@ use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 use mattrs::testutil::fund_fake;
 
-use support::testkit::{alice_pk, alice_xpriv, bob_pk, drive_both, offline_manager, regtest_client};
+use support::testkit::{
+    alice_pk, alice_xpriv, bob_pk, drive_both, offline_manager, regtest_client,
+};
 use support::vault::{Unvaulting, Vault, VaultHandle, VaultParams};
 use support::vault_roles::{
-    owner_role, watchtower_role, OwnerData, TriggerStep, VaultOutcome, WatchtowerData,
+    OwnerData, TriggerStep, VaultOutcome, WatchtowerData, owner_role, watchtower_role,
 };
 
 const AMOUNT: u64 = 100_000;
@@ -44,7 +46,7 @@ fn params() -> VaultParams {
 
 fn fake_vault(seed: u8) -> mattrs::manager::InstanceHandle {
     fund_fake(
-        Vault::new(params()).as_erased(),
+        Vault::new(params()).unwrap().as_erased(),
         None,
         Amount::from_sat(AMOUNT),
         seed,
@@ -117,7 +119,10 @@ fn revault_forks_and_both_branches_withdraw() {
         .find(|c| c.contract_name() == "Unvaulting")
         .expect("the unvaulting branch");
     assert_eq!(big.clause_name().as_deref(), Some("withdraw"));
-    assert_eq!(big.spending_tx().expect("withdrawn").output, withdrawal(rest));
+    assert_eq!(
+        big.spending_tx().expect("withdrawn").output,
+        withdrawal(rest)
+    );
     let revaulted = children
         .iter()
         .find(|c| c.contract_name() == "Vault")
@@ -287,10 +292,7 @@ fn watchtower_keeps_watching_the_revaulted_branch() {
         thief.outcomes(),
         &[VaultOutcome::Recovered { amount: rest }]
     );
-    assert_eq!(
-        thief.current().map(|h| h.contract_name()),
-        Some("Vault")
-    );
+    assert_eq!(thief.current().map(|h| h.contract_name()), Some("Vault"));
 }
 
 /// A role that knows how to trigger a `Vault` but nothing else.
@@ -322,7 +324,9 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
         OwnerData::new(alice_xpriv(), plan()),
         fake_vault(SEED),
     );
-    let err = runner.step().expect_err("the Unvaulting child is unhandled");
+    let err = runner
+        .step()
+        .expect_err("the Unvaulting child is unhandled");
     assert!(
         matches!(err, ProtocolError::NoHandler { ref contract } if contract == "Unvaulting"),
         "got: {err}"
@@ -351,7 +355,7 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let rest = Amount::from_sat(AMOUNT) - revault;
 
     let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let vault = Vault::new(params()).fund(&mut manager, Amount::from_sat(AMOUNT))?;
+    let vault = Vault::new(params())?.fund(&mut manager, Amount::from_sat(AMOUNT))?;
     let entry = vault.handle().clone();
 
     let plan = vec![

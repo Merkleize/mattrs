@@ -11,13 +11,13 @@
 
 use std::str::FromStr;
 
-use bitcoin::{Amount, ScriptBuf, TxOut, XOnlyPublicKey};
 use bitcoin::bip32::Xpriv;
+use bitcoin::{Amount, ScriptBuf, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use mattrs::testutil::{fund_fake, offline_client};
-use mattrs::{contract, ContractParams, Signature};
+use mattrs::{ContractParams, Signature, contract};
 
 define_pushable!();
 
@@ -107,7 +107,7 @@ fn main() {
         recover_pk,
         delay: 10,
     };
-    let timelock = TimeLock::new(params.clone());
+    let timelock = TimeLock::new(params.clone()).expect("TimeLock contract definition is valid");
     println!(
         "TimeLock address (regtest): {}",
         timelock.address(bitcoin::Network::Regtest)
@@ -140,7 +140,10 @@ fn main() {
         .build_tx(&manager)
         .unwrap();
 
-    println!("withdraw tx: {}", bitcoin::consensus::encode::serialize_hex(&tx));
+    println!(
+        "withdraw tx: {}",
+        bitcoin::consensus::encode::serialize_hex(&tx)
+    );
     println!(
         "witness: {} elements (signature, tapscript, control block)",
         tx.input[0].witness.len()

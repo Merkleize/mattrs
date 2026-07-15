@@ -23,22 +23,22 @@
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
+use mattrs::ContractParams;
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, WitnessReader, CCV_FLAG_CHECK_INPUT,
-    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
+    WitnessReader,
 };
 use mattrs::manager::SpendBuilder;
-use mattrs::merkle::{get_directions, is_power_of_2, MerkleTree, NIL};
+use mattrs::merkle::{MerkleTree, NIL, get_directions, is_power_of_2};
 use mattrs::script_utils::{bn2vch, commit_int};
-use mattrs::ContractParams;
 
 use super::pending_exit::PendingExit;
-use mattrs::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
 use super::{
-    reveal_mids, spec, spec_num, ChallengeContext, ExitClaim, PoolParams, PoolTree, CARRY_ITEMS,
+    CARRY_ITEMS, ChallengeContext, ExitClaim, PoolParams, PoolTree, reveal_mids, spec, spec_num,
 };
+use mattrs::stack::{Source, StackScript};
 
 define_pushable!();
 
@@ -204,12 +204,12 @@ fn settlement_outputs(
 ) -> Result<Vec<ClauseOutput>, ClauseError> {
     let continuation = match winner {
         DisputeWinner::Ingrid => ClauseOutput::at(2)
-            .to(PendingExit::new(pool.clone()).as_erased())
+            .to(PendingExit::new(pool.clone())?.as_erased())
             .with_state(&ctx.resume_state)
             .preserve_amount()
             .build(),
         DisputeWinner::Challenger => ClauseOutput::at(2)
-            .to(Unwind::new(pool.clone()).as_erased())
+            .to(Unwind::new(pool.clone())?.as_erased())
             .with_state(&UnwindState {
                 root: ctx.resume_state.r,
             })
@@ -292,7 +292,14 @@ fn carry_expanded_witness(
 
 const B1_ITEMS: [&str; 5] = ["h_start", "h_end_i", "h_end_c", "trace_i", "trace_c"];
 const B2_ITEMS: [&str; 8] = [
-    "h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "h_mid_i", "t_left_i", "t_right_i",
+    "h_start",
+    "h_end_i",
+    "h_end_c",
+    "trace_i",
+    "trace_c",
+    "h_mid_i",
+    "t_left_i",
+    "t_right_i",
 ];
 
 /// The committed-leaves name list of a bisection state: `items` with the
@@ -366,8 +373,16 @@ impl ExitBisect1 {
         s.expect_equal("t", "trace_i");
 
         s.merkle_of(&with_carry(&B2_ITEMS), "b2_state");
-        let b2_root = ExitBisect2::new(p.clone()).taptree_root();
-        s.ccv(Source::Item("b2_state"), -1, Source::None, Source::Const(b2_root), 0);
+        let b2_root = ExitBisect2::new(p.clone())
+            .expect("ExitBisect2 contract definition is valid")
+            .taptree_root();
+        s.ccv(
+            Source::Item("b2_state"),
+            -1,
+            Source::None,
+            Source::Const(b2_root),
+            0,
+        );
         s.into_script()
     }
 
@@ -393,11 +408,13 @@ impl ExitBisect1 {
             ctx: state.ctx.clone(),
         };
         w.expect_end()?;
-        Ok(vec![ClauseOutput::at_same_index()
-            .to(ExitBisect2::new(p.clone()).as_erased())
-            .with_state(&next)
-            .preserve_amount()
-            .build()])
+        Ok(vec![
+            ClauseOutput::at_same_index()
+                .to(ExitBisect2::new(p.clone())?.as_erased())
+                .with_state(&next)
+                .preserve_amount()
+                .build(),
+        ])
     }
 
     fn forfait_specs() -> Vec<ArgSpec> {
@@ -428,16 +445,16 @@ impl ExitBisect1 {
         _witness: &[Vec<u8>],
         state: Option<&ExitBisect1State>,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("forfait needs the bisection state".to_string())
-        })?;
+        let state = state
+            .ok_or_else(|| ClauseError::Other("forfait needs the bisection state".to_string()))?;
         settlement_outputs(&p.pool, &state.ctx, DisputeWinner::Challenger)
     }
 }
 
 impl ExitBisect1Handle {
     fn bisect_state(&self) -> ExitBisect1State {
-        self.state().expect("ExitBisect1 instances carry their state")
+        self.state()
+            .expect("ExitBisect1 instances carry their state")
     }
 
     /// Ingrid reveals her midpoint/half-traces for this range, from her
@@ -548,11 +565,20 @@ impl ExitBisect2 {
         let child_leaves: Vec<&str> = match (side, p.children_are_leaves()) {
             (Side::Left, true) => vec!["h_start", "h_mid_i", "h_mid_c", "carry"],
             (Side::Left, false) => {
-                vec!["h_start", "h_mid_i", "h_mid_c", "t_left_i", "t_left_c", "carry"]
+                vec![
+                    "h_start", "h_mid_i", "h_mid_c", "t_left_i", "t_left_c", "carry",
+                ]
             }
             (Side::Right, true) => vec!["h_mid_i", "h_end_i", "h_end_c", "carry"],
             (Side::Right, false) => {
-                vec!["h_mid_i", "h_end_i", "h_end_c", "t_right_i", "t_right_c", "carry"]
+                vec![
+                    "h_mid_i",
+                    "h_end_i",
+                    "h_end_c",
+                    "t_right_i",
+                    "t_right_c",
+                    "carry",
+                ]
             }
         };
         s.merkle_of(&child_leaves, "child_state");
@@ -581,6 +607,7 @@ impl ExitBisect2 {
                 pool: p.pool.clone(),
                 k: i,
             })
+            .expect("ExitLeaf contract definition is valid")
             .taptree_root()
         } else {
             ExitBisect1::new(BisectRangeParams {
@@ -588,6 +615,7 @@ impl ExitBisect2 {
                 i,
                 j,
             })
+            .expect("ExitBisect1 contract definition is valid")
             .taptree_root()
         }
     }
@@ -630,7 +658,7 @@ impl ExitBisect2 {
                 .to(ExitLeaf::new(LeafStepParams {
                     pool: p.pool.clone(),
                     k: i,
-                })
+                })?
                 .as_erased())
                 .with_state(&ExitLeafState {
                     h_start,
@@ -644,7 +672,7 @@ impl ExitBisect2 {
                     pool: p.pool.clone(),
                     i,
                     j,
-                })
+                })?
                 .as_erased())
                 .with_state(&ExitBisect1State {
                     h_start,
@@ -686,16 +714,16 @@ impl ExitBisect2 {
         _witness: &[Vec<u8>],
         state: Option<&ExitBisect2State>,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("forfait needs the bisection state".to_string())
-        })?;
+        let state = state
+            .ok_or_else(|| ClauseError::Other("forfait needs the bisection state".to_string()))?;
         settlement_outputs(&p.pool, &state.ctx, DisputeWinner::Ingrid)
     }
 }
 
 impl ExitBisect2Handle {
     fn bisect_state(&self) -> ExitBisect2State {
-        self.state().expect("ExitBisect2 instances carry their state")
+        self.state()
+            .expect("ExitBisect2 instances carry their state")
     }
 
     /// The challenger reveals their midpoint/half-traces from their claimed
@@ -788,13 +816,7 @@ contract! {
 
 /// Walk a fixed-index Merkle path from `start` up to the root: `k` is a script
 /// constant, so each level's concatenation order is baked in.
-fn fixed_walk(
-    s: &mut StackScript,
-    start: &str,
-    sib_prefix: &str,
-    directions: &[u8],
-    out: &str,
-) {
+fn fixed_walk(s: &mut StackScript, start: &str, sib_prefix: &str, directions: &[u8], out: &str) {
     s.pick(start);
     s.rename_top(out);
     for (l, d) in directions.iter().enumerate().rev() {
@@ -826,7 +848,12 @@ impl ExitLeaf {
                 specs.extend([spec("root_k"), spec_num("sum")]);
             }
             StepCase::Spend => {
-                specs.extend([spec("root_k"), spec_num("sum"), spec("user_pk"), spec_num("bal")]);
+                specs.extend([
+                    spec("root_k"),
+                    spec_num("sum"),
+                    spec("user_pk"),
+                    spec_num("bal"),
+                ]);
             }
         }
         for l in 0..depth {
@@ -946,8 +973,7 @@ impl ExitLeafHandle {
     ) -> SpendBuilder {
         let p = self.params();
         let k = p.k as usize;
-        let state: ExitLeafState =
-            self.state().expect("ExitLeaf instances carry their state");
+        let state: ExitLeafState = self.state().expect("ExitLeaf instances carry their state");
 
         let working = pool_at_step(pool, &claim.bits, k);
         let case = if !claim.bits[k] {
@@ -981,8 +1007,7 @@ impl ExitLeafHandle {
                 witness.push(bn2vch(bal));
             }
         }
-        let bit_tree =
-            MerkleTree::new(claim.bits.iter().map(|b| super::bit_leaf(*b)).collect());
+        let bit_tree = MerkleTree::new(claim.bits.iter().map(|b| super::bit_leaf(*b)).collect());
         for sib in bit_tree.prove_leaf(k).hashes {
             witness.push(sib.to_vec());
         }

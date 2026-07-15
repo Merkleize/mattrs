@@ -38,8 +38,10 @@ fn claimed_pool(
 ) -> (PendingExitHandle, PendingExitState) {
     let ingrid_pk = xonly(&ingrid_xpriv());
     let unwind: UnwindHandle = try_handle(fund_fake(
-        Unwind::new(params()).as_erased(),
-        Some(Box::new(UnwindState { root: pool().root() })),
+        Unwind::new(params()).unwrap().as_erased(),
+        Some(Box::new(UnwindState {
+            root: pool().root(),
+        })),
         POOL_TOTAL,
         1,
     ));
@@ -48,6 +50,7 @@ fn claimed_pool(
             pool: params(),
             owner_pk: ingrid_pk,
         })
+        .unwrap()
         .as_erased(),
         None,
         BOND as u64,
@@ -60,12 +63,14 @@ fn claimed_pool(
         &[unwind.handle(), bond.handle()],
         vec![
             unwind.start_exit(claim, &ingrid_pk),
-            bond.stake()
-                .sign(HotSigner::new(ingrid_xpriv())),
+            bond.stake().sign(HotSigner::new(ingrid_xpriv())),
         ],
     );
     assert_eq!(tx.output.len(), 1, "claim merges into a single output");
-    assert_eq!(tx.output[0].value, Amount::from_sat(POOL_TOTAL + BOND as u64));
+    assert_eq!(
+        tx.output[0].value,
+        Amount::from_sat(POOL_TOTAL + BOND as u64)
+    );
     assert_eq!(children.len(), 1);
     (try_handle(children[0].clone()), claim_state)
 }
@@ -77,6 +82,7 @@ fn challenger_bond(challenger: &Xpriv, seed: u8) -> ExitBondHandle {
             pool: params(),
             owner_pk: xonly(challenger),
         })
+        .unwrap()
         .as_erased(),
         None,
         BOND as u64,
@@ -147,7 +153,8 @@ fn delegation_signature_roundtrip() {
     let user = keypair(&user_xpriv(2));
     let ingrid_pk = xonly(&ingrid_xpriv());
     let sig = sign_delegation(&user, &params().pool_id, &ingrid_pk);
-    let msg = bitcoin::secp256k1::Message::from_digest(delegation_msg(&params().pool_id, &ingrid_pk));
+    let msg =
+        bitcoin::secp256k1::Message::from_digest(delegation_msg(&params().pool_id, &ingrid_pk));
     secp.verify_schnorr(
         &bitcoin::secp256k1::schnorr::Signature::from_slice(&sig).unwrap(),
         &msg,
@@ -158,12 +165,12 @@ fn delegation_signature_roundtrip() {
 
 #[test]
 fn carry_commitment_matches_preimage() {
-    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::hashes::{Hash, sha256};
     let claim = compute_claim(&pool(), &exit_bits());
     let state = PendingExitState::for_claim(&params(), &claim, &xonly(&ingrid_xpriv()));
     let ctx = ChallengeContext {
         resume_state: state,
-        pe_taptree: PendingExit::new(params()).taptree_root(),
+        pe_taptree: PendingExit::new(params()).unwrap().taptree_root(),
         challenger_pk: xonly(&user_xpriv(0)).serialize(),
     };
     let mut preimage = Vec::new();
@@ -182,13 +189,14 @@ fn all_tapscripts_build() {
         let mut p = params();
         p.n_users = n_users;
         let n = p.padded_size() as i64;
-        Unwind::new(p.clone()).taptree_root();
-        PendingExit::new(p.clone()).taptree_root();
-        DelegationChallenge::new(p.clone()).taptree_root();
+        Unwind::new(p.clone()).unwrap().taptree_root();
+        PendingExit::new(p.clone()).unwrap().taptree_root();
+        DelegationChallenge::new(p.clone()).unwrap().taptree_root();
         ExitBond::new(ExitBondParams {
             pool: p.clone(),
             owner_pk: xonly(&ingrid_xpriv()),
         })
+        .unwrap()
         .taptree_root();
         // Every bisection range and every leaf step.
         let mut spans = vec![];
@@ -205,11 +213,13 @@ fn all_tapscripts_build() {
                 i,
                 j,
             };
-            ExitBisect1::new(range.clone()).taptree_root();
-            ExitBisect2::new(range).taptree_root();
+            ExitBisect1::new(range.clone()).unwrap().taptree_root();
+            ExitBisect2::new(range).unwrap().taptree_root();
         }
         for k in 0..n {
-            ExitLeaf::new(LeafStepParams { pool: p.clone(), k }).taptree_root();
+            ExitLeaf::new(LeafStepParams { pool: p.clone(), k })
+                .unwrap()
+                .taptree_root();
         }
     }
 }
@@ -228,7 +238,9 @@ fn start_exit_canonicalizes_the_published_bits() {
         let script = Unwind::start_exit_script(&p);
         let guards = script
             .instructions()
-            .filter(|i| matches!(i, Ok(bitcoin::script::Instruction::Op(op)) if *op == OP_0NOTEQUAL))
+            .filter(
+                |i| matches!(i, Ok(bitcoin::script::Instruction::Op(op)) if *op == OP_0NOTEQUAL),
+            )
             .count();
         assert_eq!(guards, p.padded_size(), "one canonical-bit guard per slot");
     }
@@ -243,7 +255,7 @@ fn direct_withdrawal_builds_and_chains() {
     let mut manager = offline_manager();
     let pool = pool();
     let unwind: UnwindHandle = try_handle(fund_fake(
-        Unwind::new(params()).as_erased(),
+        Unwind::new(params()).unwrap().as_erased(),
         Some(Box::new(UnwindState { root: pool.root() })),
         POOL_TOTAL,
         1,
@@ -253,13 +265,18 @@ fn direct_withdrawal_builds_and_chains() {
     let (tx, children) = apply(
         &mut manager,
         &[unwind.handle()],
-        vec![unwind
-            .withdraw_direct(&pool, 2)
-            .output_amount(0, Amount::from_sat(3_000))],
+        vec![
+            unwind
+                .withdraw_direct(&pool, 2)
+                .output_amount(0, Amount::from_sat(3_000)),
+        ],
     );
     assert_eq!(tx.output.len(), 2);
     assert_eq!(tx.output[0].value, Amount::from_sat(3_000));
-    assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(xonly(&user_xpriv(2))));
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        opaque_p2tr(xonly(&user_xpriv(2)))
+    );
     assert_eq!(tx.output[1].value, Amount::from_sat(POOL_TOTAL - 3_000));
 
     // The continued pool commits to the zeroed root, and chains.
@@ -271,13 +288,20 @@ fn direct_withdrawal_builds_and_chains() {
     let (tx2, _) = apply(
         &mut manager,
         &[next.handle()],
-        vec![next
-            .withdraw_direct(&after, 5)
-            .output_amount(0, Amount::from_sat(6_000))],
+        vec![
+            next.withdraw_direct(&after, 5)
+                .output_amount(0, Amount::from_sat(6_000)),
+        ],
     );
     assert_eq!(tx2.output[0].value, Amount::from_sat(6_000));
-    assert_eq!(tx2.output[0].script_pubkey, opaque_p2tr(xonly(&user_xpriv(5))));
-    assert_eq!(tx2.output[1].value, Amount::from_sat(POOL_TOTAL - 3_000 - 6_000));
+    assert_eq!(
+        tx2.output[0].script_pubkey,
+        opaque_p2tr(xonly(&user_xpriv(5)))
+    );
+    assert_eq!(
+        tx2.output[1].value,
+        Amount::from_sat(POOL_TOTAL - 3_000 - 6_000)
+    );
 }
 
 #[test]
@@ -301,14 +325,19 @@ fn happy_path_finalizes_after_challenge_period() {
     let (tx, children) = apply(
         &mut manager,
         &[pending.handle()],
-        vec![pending
-            .finalize()
-            .output_amount(0, Amount::from_sat((claim.x + BOND) as u64))],
+        vec![
+            pending
+                .finalize()
+                .output_amount(0, Amount::from_sat((claim.x + BOND) as u64)),
+        ],
     );
     // Ingrid gets the aggregate plus her bond back; the CSV gap is committed.
     assert_eq!(tx.input[0].sequence.0, params().challenge_period);
     assert_eq!(tx.output[0].value, Amount::from_sat(20_000));
-    assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(xonly(&ingrid_xpriv())));
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        opaque_p2tr(xonly(&ingrid_xpriv()))
+    );
     // The pool continues with the remaining users' 11_000 sats at R'.
     assert_eq!(tx.output[1].value, Amount::from_sat(11_000));
     let continued: UnwindHandle = try_handle(children[1].clone());
@@ -324,11 +353,16 @@ fn happy_path_finalizes_after_challenge_period() {
     let (tx2, _) = apply(
         &mut manager,
         &[continued.handle()],
-        vec![continued
-            .withdraw_direct(&after, 3)
-            .output_amount(0, Amount::from_sat(4_000))],
+        vec![
+            continued
+                .withdraw_direct(&after, 3)
+                .output_amount(0, Amount::from_sat(4_000)),
+        ],
     );
-    assert_eq!(tx2.output[0].script_pubkey, opaque_p2tr(xonly(&user_xpriv(3))));
+    assert_eq!(
+        tx2.output[0].script_pubkey,
+        opaque_p2tr(xonly(&user_xpriv(3)))
+    );
 }
 
 /// Walk the bisection until the disputed single step, alternating Ingrid's and
@@ -373,9 +407,7 @@ fn fraudulent_claim_loses_the_bisection() {
         &[pending.handle(), cbond.handle()],
         vec![
             pending.challenge_state(&honest, &xonly(&challenger)),
-            cbond
-                .stake()
-                .sign(HotSigner::new(challenger)),
+            cbond.stake().sign(HotSigner::new(challenger)),
         ],
     );
     assert_eq!(tx.output.len(), 1);
@@ -393,10 +425,11 @@ fn fraudulent_claim_loses_the_bisection() {
     let (tx, children) = apply(
         &mut manager,
         &[leaf.handle()],
-        vec![leaf
-            .reveal(DisputeWinner::Challenger, &honest, &pool)
-            .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
-            .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))],
+        vec![
+            leaf.reveal(DisputeWinner::Challenger, &honest, &pool)
+                .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
+                .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64)),
+        ],
     );
     assert_eq!(tx.output[0].value, Amount::from_sat(15_000));
     assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(xonly(&challenger)));
@@ -423,13 +456,16 @@ fn false_challenge_loses_and_the_claim_resumes() {
         &[pending.handle(), cbond.handle()],
         vec![
             pending.challenge_state(&fabricated, &xonly(&challenger)),
-            cbond
-                .stake()
-                .sign(HotSigner::new(challenger)),
+            cbond.stake().sign(HotSigner::new(challenger)),
         ],
     );
 
-    let leaf = bisect_to_leaf(&mut manager, children[0].clone(), &honest.hs, &fabricated.hs);
+    let leaf = bisect_to_leaf(
+        &mut manager,
+        children[0].clone(),
+        &honest.hs,
+        &fabricated.hs,
+    );
     assert_eq!(leaf.params().k, 2);
 
     // Ingrid re-runs the disputed step and wins: half the challenger's bond,
@@ -437,15 +473,22 @@ fn false_challenge_loses_and_the_claim_resumes() {
     let (tx, children) = apply(
         &mut manager,
         &[leaf.handle()],
-        vec![leaf
-            .reveal(DisputeWinner::Ingrid, &honest, &pool)
-            .output_amount(0, Amount::from_sat((BOND / 2) as u64))
-            .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))],
+        vec![
+            leaf.reveal(DisputeWinner::Ingrid, &honest, &pool)
+                .output_amount(0, Amount::from_sat((BOND / 2) as u64))
+                .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64)),
+        ],
     );
     assert_eq!(tx.output[0].value, Amount::from_sat(5_000));
-    assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(xonly(&ingrid_xpriv())));
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        opaque_p2tr(xonly(&ingrid_xpriv()))
+    );
     assert_eq!(tx.output[1].script_pubkey, opaque_p2tr(mattrs::nums_key()));
-    assert_eq!(tx.output[2].value, Amount::from_sat(POOL_TOTAL + BOND as u64));
+    assert_eq!(
+        tx.output[2].value,
+        Amount::from_sat(POOL_TOTAL + BOND as u64)
+    );
     let resumed: PendingExitHandle = try_handle(children[2].clone());
     assert_eq!(resumed.state().unwrap(), claim_state);
 
@@ -453,9 +496,11 @@ fn false_challenge_loses_and_the_claim_resumes() {
     let (tx, _) = apply(
         &mut manager,
         &[resumed.handle()],
-        vec![resumed
-            .finalize()
-            .output_amount(0, Amount::from_sat((honest.x + BOND) as u64))],
+        vec![
+            resumed
+                .finalize()
+                .output_amount(0, Amount::from_sat((honest.x + BOND) as u64)),
+        ],
     );
     assert_eq!(tx.output[1].value, Amount::from_sat(11_000));
 }
@@ -475,9 +520,7 @@ fn stalled_turns_forfait_both_ways() {
         &[pending.handle(), cbond.handle()],
         vec![
             pending.challenge_state(&honest, &xonly(&challenger)),
-            cbond
-                .stake()
-                .sign(HotSigner::new(challenger)),
+            cbond.stake().sign(HotSigner::new(challenger)),
         ],
     );
 
@@ -486,10 +529,11 @@ fn stalled_turns_forfait_both_ways() {
     let (tx, children) = apply(
         &mut manager,
         &[b1.handle()],
-        vec![b1
-            .forfait()
-            .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
-            .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))],
+        vec![
+            b1.forfait()
+                .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
+                .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64)),
+        ],
     );
     assert_eq!(tx.input[0].sequence.0, params().response_timeout);
     assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(xonly(&challenger)));
@@ -506,23 +550,29 @@ fn stalled_turns_forfait_both_ways() {
         &[pending.handle(), cbond.handle()],
         vec![
             pending.challenge_state(&honest, &xonly(&challenger)),
-            cbond
-                .stake()
-                .sign(HotSigner::new(challenger)),
+            cbond.stake().sign(HotSigner::new(challenger)),
         ],
     );
     let b1: ExitBisect1Handle = try_handle(children[0].clone());
-    let (_, children) = apply(&mut manager, &[b1.handle()], vec![b1.ingrid_reveal(&lie.hs)]);
+    let (_, children) = apply(
+        &mut manager,
+        &[b1.handle()],
+        vec![b1.ingrid_reveal(&lie.hs)],
+    );
     let b2: ExitBisect2Handle = try_handle(children[0].clone());
     let (tx, children) = apply(
         &mut manager,
         &[b2.handle()],
-        vec![b2
-            .forfait()
-            .output_amount(0, Amount::from_sat((BOND / 2) as u64))
-            .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))],
+        vec![
+            b2.forfait()
+                .output_amount(0, Amount::from_sat((BOND / 2) as u64))
+                .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64)),
+        ],
     );
-    assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(xonly(&ingrid_xpriv())));
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        opaque_p2tr(xonly(&ingrid_xpriv()))
+    );
     let resumed: PendingExitHandle = try_handle(children[2].clone());
     assert_eq!(resumed.state().unwrap(), claim_state);
 }
@@ -543,9 +593,7 @@ fn delegation_challenge_defended() {
         &[pending.handle(), cbond.handle()],
         vec![
             pending.challenge_delegation(&pool, &honest.bits, 2, &xonly(&challenger)),
-            cbond
-                .stake()
-                .sign(HotSigner::new(challenger)),
+            cbond.stake().sign(HotSigner::new(challenger)),
         ],
     );
     assert_eq!(
@@ -559,14 +607,18 @@ fn delegation_challenge_defended() {
     let (tx, children) = apply(
         &mut manager,
         &[dc.handle()],
-        vec![dc
-            .defend(&sig)
-            .output_amount(0, Amount::from_sat((BOND / 2) as u64))
-            .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))],
+        vec![
+            dc.defend(&sig)
+                .output_amount(0, Amount::from_sat((BOND / 2) as u64))
+                .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64)),
+        ],
     );
     assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(ingrid_pk));
     assert_eq!(tx.output[1].script_pubkey, opaque_p2tr(mattrs::nums_key()));
-    assert_eq!(tx.output[2].value, Amount::from_sat(POOL_TOTAL + BOND as u64));
+    assert_eq!(
+        tx.output[2].value,
+        Amount::from_sat(POOL_TOTAL + BOND as u64)
+    );
     let resumed: PendingExitHandle = try_handle(children[2].clone());
     assert_eq!(resumed.state().unwrap(), claim_state);
 }
@@ -588,9 +640,7 @@ fn unanswerable_delegation_challenge_reverts_the_claim() {
         &[pending.handle(), cbond.handle()],
         vec![
             pending.challenge_delegation(&pool, &claim.bits, 3, &xonly(&challenger)),
-            cbond
-                .stake()
-                .sign(HotSigner::new(challenger)),
+            cbond.stake().sign(HotSigner::new(challenger)),
         ],
     );
 
@@ -599,10 +649,11 @@ fn unanswerable_delegation_challenge_reverts_the_claim() {
     let (tx, children) = apply(
         &mut manager,
         &[dc.handle()],
-        vec![dc
-            .challenger_wins()
-            .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
-            .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))],
+        vec![
+            dc.challenger_wins()
+                .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
+                .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64)),
+        ],
     );
     assert_eq!(tx.input[0].sequence.0, params().response_timeout);
     assert_eq!(tx.output[0].value, Amount::from_sat(15_000));
@@ -631,9 +682,7 @@ fn nil_step_dispute_is_defensible() {
         &[pending.handle(), cbond.handle()],
         vec![
             pending.challenge_state(&honest, &xonly(&challenger)),
-            cbond
-                .stake()
-                .sign(HotSigner::new(challenger)),
+            cbond.stake().sign(HotSigner::new(challenger)),
         ],
     );
     let leaf = bisect_to_leaf(&mut manager, children[0].clone(), &lie.hs, &honest.hs);
@@ -642,10 +691,11 @@ fn nil_step_dispute_is_defensible() {
     let (tx, _) = apply(
         &mut manager,
         &[leaf.handle()],
-        vec![leaf
-            .reveal(DisputeWinner::Challenger, &honest, &pool)
-            .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
-            .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))],
+        vec![
+            leaf.reveal(DisputeWinner::Challenger, &honest, &pool)
+                .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
+                .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64)),
+        ],
     );
     assert_eq!(tx.output[2].value, Amount::from_sat(POOL_TOTAL));
 
@@ -679,13 +729,12 @@ fn regtest_claim(
     let bond = ExitBond::new(ExitBondParams {
         pool: params(),
         owner_pk: ingrid_pk,
-    })
+    })?
     .fund(manager, Amount::from_sat(BOND as u64))?;
     let claim_state = PendingExitState::for_claim(&params(), claim, &ingrid_pk);
     let children = manager.spend_batch(&[
         unwind.start_exit(claim, &ingrid_pk),
-        bond.stake()
-            .sign(HotSigner::new(ingrid_xpriv())),
+        bond.stake().sign(HotSigner::new(ingrid_xpriv())),
     ])?;
     Ok((try_handle(children[0].clone()), claim_state))
 }
@@ -697,7 +746,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
     let (mut manager, mut report) = regtest_setup("testwallet")?;
     let pool = pool();
 
-    let unwind = Unwind::new(params()).fund(
+    let unwind = Unwind::new(params())?.fund(
         &mut manager,
         Amount::from_sat(POOL_TOTAL),
         UnwindState { root: pool.root() },
@@ -708,7 +757,12 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
         .withdraw_direct(&pool, 2)
         .output_amount(0, Amount::from_sat(3_000))
         .exec(&mut manager)?;
-    report_spend(&mut report, "AggregateExits", "withdraw_direct (user 2)", unwind.handle());
+    report_spend(
+        &mut report,
+        "AggregateExits",
+        "withdraw_direct (user 2)",
+        unwind.handle(),
+    );
     let mut after = pool.clone();
     after.zero(2);
     let unwind: UnwindHandle = try_handle(children[1].clone());
@@ -721,7 +775,12 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
     let claim = compute_claim(&after, &bits);
     assert_eq!(claim.x, 7_000);
     let (pending, _) = regtest_claim(&mut manager, &unwind, &claim)?;
-    report_spend(&mut report, "AggregateExits", "start_exit + bond", unwind.handle());
+    report_spend(
+        &mut report,
+        "AggregateExits",
+        "start_exit + bond",
+        unwind.handle(),
+    );
 
     // The claim matures unchallenged; Ingrid finalizes.
     manager.mine_blocks(params().challenge_period as u64)?;
@@ -744,7 +803,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let (mut manager, mut report) = regtest_setup("testwallet")?;
     let pool = pool();
 
-    let unwind = Unwind::new(params()).fund(
+    let unwind = Unwind::new(params())?.fund(
         &mut manager,
         Amount::from_sat(POOL_TOTAL),
         UnwindState { root: pool.root() },
@@ -760,15 +819,18 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let cbond = ExitBond::new(ExitBondParams {
         pool: params(),
         owner_pk: xonly(&challenger),
-    })
+    })?
     .fund(&mut manager, Amount::from_sat(BOND as u64))?;
     let children = manager.spend_batch(&[
         pending.challenge_state(&honest, &xonly(&challenger)),
-        cbond
-            .stake()
-            .sign(HotSigner::new(challenger)),
+        cbond.stake().sign(HotSigner::new(challenger)),
     ])?;
-    report_spend(&mut report, "AggregateExits", "challenge_state + bond", pending.handle());
+    report_spend(
+        &mut report,
+        "AggregateExits",
+        "challenge_state + bond",
+        pending.handle(),
+    );
 
     // Alternate reveals down to the disputed step.
     let mut current = children[0].clone();
@@ -790,7 +852,12 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .output_amount(0, Amount::from_sat((BOND + BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut manager)?;
-    report_spend(&mut report, "AggregateExits", "leaf reveal (challenger wins)", leaf.handle());
+    report_spend(
+        &mut report,
+        "AggregateExits",
+        "leaf reveal (challenger wins)",
+        leaf.handle(),
+    );
     let reverted: UnwindHandle = try_handle(children[2].clone());
     assert_eq!(reverted.state().unwrap().root, pool.root());
 
@@ -806,7 +873,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let pool = pool();
     let ingrid_pk = xonly(&ingrid_xpriv());
 
-    let unwind = Unwind::new(params()).fund(
+    let unwind = Unwind::new(params())?.fund(
         &mut manager,
         Amount::from_sat(POOL_TOTAL),
         UnwindState { root: pool.root() },
@@ -819,13 +886,11 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let cbond = ExitBond::new(ExitBondParams {
         pool: params(),
         owner_pk: xonly(&challenger),
-    })
+    })?
     .fund(&mut manager, Amount::from_sat(BOND as u64))?;
     let children = manager.spend_batch(&[
         pending.challenge_delegation(&pool, &honest.bits, 2, &xonly(&challenger)),
-        cbond
-            .stake()
-            .sign(HotSigner::new(challenger)),
+        cbond.stake().sign(HotSigner::new(challenger)),
     ])?;
     let dc: DelegationChallengeHandle = try_handle(children[0].clone());
 
@@ -835,7 +900,12 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .output_amount(0, Amount::from_sat((BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut manager)?;
-    report_spend(&mut report, "AggregateExits", "defend (CSFS reveal)", dc.handle());
+    report_spend(
+        &mut report,
+        "AggregateExits",
+        "defend (CSFS reveal)",
+        dc.handle(),
+    );
     let resumed: PendingExitHandle = try_handle(children[2].clone());
     assert_eq!(resumed.state().unwrap(), claim_state);
 
@@ -845,7 +915,12 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .finalize()
         .output_amount(0, Amount::from_sat((honest.x + BOND) as u64))
         .exec(&mut manager)?;
-    report_spend(&mut report, "AggregateExits", "finalize (resumed)", resumed.handle());
+    report_spend(
+        &mut report,
+        "AggregateExits",
+        "finalize (resumed)",
+        resumed.handle(),
+    );
 
     report.finalize("reports/report_aggregate_exits_delegation.md")?;
     Ok(())

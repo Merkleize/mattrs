@@ -25,10 +25,10 @@ use mattrs::protocol::{LocalChain, Progress, Runner};
 use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::testutil::fund_fake;
 
-use support::game256::{G256Params, G256S0, FORFAIT_TIMEOUT};
+use support::game256::{FORFAIT_TIMEOUT, G256Params, G256S0};
 use support::game256_roles::{
-    alice_game_role, bob_game_role, cheating_vals, fill_fraud_data, game_fraud_data, honest_vals,
-    AliceGameData, BobGameData, GameOutcome,
+    AliceGameData, BobGameData, GameOutcome, alice_game_role, bob_game_role, cheating_vals,
+    fill_fraud_data, game_fraud_data, honest_vals,
 };
 use support::testkit::{
     alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, offline_manager, walk_tip,
@@ -55,13 +55,13 @@ fn setup(
     };
 
     let alice_entry = fund_fake(
-        G256S0::new(params.clone()).as_erased(),
+        G256S0::new(params.clone()).unwrap().as_erased(),
         None,
         Amount::from_sat(AMOUNT),
         SEED,
     );
     let bob_entry = fund_fake(
-        G256S0::new(params).as_erased(),
+        G256S0::new(params).unwrap().as_erased(),
         None,
         Amount::from_sat(AMOUNT),
         SEED,

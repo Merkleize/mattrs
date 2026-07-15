@@ -19,7 +19,7 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::argtypes::IntType;
 use mattrs::contracts::{ArgSpec, ClauseOutput};
-use mattrs::{contract, ContractParams, ContractState, Signature};
+use mattrs::{ContractParams, ContractState, Signature, contract};
 
 // Re-exported so tests can import the whole game through this module; each test
 // binary uses a subset, so per-binary "unused import" warnings are structural.
@@ -52,12 +52,16 @@ pub fn compute2x() -> Computer {
 /// The per-step [`Leaf`] contract: every step re-runs [`compute2x`], so the step
 /// index is ignored.
 pub fn leaf_factory(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> LeafFactory {
-    Arc::new(move |_i| Leaf::new(LeafParams { alice_pk, bob_pk }, compute2x()))
+    Arc::new(move |_i| {
+        Leaf::new(LeafParams { alice_pk, bob_pk }, compute2x())
+            .expect("Leaf contract definition is valid")
+    })
 }
 
 /// A game256 [`Leaf`] (the single disputed step).
 pub fn leaf(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> Leaf {
     Leaf::new(LeafParams { alice_pk, bob_pk }, compute2x())
+        .expect("Leaf contract definition is valid")
 }
 
 /// The game256 [`BisectCtx`]: [`leaf_factory`] leaves and the standard timeout.
@@ -71,13 +75,13 @@ fn bisect_ctx(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> BisectCtx {
 /// A game256 [`Bisect1`] over the given step range.
 pub fn bisect1(params: BisectParams) -> Bisect1 {
     let ctx = bisect_ctx(params.alice_pk, params.bob_pk);
-    Bisect1::new(params, ctx)
+    Bisect1::new(params, ctx).expect("Bisect1 contract definition is valid")
 }
 
 /// A game256 [`Bisect2`] over the given step range.
 pub fn bisect2(params: BisectParams) -> Bisect2 {
     let ctx = bisect_ctx(params.alice_pk, params.bob_pk);
-    Bisect2::new(params, ctx)
+    Bisect2::new(params, ctx).expect("Bisect2 contract definition is valid")
 }
 
 // ============================================================================
@@ -148,7 +152,7 @@ contract! {
             script G256S0::choose_script;
             next(p, a) {
                 Ok(vec![ClauseOutput::at_same_index()
-                    .to(G256S1::new(p.clone()).as_erased())
+                    .to(G256S1::new(p.clone())?.as_erased())
                     .with_state(&G256S1State { x: a.x })
                     .preserve_amount()
                     .build()])
@@ -161,7 +165,9 @@ contract! {
 
 impl G256S0 {
     fn choose_script(p: &G256Params) -> ScriptBuf {
-        let s1_root = G256S1::new(p.clone()).taptree_root();
+        let s1_root = G256S1::new(p.clone())
+            .expect("G256S1 contract definition is valid")
+            .taptree_root();
         script! {
             OP_SHA256
             { check_output_contract(s1_root, -1, None) }
@@ -188,7 +194,7 @@ contract! {
             script G256S1::reveal_script;
             next(p, a) {
                 Ok(vec![ClauseOutput::at_same_index()
-                    .to(G256S2::new(p.clone()).as_erased())
+                    .to(G256S2::new(p.clone())?.as_erased())
                     .with_state(&G256S2State {
                         t_a: a.t_a,
                         y: a.y,
@@ -205,7 +211,9 @@ contract! {
 
 impl G256S1 {
     fn reveal_script(p: &G256Params) -> ScriptBuf {
-        let s2_root = G256S2::new(p.clone()).taptree_root();
+        let s2_root = G256S2::new(p.clone())
+            .expect("G256S2 contract definition is valid")
+            .taptree_root();
         script! {
             OP_DUP
             OP_SHA256

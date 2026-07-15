@@ -484,7 +484,7 @@ mod tests {
     use super::*;
     use crate::testutil::fund_fake;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, Txid};
-    use mattrs_derive::{contract, ContractParams};
+    use mattrs_derive::{ContractParams, contract};
 
     #[derive(Debug, Clone, ContractParams)]
     pub struct PairParams {
@@ -576,7 +576,7 @@ mod tests {
     #[test]
     fn typed_handles_use_nominal_identity() {
         let a = fund_fake(
-            KeyA::new(PairParams { tag: 42 }).as_erased(),
+            KeyA::new(PairParams { tag: 42 }).unwrap().as_erased(),
             None,
             Amount::from_sat(1000),
             1,
@@ -588,7 +588,9 @@ mod tests {
         assert!(KeyBHandle::try_from(a).is_err());
 
         let same_name = fund_fake(
-            first::SameName::new(PairParams { tag: 7 }).as_erased(),
+            first::SameName::new(PairParams { tag: 7 })
+                .unwrap()
+                .as_erased(),
             None,
             Amount::from_sat(1000),
             2,
@@ -611,13 +613,17 @@ mod tests {
         });
         let outer: Role<Outer, String> = Role::new()
             .on::<KeyA, _>(|_d, _h, _cx| Ok(Action::Wait))
-            .embed(sub, |d: &mut Outer| &mut d.sub, |_d, o| Ok(format!("sub:{o}")));
+            .embed(
+                sub,
+                |d: &mut Outer| &mut d.sub,
+                |_d, o| Ok(format!("sub:{o}")),
+            );
 
         assert!(outer.handles_arrival(&KeyA::kind()));
         assert!(outer.handles_arrival(&KeyB::kind()));
 
         let b = fund_fake(
-            KeyB::new(PairParams { tag: 0 }).as_erased(),
+            KeyB::new(PairParams { tag: 0 }).unwrap().as_erased(),
             None,
             Amount::from_sat(1000),
             2,
@@ -671,9 +677,11 @@ mod tests {
     #[test]
     fn embed_merges_ignores() {
         let sub: Role<(), ()> = Role::new().ignore::<KeyB>();
-        let outer: Role<(), ()> = Role::new()
-            .on::<KeyA, _>(|_, _, _| Ok(Action::Wait))
-            .embed(sub, |d: &mut ()| d, |_d, o| Ok(o));
+        let outer: Role<(), ()> = Role::new().on::<KeyA, _>(|_, _, _| Ok(Action::Wait)).embed(
+            sub,
+            |d: &mut ()| d,
+            |_d, o| Ok(o),
+        );
         assert!(outer.ignores(&KeyB::kind()));
         assert!(!outer.ignores(&KeyA::kind()));
     }

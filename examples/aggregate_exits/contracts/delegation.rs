@@ -4,15 +4,15 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, WitnessReader, CCV_FLAG_CHECK_INPUT,
-    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
+    WitnessReader,
 };
 use mattrs::manager::SpendBuilder;
 
 use super::pending_exit::PendingExit;
-use mattrs::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
-use super::{spec, ChallengeContext, PoolParams};
+use super::{ChallengeContext, PoolParams, spec};
+use mattrs::stack::{Source, StackScript};
 
 define_pushable!();
 
@@ -164,9 +164,8 @@ impl DelegationChallenge {
         witness: &[Vec<u8>],
         state: Option<&DelegationChallengeState>,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("defend needs the challenge state".to_string())
-        })?;
+        let state = state
+            .ok_or_else(|| ClauseError::Other("defend needs the challenge state".to_string()))?;
         let mut w = WitnessReader::new(witness);
         w.skip(4)?; // resume, pe_taptree, unwind_taptree, r
         let ingrid_pk = w.xonly()?;
@@ -174,7 +173,7 @@ impl DelegationChallenge {
             ClauseOutput::pay_key(0, ingrid_pk),
             ClauseOutput::burn(1),
             ClauseOutput::at(2)
-                .to(PendingExit::new(p.clone()).as_erased())
+                .to(PendingExit::new(p.clone())?.as_erased())
                 .with_state(&state.ctx.resume_state)
                 .preserve_amount()
                 .build(),
@@ -234,7 +233,7 @@ impl DelegationChallenge {
             ClauseOutput::pay_key(0, challenger_pk),
             ClauseOutput::burn(1),
             ClauseOutput::at(2)
-                .to(Unwind::new(p.clone()).as_erased())
+                .to(Unwind::new(p.clone())?.as_erased())
                 .with_state(&UnwindState {
                     root: state.ctx.resume_state.r,
                 })
@@ -246,7 +245,8 @@ impl DelegationChallenge {
 
 impl DelegationChallengeHandle {
     fn challenge_state(&self) -> DelegationChallengeState {
-        self.state().expect("DelegationChallenge instances carry their state")
+        self.state()
+            .expect("DelegationChallenge instances carry their state")
     }
 
     /// Ingrid reveals the challenged user's delegation signature. The caller

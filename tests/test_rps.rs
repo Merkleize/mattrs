@@ -7,7 +7,7 @@
 
 mod support;
 
-use support::rps::{move_commitment, RpsGameS0, RpsGameS1, RpsParams, DEFAULT_STAKE};
+use support::rps::{DEFAULT_STAKE, RpsGameS0, RpsGameS1, RpsParams, move_commitment};
 use support::testkit::{alice_pk, bob_pk};
 
 // Regenerate the pinned roots with pymatt (from the repo root):
@@ -23,12 +23,11 @@ fn reference_params() -> RpsParams {
     let alice_pk = alice_pk();
     let bob_pk = bob_pk();
     // c_a = sha256(bn(0) || 0^32) = sha256(0x00 * 32)
-    let c_a: [u8; 32] = hex::decode(
-        "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
-    )
-    .unwrap()
-    .try_into()
-    .unwrap();
+    let c_a: [u8; 32] =
+        hex::decode("66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925")
+            .unwrap()
+            .try_into()
+            .unwrap();
     RpsParams {
         alice_pk,
         bob_pk,
@@ -39,7 +38,7 @@ fn reference_params() -> RpsParams {
 
 #[test]
 fn test_rps_s0_taptree_matches_reference() {
-    let s0 = RpsGameS0::new(reference_params());
+    let s0 = RpsGameS0::new(reference_params()).unwrap();
     assert_eq!(
         hex::encode(s0.taptree_root()),
         "627bc918efafddfc00f69cc3d14bc2b8d9a7854d05fd048a6eee0640aaa4a26f"
@@ -50,7 +49,7 @@ fn test_rps_s0_taptree_matches_reference() {
 fn test_rps_s1_taptree_matches_reference() {
     // This root bakes in the three CTV template hashes, so matching it proves the
     // adjudication scripts and payout templates are byte-identical to pymatt.
-    let s1 = RpsGameS1::new(reference_params());
+    let s1 = RpsGameS1::new(reference_params()).unwrap();
     assert_eq!(
         hex::encode(s1.taptree_root()),
         "3a7709078e9ce23ab2fa1c8191bba476a27ced73c6a372e290d3a273305a250c"
@@ -86,7 +85,7 @@ fn test_rps_bob_move_commits_s1_state() {
     let params = reference_params();
 
     let handle = try_handle::<RpsGameS0Handle>(fund_fake(
-        RpsGameS0::new(params.clone()).as_erased(),
+        RpsGameS0::new(params.clone()).unwrap().as_erased(),
         None,
         2000,
         0,
@@ -104,6 +103,7 @@ fn test_rps_bob_move_commits_s1_state() {
 
     // Output 0 commits RpsGameS1 with state sha256(m_b), preserving the amount.
     let expected = RpsGameS1::new(params)
+        .unwrap()
         .as_erased()
         .script_pubkey(Some(move_commitment(1).as_slice()))
         .unwrap();
@@ -117,7 +117,7 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
     let bob_pk = params.bob_pk;
 
     let handle = try_handle::<RpsGameS1Handle>(fund_fake(
-        RpsGameS1::new(params).as_erased(),
+        RpsGameS1::new(params).unwrap().as_erased(),
         Some(Box::new(RpsGameS1State {
             commitment: move_commitment(1),
         })),
@@ -129,10 +129,7 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
     let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // The bob_wins clause pays out the whole pot to Bob via a CTV template.
-    let tx = handle
-        .bob_wins(1, 0, [0u8; 32])
-        .build_tx(&manager)
-        .unwrap();
+    let tx = handle.bob_wins(1, 0, [0u8; 32]).build_tx(&manager).unwrap();
 
     let secp = Secp256k1::new();
     let bob_spk = ScriptBuf::new_p2tr(&secp, bob_pk, None);
@@ -166,7 +163,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let mut report = Report::new();
 
     // Fund the game with both players' stakes.
-    let s0 = RpsGameS0::new(params).fund(&mut manager, pot)?;
+    let s0 = RpsGameS0::new(params)?.fund(&mut manager, pot)?;
 
     // Bob reveals paper (m_b = 1), signed; the S1 child commits sha256(bn(1)).
     let s1: RpsGameS1Handle = s0

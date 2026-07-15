@@ -14,9 +14,9 @@
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, ClauseOutput};
-use mattrs::{contract, ContractParams, ContractState};
+use mattrs::{ContractParams, ContractState, contract};
 
-use mattrs::merkle::{floor_lg, WitProof};
+use mattrs::merkle::{WitProof, floor_lg};
 use mattrs::script_helpers::{check_input_contract, concat};
 
 define_pushable!();
@@ -69,7 +69,7 @@ contract! {
                 }
                 leaves[index] = a.new_value;
                 Ok(vec![ClauseOutput::at_same_index()
-                    .to(Ram::new(p.clone()).as_erased())
+                    .to(Ram::new(p.clone())?.as_erased())
                     .with_state(&RamState { leaves })
                     .preserve_amount()
                     .build()])

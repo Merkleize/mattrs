@@ -11,9 +11,7 @@
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseOutput, CtvTemplate};
-use mattrs::{
-    contract, script_utils::commit_int, ContractParams, ContractState, Signature,
-};
+use mattrs::{ContractParams, ContractState, Signature, contract, script_utils::commit_int};
 
 use mattrs::script_helpers::{check_input_contract, check_output_contract, key_path_p2tr};
 
@@ -46,7 +44,7 @@ pub fn move_commitment(mv: i64) -> [u8; 32] {
 /// blinded with a 32-byte nonce, revealed (and script-verified) only when she
 /// adjudicates the game.
 pub fn alice_move_commitment(m_a: i64, r_a: &[u8; 32]) -> [u8; 32] {
-    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::hashes::{Hash, sha256};
     let mut preimage = mattrs::script_utils::bn2vch(m_a);
     preimage.extend_from_slice(r_a);
     sha256::Hash::hash(&preimage).to_byte_array()
@@ -69,7 +67,7 @@ contract! {
             }
             script RpsGameS0::bob_move_script;
             next(p, a) {
-                let s1 = RpsGameS1::new(p.clone());
+                let s1 = RpsGameS1::new(p.clone())?;
                 let state = RpsGameS1State { commitment: move_commitment(a.m_b) };
                 Ok(vec![ClauseOutput::at(0)
                     .to(s1.as_erased())
@@ -85,7 +83,9 @@ contract! {
 
 impl RpsGameS0 {
     fn bob_move_script(p: &RpsParams) -> ScriptBuf {
-        let s1_taptree_root = RpsGameS1::new(p.clone()).taptree_root();
+        let s1_taptree_root = RpsGameS1::new(p.clone())
+            .expect("RpsGameS1 contract definition is valid")
+            .taptree_root();
         script! {
             // check Bob's signature, leaving <m_b> on top
             { p.bob_pk }
@@ -232,8 +232,8 @@ pub mod roles {
     use mattrs::signer::HotSigner;
 
     use super::{
-        alice_move_commitment, RpsGameS0, RpsGameS0BobMoveArgs, RpsGameS0Handle, RpsGameS1,
-        RpsGameS1Clause, RpsGameS1Handle, RpsGameS1TieArgs,
+        RpsGameS0, RpsGameS0BobMoveArgs, RpsGameS0Handle, RpsGameS1, RpsGameS1Clause,
+        RpsGameS1Handle, RpsGameS1TieArgs, alice_move_commitment,
     };
 
     /// Who takes the pot.
@@ -291,9 +291,9 @@ pub mod roles {
             .on::<RpsGameS0, _>(|_d: &mut AliceData, _h: RpsGameS0Handle, _cx| Ok(Action::Wait))
             .on::<RpsGameS1, _>(|d, h: RpsGameS1Handle, cx| {
                 // Bob's move travels in the witness of the spend that got us here.
-                let parent = cx.parent.ok_or_else(|| {
-                    ProtocolError::Other("S1 arises from S0's bob_move".into())
-                })?;
+                let parent = cx
+                    .parent
+                    .ok_or_else(|| ProtocolError::Other("S1 arises from S0's bob_move".into()))?;
                 let witness = parent
                     .spending_args()
                     .ok_or_else(|| ProtocolError::Other("the parent S0 is spent".into()))?;

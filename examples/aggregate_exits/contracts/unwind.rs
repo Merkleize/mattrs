@@ -2,19 +2,19 @@
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
+use mattrs::ContractState;
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, WitnessReader, CCV_FLAG_CHECK_INPUT,
-    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
+    WitnessReader,
 };
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{MerkleProof, NIL};
 use mattrs::script_utils::bn2vch;
-use mattrs::ContractState;
 
 use super::pending_exit::{PendingExit, PendingExitState};
+use super::{ExitClaim, PoolParams, PoolTree, bit_root, spec, spec_num};
 use mattrs::stack::{Source, StackScript};
-use super::{bit_root, spec, spec_num, ExitClaim, PoolParams, PoolTree};
 
 define_pushable!();
 
@@ -67,10 +67,7 @@ contract! {
 /// This is the shared-direction dual walk with the one sibling duplicated:
 /// `<old> <new> <sib> <d>` becomes `<old> <new> <sib> <sib> <d>`.
 fn dual_update_layer() -> ScriptBuf {
-    mattrs::script_helpers::concat(&[
-        script! { OP_SWAP OP_DUP OP_ROT },
-        super::dual_proof_layer(),
-    ])
+    mattrs::script_helpers::concat(&[script! { OP_SWAP OP_DUP OP_ROT }, super::dual_proof_layer()])
 }
 
 impl Unwind {
@@ -164,7 +161,7 @@ impl Unwind {
         Ok(vec![
             ClauseOutput::pay_key(0, pk),
             ClauseOutput::at(1)
-                .to(Unwind::new(p.clone()).as_erased())
+                .to(Unwind::new(p.clone())?.as_erased())
                 .with_state(&UnwindState { root: new_root })
                 .preserve_amount()
                 .build(),
@@ -220,7 +217,15 @@ impl Unwind {
         s.pick("x");
         s.sha256_top("x_leaf");
         s.merkle_of(
-            &["unwind_taptree", "root", "r_prime", "s_root", "ingrid_pk", "trace_i", "x_leaf"],
+            &[
+                "unwind_taptree",
+                "root",
+                "r_prime",
+                "s_root",
+                "ingrid_pk",
+                "trace_i",
+                "x_leaf",
+            ],
             "pe_state",
         );
 
@@ -232,7 +237,11 @@ impl Unwind {
             Source::Item("pe_state"),
             0,
             Source::None,
-            Source::Const(PendingExit::new(p.clone()).taptree_root()),
+            Source::Const(
+                PendingExit::new(p.clone())
+                    .expect("PendingExit contract definition is valid")
+                    .taptree_root(),
+            ),
             0,
         );
         s.into_script()
@@ -265,11 +274,13 @@ impl Unwind {
             trace_i,
             x,
         };
-        Ok(vec![ClauseOutput::at(0)
-            .to(PendingExit::new(p.clone()).as_erased())
-            .with_state(&state)
-            .preserve_amount()
-            .build()])
+        Ok(vec![
+            ClauseOutput::at(0)
+                .to(PendingExit::new(p.clone())?.as_erased())
+                .with_state(&state)
+                .preserve_amount()
+                .build(),
+        ])
     }
 }
 
@@ -292,8 +303,14 @@ impl UnwindHandle {
     /// Post `claim` on behalf of `ingrid_pk`, moving the pool to
     /// [`PendingExit`]. Batch with an [`super::ExitBond`] `stake_claim` spend
     /// so the bond joins the pot.
-    pub fn start_exit(&self, claim: &ExitClaim, ingrid_pk: &bitcoin::XOnlyPublicKey) -> SpendBuilder {
-        let unwind_taptree = Unwind::new(self.params()).taptree_root();
+    pub fn start_exit(
+        &self,
+        claim: &ExitClaim,
+        ingrid_pk: &bitcoin::XOnlyPublicKey,
+    ) -> SpendBuilder {
+        let unwind_taptree = Unwind::new(self.params())
+            .expect("Unwind contract definition is valid")
+            .taptree_root();
         let mut witness = vec![
             unwind_taptree.to_vec(),
             claim.r.to_vec(),

@@ -74,9 +74,13 @@ pub enum ManagerError {
     ClauseNotFound(String),
     /// A `DeductOutput` at this index needs an amount, supplied via
     /// [`SpendBuilder::output_amount`].
-    MissingDeductAmount { index: u32 },
+    MissingDeductAmount {
+        index: u32,
+    },
     /// The merged clause outputs skip a transaction output index.
-    NonContiguousOutputs { missing_index: u32 },
+    NonContiguousOutputs {
+        missing_index: u32,
+    },
     /// Deducted output amounts exceed the input amount.
     DeductExceedsInput,
     /// An observed spending transaction could not be decoded back into a clause
@@ -93,27 +97,38 @@ pub enum ManagerError {
     /// none, so they must be supplied with [`SpendBuilder::outputs`].
     NoOutputs,
     /// Two spends of a batch set a different amount for the same output index.
-    ConflictingOutputAmount { index: u32 },
+    ConflictingOutputAmount {
+        index: u32,
+    },
     /// An output index receives both `PreserveOutput` and `DeductOutput`
     /// contributions (from the same or different inputs); the two amount
     /// semantics cannot hold for one output.
-    MixedOutputSemantics { index: u32 },
+    MixedOutputSemantics {
+        index: u32,
+    },
     /// An amount was supplied via [`SpendBuilder::output_amount`] for an output
     /// index that no `DeductOutput` uses.
-    UnusedOutputAmount { index: u32 },
+    UnusedOutputAmount {
+        index: u32,
+    },
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
     MissingSigner(XOnlyPublicKey),
     /// A spend produced a different number of child instances than the caller
     /// asserted via `exec_one` / `exec_none`.
-    UnexpectedOutputCount { expected: usize, got: usize },
+    UnexpectedOutputCount {
+        expected: usize,
+        got: usize,
+    },
     /// A child instance was not of the requested contract type
     /// ([`Children::typed`] / [`Children::one`]).
     WrongContract(WrongContractType),
     /// A `NextOutputs::Join` contribution targets an output index no other
     /// input's clause defines.
-    JoinWithoutTarget { index: u32 },
+    JoinWithoutTarget {
+        index: u32,
+    },
     Other(String),
 }
 
@@ -144,7 +159,11 @@ impl std::fmt::Display for ManagerError {
                 write!(f, "Cannot decode the observed spend: {}", msg)
             }
             ManagerError::SpendNotFound(outpoint) => {
-                write!(f, "No transaction spending {} found while polling", outpoint)
+                write!(
+                    f,
+                    "No transaction spending {} found while polling",
+                    outpoint
+                )
             }
             ManagerError::TransactionNotFound(txid) => {
                 write!(f, "Transaction {} not found while polling", txid)
@@ -160,11 +179,9 @@ impl std::fmt::Display for ManagerError {
                 "The spend produces no outputs; terminal clauses need explicit \
                  outputs (SpendBuilder::outputs)"
             ),
-            ManagerError::ConflictingOutputAmount { index } => write!(
-                f,
-                "Conflicting amounts were set for output index {}",
-                index
-            ),
+            ManagerError::ConflictingOutputAmount { index } => {
+                write!(f, "Conflicting amounts were set for output index {}", index)
+            }
             ManagerError::MixedOutputSemantics { index } => write!(
                 f,
                 "Output index {} mixes PreserveOutput and DeductOutput contributions",
@@ -396,10 +413,7 @@ impl ContractManager {
     /// a shared index accumulates each contributing input's remaining amount (so N
     /// vaults triggering to the same next contract merge into one output). CTV
     /// template clauses are single-input only and are rejected here.
-    pub fn spend_batch(
-        &mut self,
-        builders: &[SpendBuilder],
-    ) -> Result<Children, ManagerError> {
+    pub fn spend_batch(&mut self, builders: &[SpendBuilder]) -> Result<Children, ManagerError> {
         let (tx, nexts) = self.assemble(builders)?;
 
         self.rpc.send_raw_transaction(&tx)?;
@@ -429,10 +443,7 @@ impl ContractManager {
         let txid = tx.compute_txid();
         for (builder, next) in builders.iter().zip(&nexts) {
             if let NextOutputs::Join { index } = next {
-                let outpoint = OutPoint {
-                    txid,
-                    vout: *index,
-                };
+                let outpoint = OutPoint { txid, vout: *index };
                 let child = self
                     .find_instance_by_outpoint(outpoint)
                     .ok_or(ManagerError::JoinWithoutTarget { index: *index })?;
@@ -547,8 +558,7 @@ impl ContractManager {
         if let Some(explicit) = builders.iter().find_map(|b| b.explicit_outputs.as_ref()) {
             if !single {
                 return Err(ManagerError::TransactionBuildError(
-                    "explicit outputs are single-input only; not supported in a batch"
-                        .to_string(),
+                    "explicit outputs are single-input only; not supported in a batch".to_string(),
                 ));
             }
             if template.is_some() {
@@ -815,7 +825,10 @@ impl ContractManager {
     /// A managed instance funded at `outpoint`, if any. Used to deduplicate
     /// children when several parents' clause outputs merge into one transaction
     /// output (each parent then links to the same child instance).
-    fn find_instance_by_outpoint(&self, outpoint: OutPoint) -> Option<Rc<RefCell<ContractInstance>>> {
+    fn find_instance_by_outpoint(
+        &self,
+        outpoint: OutPoint,
+    ) -> Option<Rc<RefCell<ContractInstance>>> {
         self.instances
             .iter()
             .find(|inst| inst.borrow().outpoint() == Some(outpoint))
@@ -1005,10 +1018,12 @@ impl ContractManager {
         };
 
         if !already_spent {
-            handle
-                .instance
-                .borrow_mut()
-                .mark_spent(spending_tx.clone(), vin, clause_name, witness_args);
+            handle.instance.borrow_mut().mark_spent(
+                spending_tx.clone(),
+                vin,
+                clause_name,
+                witness_args,
+            );
         }
 
         let children = match &next {
@@ -1056,10 +1071,7 @@ impl ContractManager {
     /// further spends or waits. The clause and its witness arguments are recorded
     /// on the instance ([`InstanceHandle::clause_name`] /
     /// [`InstanceHandle::spending_args`]).
-    pub fn wait_for_spend(
-        &mut self,
-        handle: &InstanceHandle,
-    ) -> Result<Children, ManagerError> {
+    pub fn wait_for_spend(&mut self, handle: &InstanceHandle) -> Result<Children, ManagerError> {
         self.wait_for_spend_within(handle, Some(DEFAULT_POLL_WINDOW))
     }
 
@@ -1287,11 +1299,7 @@ pub struct WrongContractType {
 
 impl std::fmt::Display for WrongContractType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "instance is not a `{}` contract",
-            self.expected
-        )
+        write!(f, "instance is not a `{}` contract", self.expected)
     }
 }
 
@@ -1656,8 +1664,7 @@ impl SpendBuilder {
 mod tests {
     use super::*;
     use crate::contracts::{
-        ClauseOutput, ClauseTree, CtvTemplate, NextOutputsFn, RawArgs, StandardClause,
-        StandardP2TR,
+        ClauseOutput, ClauseTree, CtvTemplate, NextOutputsFn, RawArgs, StandardClause, StandardP2TR,
     };
     use crate::testutil::{fund_fake, offline_client};
     use bitcoin::ScriptBuf;
@@ -1690,12 +1697,15 @@ mod tests {
             vec![],
             next_outputs_fn,
         );
-        Arc::new(StandardP2TR::new(
-            "Test",
-            crate::nums_key(),
-            &(),
-            ClauseTree::leaf(Arc::new(clause)),
-        ))
+        Arc::new(
+            StandardP2TR::new(
+                "Test",
+                crate::nums_key(),
+                &(),
+                ClauseTree::leaf(Arc::new(clause)),
+            )
+            .expect("test contract is valid"),
+        )
     }
 
     /// A contract whose clause produces exactly `outputs` when spent.
@@ -1740,13 +1750,24 @@ mod tests {
         let c1 = contract_yielding(
             1,
             vec![
-                ClauseOutput::at(1).to(revault.clone()).deduct_amount().build(),
-                ClauseOutput::at(0).to(unvault.clone()).preserve_amount().build(),
+                ClauseOutput::at(1)
+                    .to(revault.clone())
+                    .deduct_amount()
+                    .build(),
+                ClauseOutput::at(0)
+                    .to(unvault.clone())
+                    .preserve_amount()
+                    .build(),
             ],
         );
         let c2 = contract_yielding(
             2,
-            vec![ClauseOutput::at(0).to(unvault.clone()).preserve_amount().build()],
+            vec![
+                ClauseOutput::at(0)
+                    .to(unvault.clone())
+                    .preserve_amount()
+                    .build(),
+            ],
         );
         let h1 = fund_fake(c1, None, sat(100_000), 1);
         let h2 = fund_fake(c2, None, sat(60_000), 2);
@@ -1769,7 +1790,12 @@ mod tests {
         let dest = test_contract(90, None);
         let defining = contract_yielding(
             1,
-            vec![ClauseOutput::at(0).to(dest.clone()).preserve_amount().build()],
+            vec![
+                ClauseOutput::at(0)
+                    .to(dest.clone())
+                    .preserve_amount()
+                    .build(),
+            ],
         );
         let joining = test_contract(
             2,
@@ -1781,10 +1807,7 @@ mod tests {
         let hj = fund_fake(joining, None, sat(60_000), 2);
 
         // Both orders: the join is resolved after all defining inputs.
-        for builders in [
-            [spend(&hd), spend(&hj)],
-            [spend(&hj), spend(&hd)],
-        ] {
+        for builders in [[spend(&hd), spend(&hj)], [spend(&hj), spend(&hd)]] {
             let tx = offline_manager().build_batch_tx(&builders).unwrap();
             assert_eq!(tx.output.len(), 1);
             assert_eq!(tx.output[0].value, sat(160_000));
@@ -1823,7 +1846,10 @@ mod tests {
         let err = offline_manager()
             .build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hj)])
             .unwrap_err();
-        assert!(matches!(err, ManagerError::MixedOutputSemantics { index: 0 }));
+        assert!(matches!(
+            err,
+            ManagerError::MixedOutputSemantics { index: 0 }
+        ));
     }
 
     /// A defining input and a joining input funded and batched, for the
@@ -1906,7 +1932,12 @@ mod tests {
         let dest = test_contract(90, None);
         let preserving = contract_yielding(
             1,
-            vec![ClauseOutput::at(0).to(dest.clone()).preserve_amount().build()],
+            vec![
+                ClauseOutput::at(0)
+                    .to(dest.clone())
+                    .preserve_amount()
+                    .build(),
+            ],
         );
         let deducting = contract_yielding(
             2,
@@ -1919,12 +1950,18 @@ mod tests {
         let err = offline_manager()
             .build_batch_tx(&[spend(&hp), spend(&hd).output_amount(0, sat(10_000))])
             .unwrap_err();
-        assert!(matches!(err, ManagerError::MixedOutputSemantics { index: 0 }));
+        assert!(matches!(
+            err,
+            ManagerError::MixedOutputSemantics { index: 0 }
+        ));
 
         let err = offline_manager()
             .build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hp)])
             .unwrap_err();
-        assert!(matches!(err, ManagerError::MixedOutputSemantics { index: 0 }));
+        assert!(matches!(
+            err,
+            ManagerError::MixedOutputSemantics { index: 0 }
+        ));
     }
 
     #[test]
@@ -1952,7 +1989,10 @@ mod tests {
         let h = fund_fake(c, None, sat(100_000), 1);
 
         let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
-        assert!(matches!(err, ManagerError::MissingDeductAmount { index: 0 }));
+        assert!(matches!(
+            err,
+            ManagerError::MissingDeductAmount { index: 0 }
+        ));
     }
 
     #[test]
@@ -1989,7 +2029,10 @@ mod tests {
                 spend(&h2).output_amount(0, sat(20_000)),
             ])
             .unwrap_err();
-        assert!(matches!(err, ManagerError::ConflictingOutputAmount { index: 0 }));
+        assert!(matches!(
+            err,
+            ManagerError::ConflictingOutputAmount { index: 0 }
+        ));
     }
 
     #[test]
@@ -2058,7 +2101,12 @@ mod tests {
         let templated = contract_with_template(1, template_to(&dest, sat(50_000), 0));
         let preserving = contract_yielding(
             2,
-            vec![ClauseOutput::at(0).to(dest.clone()).preserve_amount().build()],
+            vec![
+                ClauseOutput::at(0)
+                    .to(dest.clone())
+                    .preserve_amount()
+                    .build(),
+            ],
         );
         let h1 = fund_fake(templated, None, sat(50_000), 1);
         let h2 = fund_fake(preserving, None, sat(60_000), 2);
@@ -2075,7 +2123,12 @@ mod tests {
         let preserving = |tag, seed| {
             let c = contract_yielding(
                 tag,
-                vec![ClauseOutput::at(0).to(dest.clone()).preserve_amount().build()],
+                vec![
+                    ClauseOutput::at(0)
+                        .to(dest.clone())
+                        .preserve_amount()
+                        .build(),
+                ],
             );
             fund_fake(c, None, sat(100_000), seed)
         };

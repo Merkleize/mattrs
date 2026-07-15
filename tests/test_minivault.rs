@@ -50,6 +50,7 @@ fn withdrawal_pk() -> [u8; 32] {
 fn test_minivault_clause_set_follows_features() {
     let clause_names = |pr: bool, er: bool| -> Vec<String> {
         MiniVault::new(make_params(pr, er))
+            .unwrap()
             .as_erased()
             .clauses()
             .iter()
@@ -61,7 +62,10 @@ fn test_minivault_clause_set_follows_features() {
         clause_names(true, true),
         ["trigger", "trigger_and_revault", "recover"]
     );
-    assert_eq!(clause_names(true, false), ["trigger", "trigger_and_revault"]);
+    assert_eq!(
+        clause_names(true, false),
+        ["trigger", "trigger_and_revault"]
+    );
     assert_eq!(clause_names(false, true), ["trigger", "recover"]);
     assert_eq!(clause_names(false, false), ["trigger"]);
 }
@@ -71,7 +75,7 @@ fn test_minivault_combos_have_distinct_taptrees() {
     let combos = [(true, true), (true, false), (false, true), (false, false)];
     let roots: Vec<[u8; 32]> = combos
         .iter()
-        .map(|&(pr, er)| MiniVault::new(make_params(pr, er)).taptree_root())
+        .map(|&(pr, er)| MiniVault::new(make_params(pr, er)).unwrap().taptree_root())
         .collect();
 
     for a in 0..roots.len() {
@@ -93,7 +97,7 @@ fn test_minivault_trigger_commits_unvaulting_state() {
     let wpk = withdrawal_pk();
 
     let handle = try_handle::<MiniVaultHandle>(fund_fake(
-        MiniVault::new(params.clone()).as_erased(),
+        MiniVault::new(params.clone()).unwrap().as_erased(),
         None,
         100_000,
         0,
@@ -110,7 +114,8 @@ fn test_minivault_trigger_commits_unvaulting_state() {
         alternate_pk: None,
         spend_delay: SPEND_DELAY,
         recover_pk: bob_pk(),
-    });
+    })
+    .unwrap();
     let expected = unvaulting
         .as_erased()
         .script_pubkey(Some(wpk.as_slice()))
@@ -132,7 +137,9 @@ fn test_minivault_trigger_commits_unvaulting_state() {
 static E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn e2e_lock() -> std::sync::MutexGuard<'static, ()> {
-    E2E_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    E2E_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The withdrawal key's opaque-P2TR output, as the withdraw clause's CCV
@@ -163,7 +170,7 @@ fn test_minivault_early_recover_on_regtest() -> Result<(), Box<dyn std::error::E
     let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
     let mut report = Report::new();
 
-    let vault = MiniVault::new(make_params(false, true)).fund(&mut manager, amount)?;
+    let vault = MiniVault::new(make_params(false, true))?.fund(&mut manager, amount)?;
     vault
         .recover(0)
         .outputs(vec![recovery_txout(amount)])
@@ -190,7 +197,7 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
     let mut report = Report::new();
     let wpk = withdrawal_pk();
 
-    let vault = MiniVault::new(make_params(true, true)).fund(&mut manager, amount)?;
+    let vault = MiniVault::new(make_params(true, true))?.fund(&mut manager, amount)?;
 
     let unvaulting: MiniUnvaultingHandle = vault
         .trigger(wpk, 0)
@@ -227,7 +234,7 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
     let mut report = Report::new();
     let wpk = withdrawal_pk();
 
-    let vault = MiniVault::new(make_params(false, false)).fund(&mut manager, amount)?;
+    let vault = MiniVault::new(make_params(false, false))?.fund(&mut manager, amount)?;
 
     let unvaulting: MiniUnvaultingHandle = vault
         .trigger(wpk, 0)
@@ -242,7 +249,9 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
         .outputs(vec![withdrawal_txout(amount)])
         .sequence(SPEND_DELAY)
         .exec_none(&mut manager);
-    let err = early.expect_err("withdraw must fail before spend_delay").to_string();
+    let err = early
+        .expect_err("withdraw must fail before spend_delay")
+        .to_string();
     assert!(
         err.contains("non-BIP68-final") || err.contains("non-final"),
         "expected a non-final rejection, got: {err}"
@@ -279,7 +288,7 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
     let mut report = Report::new();
     let wpk = withdrawal_pk();
 
-    let minivault = MiniVault::new(make_params(true, false));
+    let minivault = MiniVault::new(make_params(true, false))?;
     let v1 = minivault.fund(&mut manager, amount)?;
     let v2 = minivault.fund(&mut manager, amount)?;
     let v3 = minivault.fund(&mut manager, amount)?;
@@ -315,10 +324,7 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
     assert_eq!(revault_child.prevout().unwrap().value, revault_amount);
 
     let unvaulting: MiniUnvaultingHandle = unvaulting_child.clone().try_into()?;
-    assert_eq!(
-        unvaulting.state().expect("state").withdrawal_pk,
-        wpk
-    );
+    assert_eq!(unvaulting.state().expect("state").withdrawal_pk, wpk);
 
     manager.mine_blocks(SPEND_DELAY as u64)?;
     unvaulting

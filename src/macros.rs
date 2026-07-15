@@ -126,7 +126,7 @@ mod tests {
     use std::sync::Arc;
 
     use bitcoin::ScriptBuf;
-    use mattrs_derive::{contract, ContractParams};
+    use mattrs_derive::{ContractParams, contract};
 
     use crate::contracts::{ClauseTree, ErasedClause, RawArgs, StandardClause};
 
@@ -220,8 +220,8 @@ mod tests {
 
     #[test]
     fn contract_taptrees_follow_the_written_shape() {
-        let balanced = BalancedTree::new(TreeParams { tag: 0 });
-        let folded = FoldedTree::new(TreeParams { tag: 0 });
+        let balanced = BalancedTree::new(TreeParams { tag: 0 }).unwrap();
+        let folded = FoldedTree::new(TreeParams { tag: 0 }).unwrap();
         assert_ne!(balanced.taptree_root(), folded.taptree_root());
     }
 }

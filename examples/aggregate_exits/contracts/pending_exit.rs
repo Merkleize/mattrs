@@ -2,22 +2,22 @@
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::define_pushable;
+use mattrs::ContractState;
 use mattrs::contract;
 use mattrs::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, WitnessReader, CCV_FLAG_CHECK_INPUT,
-    CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
+    WitnessReader,
 };
 use mattrs::manager::SpendBuilder;
 use mattrs::script_utils::{bn2vch, commit_int};
-use mattrs::ContractState;
 
 use super::delegation::{DelegationChallenge, DelegationChallengeState};
 use super::dispute::{BisectRangeParams, ExitBisect1, ExitBisect1State};
-use mattrs::stack::{Source, StackScript};
 use super::unwind::{Unwind, UnwindState};
 use super::{
-    dual_proof_layer, spec, spec_num, step_h, ChallengeContext, ExitClaim, PoolParams, PoolTree,
+    ChallengeContext, ExitClaim, PoolParams, PoolTree, dual_proof_layer, spec, spec_num, step_h,
 };
+use mattrs::stack::{Source, StackScript};
 
 define_pushable!();
 
@@ -55,7 +55,9 @@ impl PendingExitState {
         ingrid_pk: &bitcoin::XOnlyPublicKey,
     ) -> Self {
         PendingExitState {
-            unwind_taptree: Unwind::new(params.clone()).taptree_root(),
+            unwind_taptree: Unwind::new(params.clone())
+                .expect("Unwind contract definition is valid")
+                .taptree_root(),
             r: claim.r,
             r_prime: claim.r_prime,
             s_root: claim.s_root,
@@ -69,7 +71,9 @@ impl PendingExitState {
     /// dispute needs to resume this claim.
     pub fn hash(&self) -> [u8; 32] {
         use mattrs::contracts::ContractState;
-        self.encode().try_into().expect("merkle commitment is 32 bytes")
+        self.encode()
+            .try_into()
+            .expect("merkle commitment is 32 bytes")
     }
 
     /// The state fields as witness elements, in leaf order (`x` as a script
@@ -157,7 +161,15 @@ impl PendingExit {
         s.pick("x");
         s.sha256_top("x_leaf");
         s.merkle_of(
-            &["unwind_taptree", "r", "r_prime", "s_root", "ingrid_pk", "trace_i", "x_leaf"],
+            &[
+                "unwind_taptree",
+                "r",
+                "r_prime",
+                "s_root",
+                "ingrid_pk",
+                "trace_i",
+                "x_leaf",
+            ],
             as_name,
         );
         s.ccv(
@@ -206,7 +218,7 @@ impl PendingExit {
         Ok(vec![
             ClauseOutput::pay_key(0, ingrid_pk),
             ClauseOutput::at(1)
-                .to(Unwind::new(p.clone()).as_erased())
+                .to(Unwind::new(p.clone())?.as_erased())
                 .with_state(&UnwindState { root: r_prime })
                 .preserve_amount()
                 .build(),
@@ -215,7 +227,12 @@ impl PendingExit {
 
     fn challenge_state_specs() -> Vec<ArgSpec> {
         let mut specs = Self::state_specs();
-        specs.extend([spec("pe_taptree"), spec("challenger_pk"), spec("h_end_c"), spec("trace_c")]);
+        specs.extend([
+            spec("pe_taptree"),
+            spec("challenger_pk"),
+            spec("h_end_c"),
+            spec("trace_c"),
+        ]);
         specs
     }
 
@@ -233,15 +250,25 @@ impl PendingExit {
         s.sha_cat(&["r_prime", "x"], "h_end_i");
         s.sha_cat(&super::CARRY_ITEMS, "carry");
         s.merkle_of(
-            &["h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "carry"],
+            &[
+                "h_start", "h_end_i", "h_end_c", "trace_i", "trace_c", "carry",
+            ],
             "b1_state",
         );
 
         // Output 0 is the bisection game over the full step range.
         // TODO(OP_AMOUNT): enforce that output 0 carries the pot plus the
         // challenger's bond (`p.bond` sats on top of the input amount).
-        let b1_root = ExitBisect1::new(BisectRangeParams::entry(p)).taptree_root();
-        s.ccv(Source::Item("b1_state"), 0, Source::None, Source::Const(b1_root), 0);
+        let b1_root = ExitBisect1::new(BisectRangeParams::entry(p))
+            .expect("ExitBisect1 contract definition is valid")
+            .taptree_root();
+        s.ccv(
+            Source::Item("b1_state"),
+            0,
+            Source::None,
+            Source::Const(b1_root),
+            0,
+        );
         s.into_script()
     }
 
@@ -269,16 +296,23 @@ impl PendingExit {
             ctx,
         };
         w.expect_end()?;
-        Ok(vec![ClauseOutput::at(0)
-            .to(ExitBisect1::new(BisectRangeParams::entry(p)).as_erased())
-            .with_state(&b1_state)
-            .preserve_amount()
-            .build()])
+        Ok(vec![
+            ClauseOutput::at(0)
+                .to(ExitBisect1::new(BisectRangeParams::entry(p))?.as_erased())
+                .with_state(&b1_state)
+                .preserve_amount()
+                .build(),
+        ])
     }
 
     fn challenge_delegation_specs(p: &PoolParams) -> Vec<ArgSpec> {
         let mut specs = Self::state_specs();
-        specs.extend([spec("pe_taptree"), spec("challenger_pk"), spec("user_pk"), spec_num("bal")]);
+        specs.extend([
+            spec("pe_taptree"),
+            spec("challenger_pk"),
+            spec("user_pk"),
+            spec_num("bal"),
+        ]);
         for l in 0..p.depth() {
             specs.push(spec(&format!("sib_r_{l}")));
             specs.push(spec(&format!("sib_s_{l}")));
@@ -307,13 +341,29 @@ impl PendingExit {
         s.expect_equal("b", "s_root");
 
         s.merkle_of(
-            &["resume", "pe_taptree", "unwind_taptree", "r", "ingrid_pk", "user_pk", "challenger_pk"],
+            &[
+                "resume",
+                "pe_taptree",
+                "unwind_taptree",
+                "r",
+                "ingrid_pk",
+                "user_pk",
+                "challenger_pk",
+            ],
             "dc_state",
         );
         // TODO(OP_AMOUNT): enforce that output 0 carries the pot plus the
         // challenger's bond (`p.bond` sats on top of the input amount).
-        let dc_root = DelegationChallenge::new(p.clone()).taptree_root();
-        s.ccv(Source::Item("dc_state"), 0, Source::None, Source::Const(dc_root), 0);
+        let dc_root = DelegationChallenge::new(p.clone())
+            .expect("DelegationChallenge contract definition is valid")
+            .taptree_root();
+        s.ccv(
+            Source::Item("dc_state"),
+            0,
+            Source::None,
+            Source::Const(dc_root),
+            0,
+        );
         s.into_script()
     }
 
@@ -338,17 +388,20 @@ impl PendingExit {
                 challenger_pk,
             },
         };
-        Ok(vec![ClauseOutput::at(0)
-            .to(DelegationChallenge::new(p.clone()).as_erased())
-            .with_state(&dc_state)
-            .preserve_amount()
-            .build()])
+        Ok(vec![
+            ClauseOutput::at(0)
+                .to(DelegationChallenge::new(p.clone())?.as_erased())
+                .with_state(&dc_state)
+                .preserve_amount()
+                .build(),
+        ])
     }
 }
 
 impl PendingExitHandle {
     fn claim_state(&self) -> PendingExitState {
-        self.state().expect("PendingExit instances carry their claim state")
+        self.state()
+            .expect("PendingExit instances carry their claim state")
     }
 
     /// Settle the matured claim: output 0 pays Ingrid, output 1 continues the
@@ -356,7 +409,8 @@ impl PendingExitHandle {
     /// (`.output_amount(0, x + bond)`); the clause's `timelock` sets the CSV
     /// sequence.
     pub fn finalize(&self) -> SpendBuilder {
-        self.0.spend_clause("finalize", self.claim_state().to_witness())
+        self.0
+            .spend_clause("finalize", self.claim_state().to_witness())
     }
 
     /// Open the bisection game on the claimed amount/root. `honest` is the
@@ -368,7 +422,9 @@ impl PendingExitHandle {
         challenger_pk: &bitcoin::XOnlyPublicKey,
     ) -> SpendBuilder {
         let state = self.claim_state();
-        let pe_taptree = PendingExit::new(self.params()).taptree_root();
+        let pe_taptree = PendingExit::new(self.params())
+            .expect("PendingExit contract definition is valid")
+            .taptree_root();
         let mut witness = state.to_witness();
         witness.push(pe_taptree.to_vec());
         witness.push(challenger_pk.serialize().to_vec());
@@ -396,7 +452,9 @@ impl PendingExitHandle {
         let bit_proof = bit_tree.prove_leaf(index);
         assert_eq!(account_proof.directions, bit_proof.directions);
 
-        let pe_taptree = PendingExit::new(self.params()).taptree_root();
+        let pe_taptree = PendingExit::new(self.params())
+            .expect("PendingExit contract definition is valid")
+            .taptree_root();
         let mut witness = state.to_witness();
         witness.push(pe_taptree.to_vec());
         witness.push(challenger_pk.serialize().to_vec());

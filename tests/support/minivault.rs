@@ -33,10 +33,10 @@
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{ClauseOutput, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT};
+use mattrs::contracts::{CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseOutput};
 use mattrs::{
-    clause_tree, contract, internal_key_or_nums, optional_key_script, ContractParams,
-    ContractState, Signature,
+    ContractParams, ContractState, Signature, clause_tree, contract, internal_key_or_nums,
+    optional_key_script,
 };
 
 define_pushable!();
@@ -149,7 +149,7 @@ contract! {
             }
             script MiniVault::trigger_script;
             next(p, a) {
-                let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p));
+                let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
                 Ok(vec![ClauseOutput::at(a.out_i as u32)
                     .to(unvaulting.as_erased())
                     .with_state(&MiniUnvaultingState {
@@ -171,10 +171,10 @@ contract! {
             }
             script MiniVault::trigger_and_revault_script;
             next(p, a) {
-                let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p));
+                let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
                 Ok(vec![
                     ClauseOutput::at(a.revault_out_i as u32)
-                        .to(MiniVault::new(p.clone()).as_erased())
+                        .to(MiniVault::new(p.clone())?.as_erased())
                         .deduct_amount()
                         .build(),
                     ClauseOutput::at(a.out_i as u32)
@@ -221,8 +221,9 @@ impl MiniVault {
     }
 
     fn trigger_script(params: &MiniVaultParams) -> ScriptBuf {
-        let unvaulting_root =
-            MiniUnvaulting::new(Self::unvaulting_params(params)).taptree_root();
+        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))
+            .expect("MiniUnvaulting contract definition is valid")
+            .taptree_root();
         script! {
             { optional_key_script(params.alternate_pk) }
             { unvaulting_root }
@@ -234,8 +235,9 @@ impl MiniVault {
     }
 
     fn trigger_and_revault_script(params: &MiniVaultParams) -> ScriptBuf {
-        let unvaulting_root =
-            MiniUnvaulting::new(Self::unvaulting_params(params)).taptree_root();
+        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))
+            .expect("MiniUnvaulting contract definition is valid")
+            .taptree_root();
         script! {
             0 OP_SWAP
             -1

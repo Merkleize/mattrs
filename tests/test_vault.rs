@@ -5,8 +5,8 @@ mod support;
 use std::str::FromStr;
 
 use bitcoin::{
-    Address, Amount, KnownHrp, TapNodeHash, XOnlyPublicKey, hashes::Hash,
-    hex::DisplayHex, key::Secp256k1,
+    Address, Amount, KnownHrp, TapNodeHash, XOnlyPublicKey, hashes::Hash, hex::DisplayHex,
+    key::Secp256k1,
 };
 
 use mattrs::{
@@ -35,7 +35,8 @@ fn test_vault_address_matches_reference() {
         spend_delay: 10,
         recover_pk: bob_pk(),
         unvault_pk: alice_pk(),
-    });
+    })
+    .unwrap();
 
     let internal_key = vault.contract().internal_pubkey();
     let taptree_hash = TapNodeHash::from_byte_array(vault.contract().taptree().root_hash());
@@ -95,7 +96,8 @@ fn test_vault_trigger_outputs() {
         spend_delay: 10,
         recover_pk: XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap(),
         unvault_pk: XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap(),
-    });
+    })
+    .unwrap();
 
     let ctv_hash = [0u8; 32];
     let outputs = vault.trigger_outputs(ctv_hash, 0).unwrap();
@@ -120,7 +122,8 @@ fn test_vault_trigger_and_revault_outputs() {
         spend_delay: 10,
         recover_pk: XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap(),
         unvault_pk: XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap(),
-    });
+    })
+    .unwrap();
 
     let ctv_hash = [0u8; 32];
     let outputs = vault.trigger_and_revault_outputs(ctv_hash, 0, 1).unwrap();
@@ -158,7 +161,8 @@ fn test_vault_recover_outputs() {
         spend_delay: 10,
         recover_pk: XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap(),
         unvault_pk: XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap(),
-    });
+    })
+    .unwrap();
 
     let outputs = vault.recover_outputs().unwrap();
     assert_eq!(outputs.len(), 0, "Recover should be terminal (no outputs)");
@@ -179,7 +183,7 @@ fn test_trigger_without_signer_errors() {
         recover_pk: XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap(),
         unvault_pk: XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap(),
     };
-    let vault = Vault::new(params);
+    let vault = Vault::new(params).unwrap();
 
     // Fake a funded instance so the tx can be built (and a prevout exists).
     let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, 0));
@@ -187,10 +191,7 @@ fn test_trigger_without_signer_errors() {
     let client = offline_client();
     let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
-    let err = handle
-        .trigger([7u8; 32], 0)
-        .build_tx(&manager)
-        .unwrap_err();
+    let err = handle.trigger([7u8; 32], 0).build_tx(&manager).unwrap_err();
 
     assert!(
         matches!(err, ManagerError::MissingSigner(_)),
@@ -218,7 +219,7 @@ fn test_batch_merges_and_deducts_outputs() {
         recover_pk: recover_pubkey,
         unvault_pk: alice_pk(),
     };
-    let vault = Vault::new(params);
+    let vault = Vault::new(params).unwrap();
 
     // Fund three vault instances of 100_000 sat each (same address, distinct txids).
     let funded =
@@ -238,8 +239,10 @@ fn test_batch_merges_and_deducts_outputs() {
             h1.trigger_and_revault(ctv_hash, 0, 1)
                 .sign(HotSigner::new(unvault_privkey))
                 .output_amount(1, revault_amount),
-            h2.trigger(ctv_hash, 0).sign(HotSigner::new(unvault_privkey)),
-            h3.trigger(ctv_hash, 0).sign(HotSigner::new(unvault_privkey)),
+            h2.trigger(ctv_hash, 0)
+                .sign(HotSigner::new(unvault_privkey)),
+            h3.trigger(ctv_hash, 0)
+                .sign(HotSigner::new(unvault_privkey)),
         ])
         .unwrap();
 
@@ -272,7 +275,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         unvault_pk: alice_pk(),
     };
 
-    let vault_contract = Vault::new(params.clone());
+    let vault_contract = Vault::new(params.clone())?;
     let internal_key = vault_contract.contract().internal_pubkey();
     let taptree_hash =
         TapNodeHash::from_byte_array(vault_contract.contract().taptree().root_hash());
@@ -290,7 +293,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // Create and fund a Vault instance, getting a typed VaultHandle back.
-    let vault = Vault::new(params).fund(&mut manager, Amount::from_sat(amount))?;
+    let vault = Vault::new(params)?.fund(&mut manager, Amount::from_sat(amount))?;
 
     let ctv_template = vec![
         (
@@ -323,7 +326,9 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     // The child Unvaulting instance is funded and carries the ctv_hash as its state.
     assert_eq!(unvaulting.handle().status(), InstanceStatus::Funded);
-    let state = unvaulting.state().expect("Unvaulting instance should have state");
+    let state = unvaulting
+        .state()
+        .expect("Unvaulting instance should have state");
     assert_eq!(state.ctv_hash, ctv_hash);
 
     let withdraw_outputs: Vec<bitcoin::TxOut> = ctv_template
@@ -383,7 +388,7 @@ fn test_observe_spend_decodes_clause_and_children() {
         recover_pk: bob_pk(),
         unvault_pk: alice_pk(),
     };
-    let vault = Vault::new(params.clone());
+    let vault = Vault::new(params.clone()).unwrap();
     let ctv_hash = [0xabu8; 32];
 
     // The actor builds (but does not broadcast) a trigger spend.
@@ -408,8 +413,7 @@ fn test_observe_spend_decodes_clause_and_children() {
     // The spend is decoded: clause, typed args, and status.
     assert_eq!(observed.status(), InstanceStatus::Spent);
     assert_eq!(observed.clause_name().as_deref(), Some("trigger"));
-    let args =
-        VaultTriggerArgs::decode_from_witness(&observed.spending_args().unwrap()).unwrap();
+    let args = VaultTriggerArgs::decode_from_witness(&observed.spending_args().unwrap()).unwrap();
     assert_eq!(args.ctv_hash, ctv_hash);
     assert_eq!(args.out_i, 0);
     assert!(!args.sig.is_empty());
@@ -418,7 +422,11 @@ fn test_observe_spend_decodes_clause_and_children() {
     assert_eq!(children.len(), 1);
     let unvaulting: UnvaultingHandle = children[0].clone().try_into().unwrap();
     assert_eq!(
-        unvaulting.handle().state::<UnvaultingState>().unwrap().ctv_hash,
+        unvaulting
+            .handle()
+            .state::<UnvaultingState>()
+            .unwrap()
+            .ctv_hash,
         ctv_hash
     );
     assert_eq!(observed.outputs().len(), 1);
@@ -445,7 +453,7 @@ fn test_observe_batch_spend_decodes_all_inputs() {
         recover_pk: bob_pk(),
         unvault_pk: alice_pk(),
     };
-    let vault = Vault::new(params);
+    let vault = Vault::new(params).unwrap();
     let ctv_hash = [7u8; 32];
     let revault_amount = Amount::from_sat(30_000);
 

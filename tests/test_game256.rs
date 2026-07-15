@@ -7,10 +7,8 @@ mod support;
 
 use bitcoin::XOnlyPublicKey;
 
-use support::game256::{
-    bisect1, bisect2, leaf, BisectParams, G256Params, G256S0, G256S1, G256S2,
-};
 use mattrs::script_helpers::{dup, merkle_root};
+use support::game256::{BisectParams, G256Params, G256S0, G256S1, G256S2, bisect1, bisect2, leaf};
 
 // Regenerate the pinned roots with pymatt (from the repo root):
 //   pymatt/venv/bin/python -c "
@@ -26,10 +24,7 @@ use mattrs::script_helpers::{dup, merkle_root};
 //   print('G256_S0      ', G256_S0(a, b).get_tr_info().merkle_root.hex())"
 // (Bisect_1/Bisect_2 over other ranges follow the same pattern.)
 fn keys() -> (XOnlyPublicKey, XOnlyPublicKey) {
-    (
-        support::testkit::alice_pk(),
-        support::testkit::bob_pk(),
-    )
+    (support::testkit::alice_pk(), support::testkit::bob_pk())
 }
 
 #[test]
@@ -90,15 +85,15 @@ fn test_g256_stage_taptrees_match_reference() {
     let p = G256Params { alice_pk, bob_pk };
 
     assert_eq!(
-        hex::encode(G256S0::new(p.clone()).taptree_root()),
+        hex::encode(G256S0::new(p.clone()).unwrap().taptree_root()),
         "ddba91cb57ac4e1b4c79c8dc48c5b62e39ecd4687b6256ec1eb5f77fad6f3429"
     );
     assert_eq!(
-        hex::encode(G256S1::new(p.clone()).taptree_root()),
+        hex::encode(G256S1::new(p.clone()).unwrap().taptree_root()),
         "3186a6c6434dd328e3664f72b93186981087d94b13359dfd8ecc5384d8a3cc84"
     );
     assert_eq!(
-        hex::encode(G256S2::new(p).taptree_root()),
+        hex::encode(G256S2::new(p).unwrap().taptree_root()),
         "d04adc2924609a0c189c095d320829e22b9879017f81bd84f245a23d3e9c18be"
     );
 }
@@ -125,7 +120,10 @@ use support::game256::{
 use support::testkit::{alice_xpriv, bob_xpriv, fund_fake, offline_client, try_handle};
 
 /// The committed address of `contract` with committed `state`.
-fn addr<S: ContractState + 'static>(contract: Arc<dyn ErasedContract>, state: &S) -> bitcoin::ScriptBuf {
+fn addr<S: ContractState + 'static>(
+    contract: Arc<dyn ErasedContract>,
+    state: &S,
+) -> bitcoin::ScriptBuf {
     contract
         .script_pubkey(Some(ContractState::encode(state).as_slice()))
         .unwrap()
@@ -145,17 +143,33 @@ fn test_game256_state_transitions() {
     let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // 1. G256S0.choose(x) -> G256S1 committed to x.
-    let s0 = try_handle::<G256S0Handle>(fund_fake(G256S0::new(p.clone()).as_erased(), None, 100_000, 1));
-    let tx = s0.choose(5).sign(HotSigner::new(bob_xpriv())).build_tx(&manager).unwrap();
+    let s0 = try_handle::<G256S0Handle>(fund_fake(
+        G256S0::new(p.clone()).unwrap().as_erased(),
+        None,
+        100_000,
+        1,
+    ));
+    let tx = s0
+        .choose(5)
+        .sign(HotSigner::new(bob_xpriv()))
+        .build_tx(&manager)
+        .unwrap();
     assert_eq!(
         tx.output[0].script_pubkey,
-        addr(G256S1::new(p.clone()).as_erased(), &G256S1State { x: 5 })
+        addr(
+            G256S1::new(p.clone()).unwrap().as_erased(),
+            &G256S1State { x: 5 },
+        )
     );
 
     // 2. G256S2.start_challenge -> Bisect_1(0,7) with sha256-committed endpoints.
     let s2 = try_handle::<G256S2Handle>(fund_fake(
-        G256S2::new(p.clone()).as_erased(),
-        Some(Box::new(G256S2State { t_a: [7; 32], y: 10, x: 5 })),
+        G256S2::new(p.clone()).unwrap().as_erased(),
+        Some(Box::new(G256S2State {
+            t_a: [7; 32],
+            y: 10,
+            x: 5,
+        })),
         100_000,
         2,
     ));
@@ -164,9 +178,7 @@ fn test_game256_state_transitions() {
         .sign(HotSigner::new(bob_xpriv()))
         .build_tx(&manager)
         .unwrap();
-    let commit = |v: i64| {
-        mattrs::script_utils::commit_int(v)
-    };
+    let commit = |v: i64| mattrs::script_utils::commit_int(v);
     assert_eq!(
         tx.output[0].script_pubkey,
         addr(
@@ -210,11 +222,11 @@ fn test_game256_state_transitions() {
         addr(
             bisect1(bp(0, 3)).as_erased(),
             &Bisect1State {
-                h_start: [1; 32],   // h_start
-                h_end_a: [6; 32],   // h_mid_a
-                h_end_b: [9; 32],   // h_mid_b
-                trace_a: [7; 32],   // trace_left_a
-                trace_b: [10; 32],  // trace_left_b
+                h_start: [1; 32],  // h_start
+                h_end_a: [6; 32],  // h_mid_a
+                h_end_b: [9; 32],  // h_mid_b
+                trace_a: [7; 32],  // trace_left_a
+                trace_b: [10; 32], // trace_left_b
             }
         )
     );
@@ -245,13 +257,17 @@ fn test_game256_state_transitions() {
         tx.output[0].script_pubkey,
         addr(
             leaf(alice_pk, bob_pk).as_erased(),
-            &LeafState { h_start: [1; 32], h_end_alice: [6; 32], h_end_bob: [9; 32] }
+            &LeafState {
+                h_start: [1; 32],
+                h_end_alice: [6; 32],
+                h_end_bob: [9; 32]
+            }
         )
     );
 
     // 5. G256S1.reveal -> G256S2 (state passthrough of t_a/y/x).
     let s1 = try_handle::<G256S1Handle>(fund_fake(
-        G256S1::new(p.clone()).as_erased(),
+        G256S1::new(p.clone()).unwrap().as_erased(),
         Some(Box::new(G256S1State { x: 5 })),
         100_000,
         5,
@@ -264,8 +280,12 @@ fn test_game256_state_transitions() {
     assert_eq!(
         tx.output[0].script_pubkey,
         addr(
-            G256S2::new(p.clone()).as_erased(),
-            &G256S2State { t_a: [7; 32], y: 10, x: 5 }
+            G256S2::new(p.clone()).unwrap().as_erased(),
+            &G256S2State {
+                t_a: [7; 32],
+                y: 10,
+                x: 5
+            }
         )
     );
 

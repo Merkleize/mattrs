@@ -28,11 +28,11 @@ use support::testkit::{
     offline_manager, try_handle, walk_tip,
 };
 use support::tictactoe::roles::{
-    alice_role, bob_role, PlayerData, Strategy, TttOutcome, TttResult,
+    PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role,
 };
 use support::tictactoe::{
-    board_full, line_winner, TicTacToe, TicTacToeHandle, TttParams, TttState, DEFAULT_STAKE,
-    EMPTY, MARK_ALICE, MARK_BOB, TURN_ALICE, TURN_BOB,
+    DEFAULT_STAKE, EMPTY, MARK_ALICE, MARK_BOB, TURN_ALICE, TURN_BOB, TicTacToe, TicTacToeHandle,
+    TttParams, TttState, board_full, line_winner,
 };
 
 const POT: u64 = (2 * DEFAULT_STAKE) as u64;
@@ -51,7 +51,7 @@ fn params() -> TttParams {
 /// A fake-funded game holding the pot, carrying `state` as expanded state.
 fn funded_game(state: TttState) -> TicTacToeHandle {
     try_handle(fund_fake(
-        TicTacToe::new(params()).as_erased(),
+        TicTacToe::new(params()).unwrap().as_erased(),
         Some(Box::new(state)),
         POT,
         SEED,
@@ -110,7 +110,10 @@ fn game_rules_match_the_boards() {
     let s = s.after_move(4, MARK_ALICE);
     assert_eq!(s.turn, TURN_BOB);
     assert_eq!(s.board, board(".. . .X. ..."));
-    assert_eq!(s.prefix_suffix(4), (s.board[..4].to_vec(), s.board[5..].to_vec()));
+    assert_eq!(
+        s.prefix_suffix(4),
+        (s.board[..4].to_vec(), s.board[5..].to_vec())
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -133,6 +136,7 @@ fn moves_commit_the_updated_board() {
     // Output 0 is the same contract committing the updated board, whole pot.
     let next = TttState::initial().after_move(4, MARK_ALICE);
     let expected = TicTacToe::new(params())
+        .unwrap()
         .as_erased()
         .script_pubkey(Some(&next.encode()))
         .unwrap();
@@ -151,7 +155,11 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("XXX OO. ..."),
     });
-    let tx = won.claim_win(MARK_ALICE).unwrap().build_tx(&manager).unwrap();
+    let tx = won
+        .claim_win(MARK_ALICE)
+        .unwrap()
+        .build_tx(&manager)
+        .unwrap();
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[0].value, pot);
@@ -174,11 +182,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("X.. ... ..."),
     });
-    let tx = idle
-        .timeout_bob_idle()
-        .unwrap()
-        .build_tx(&manager)
-        .unwrap();
+    let tx = idle.timeout_bob_idle().unwrap().build_tx(&manager).unwrap();
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[0].value, pot);
@@ -243,13 +247,13 @@ fn setup(
     TicTacToeHandle,
 ) {
     let alice_entry = fund_fake(
-        TicTacToe::new(params()).as_erased(),
+        TicTacToe::new(params()).unwrap().as_erased(),
         Some(Box::new(TttState::initial())),
         POT,
         SEED,
     );
     let bob_entry = fund_fake(
-        TicTacToe::new(params()).as_erased(),
+        TicTacToe::new(params()).unwrap().as_erased(),
         Some(Box::new(TttState::initial())),
         POT,
         SEED,
@@ -305,7 +309,8 @@ fn played_win_resolves_for_both_parties() {
 fn full_board_resolves_as_a_tie() {
     let chain = Rc::new(LocalChain::new());
     // A drawn game: X X O / X O O / O X X, played to a full board.
-    let (mut alice, mut bob, _alice_entry, bob_entry) = setup(&chain, &[0, 2, 3, 7, 8], &[1, 4, 5, 6]);
+    let (mut alice, mut bob, _alice_entry, bob_entry) =
+        setup(&chain, &[0, 2, 3, 7, 8], &[1, 4, 5, 6]);
 
     let (a_out, b_out) = drive_both(&mut alice, &mut bob, 40, Duration::ZERO).expect("both step");
     let final_board = board("XOX XOO OXX");
@@ -372,18 +377,19 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     let mut report = Report::new();
 
-    let game = TicTacToe::new(params()).fund(
-        &mut manager,
-        Amount::from_sat(POT),
-        TttState::initial(),
-    )?;
+    let game =
+        TicTacToe::new(params())?.fund(&mut manager, Amount::from_sat(POT), TttState::initial())?;
     let entry = game.handle().clone();
 
     // Alice takes the top row while Bob starts the middle one: the moves
     // alternate A0 B3 A1 B4, each spend re-committing the board.
     let mut h = game;
     for (cell, alice_moves) in [(0, true), (3, false), (1, true), (4, false)] {
-        let xpriv = if alice_moves { alice_xpriv() } else { bob_xpriv() };
+        let xpriv = if alice_moves {
+            alice_xpriv()
+        } else {
+            bob_xpriv()
+        };
         h = h
             .make_move(cell)?
             .sign(HotSigner::new(xpriv))
@@ -432,11 +438,8 @@ fn test_tictactoe_forfait_on_regtest() -> Result<(), Box<dyn std::error::Error>>
     let client = regtest_client("testwallet");
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
-    let game = TicTacToe::new(params()).fund(
-        &mut manager,
-        Amount::from_sat(POT),
-        TttState::initial(),
-    )?;
+    let game =
+        TicTacToe::new(params())?.fund(&mut manager, Amount::from_sat(POT), TttState::initial())?;
 
     // Alice opens; Bob never answers.
     let h: TicTacToeHandle = game
