@@ -17,7 +17,7 @@ use bitcoin_script::{define_pushable, script};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use mattrs::testutil::{fund_fake, offline_client};
-use mattrs::{contract, ContractParams as DeriveContractParams, Signature};
+use mattrs::{contract, ContractParams, Signature};
 
 define_pushable!();
 
@@ -25,7 +25,7 @@ define_pushable!();
 // Contract definition
 // ============================================================================
 
-#[derive(Debug, Clone, DeriveContractParams)]
+#[derive(Debug, Clone, ContractParams)]
 pub struct TimeLockParams {
     pub owner_pk: XOnlyPublicKey,
     pub recover_pk: XOnlyPublicKey,
