@@ -69,13 +69,10 @@ fn move_str(m: i64) -> &'static str {
     }
 }
 
-fn urandom<const N: usize>() -> [u8; N] {
+fn urandom<const N: usize>() -> std::io::Result<[u8; N]> {
     let mut buf = [0u8; N];
-    std::fs::File::open("/dev/urandom")
-        .expect("open /dev/urandom")
-        .read_exact(&mut buf)
-        .expect("read /dev/urandom");
-    buf
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 /// RPC client for the local regtest node (see `mattrs::manager::regtest_rpc_client`).
@@ -129,7 +126,7 @@ fn run_alice(
     let xpriv = Xpriv::from_str(ALICE_XPRIV)?;
     let pk_a = xonly(&xpriv);
 
-    let r_a: [u8; 32] = urandom();
+    let r_a: [u8; 32] = urandom()?;
     let c_a = alice_move_commitment(m_a, &r_a);
     println!("Alice plays {} (hidden behind commitment {})", move_str(m_a), hex::encode(c_a));
 
