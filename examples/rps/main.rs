@@ -159,7 +159,7 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppR
     // Fund the game with both stakes and tell Bob where it lives.
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
-    maybe_enable_inspector(&mut manager, inspector);
+    maybe_enable_inspector(&mut manager, inspector)?;
     let s0 =
         RpsGameS0::new(params)?.fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
     let entry = s0.handle().clone();
@@ -232,7 +232,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
     };
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
-    maybe_enable_inspector(&mut manager, inspector);
+    maybe_enable_inspector(&mut manager, inspector)?;
     let entry = manager.track_instance(RpsGameS0::new(params)?.as_erased(), None, outpoint)?;
     println!("Tracking the game at {outpoint}");
 
@@ -285,19 +285,21 @@ fn wait_for_enter(msg: &str) -> io::Result<()> {
 /// Start the manager's inspector server when `--inspector` was given (and the
 /// binary was built with the `inspector` feature).
 #[cfg(feature = "inspector")]
-fn maybe_enable_inspector(manager: &mut ContractManager, port: Option<u16>) {
+fn maybe_enable_inspector(manager: &mut ContractManager, port: Option<u16>) -> AppResult {
     if let Some(port) = port {
-        manager.enable_inspector(port);
+        manager.enable_inspector(port)?;
         println!("Inspector server on 127.0.0.1:{port} (run `cargo run -p mattrs-inspector`)");
     }
+    Ok(())
 }
 
 #[cfg(not(feature = "inspector"))]
-fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) {
+fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) -> AppResult {
     if port.is_some() {
         eprintln!("warning: built without the `inspector` feature; --inspector is ignored");
         eprintln!("         (rebuild with `--features inspector`)");
     }
+    Ok(())
 }
 
 fn main() -> AppResult {

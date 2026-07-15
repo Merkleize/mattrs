@@ -115,9 +115,8 @@ let unvaulting: UnvaultingHandle = vault
 
 // withdraw: terminal CTV spend with explicit outputs
 unvaulting
-    .withdraw(ctv_hash)
+    .withdraw()?
     .outputs(withdraw_outputs)
-    .sequence(10)
     .exec_none(&mut manager)?;
 ```
 
@@ -143,10 +142,15 @@ let compute2x = Computer {
     func:    script! { OP_DUP OP_ADD }, // one step: y = 2x
     specs:   vec![ArgSpec { name: "x".into(), arg_type: Arc::new(IntType) }],
 };
-let leaf_factory: LeafFactory =
-    Arc::new(move |_i| Leaf::new(LeafParams { alice_pk, bob_pk }, &compute2x));
-let challenge = Bisect1::new(BisectParams { alice_pk, bob_pk, i: 0, j: 7 },
-                             &leaf_factory, /*forfait_timeout=*/10);
+let leaf_factory: LeafFactory = Arc::new(move |_i| {
+    Leaf::new(
+        LeafParams { alice_pk, bob_pk },
+        compute2x.clone(),
+    ).expect("the leaf definition is valid")
+});
+let params = BisectParams::new(alice_pk, bob_pk, 0, 7)?;
+let context = BisectCtx::new(leaf_factory, /* forfait_timeout = */ 10)?;
+let challenge = Bisect1::new(params, context)?;
 ```
 
 `tests/support/game256.rs` instantiates it for the game256 example in ~30 lines.
@@ -154,12 +158,13 @@ let challenge = Bisect1::new(BisectParams { alice_pk, bob_pk, i: 0, j: 7 },
 ## Ported examples
 
 The examples from the Python reference framework (`pymatt`) are ported under
-`tests/support/`, each with tests asserting **byte-for-byte** taproot compatibility
-(the taptree root / address matches pymatt's) and, where applicable, the spend:
+`tests/support/`, with pinned taptrees and spend-path tests. Tests assert
+**byte-for-byte** compatibility where the Rust contract retains pymatt's exact
+script layout:
 
 | Example | Demonstrates | Status |
 | --- | --- | --- |
-| **vault** (`examples/vault/contracts.rs`) | two-stage vault; CCV + CTV; augmented state; multi-input trigger-with-revault | address matches; regtest e2e; interactive REPL |
+| **vault** (`examples/vault/contracts.rs`) | two-stage vault; CCV + CTV; augmented state; multi-input trigger-with-revault | address pinned; regtest e2e; interactive REPL |
 | **rps** (`examples/rps/contracts.rs`) | hashed state; clause-owned **CTV templates** for payouts; `check_in/out_contract` | roots match; regtest e2e; two-player demo |
 | **ram** (`ram.rs`) | a Merkle-committed cell vector; the `WitProof<N>` witness arg; **expanded state** | root matches; `write` spends |
 | **game256** (`game256.rs`) | the **bisection fraud proof** (`mattrs::fraud`) driven by the `G256S0/1/2` game stages | all taptrees match; full challenge regtest e2e |

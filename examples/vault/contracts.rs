@@ -14,7 +14,7 @@
 //!   - recover(out_i)                         => recover_pk          (terminal)
 //!
 //! Unvaulting{alternate_pk?, spend_delay, recover_pk}[ctv_hash]
-//!   - withdraw(ctv_hash), after spend_delay  => the CTV template    (terminal)
+//!   - withdraw(), after spend_delay          => the CTV template    (terminal)
 //!   - recover(out_i)                         => recover_pk          (terminal)
 //! ```
 
@@ -165,10 +165,6 @@ impl Vault {
         ])
     }
 
-    pub fn recover_outputs(&self) -> Result<Vec<ClauseOutput>, ClauseError> {
-        Ok(ClauseOutput::terminal())
-    }
-
     fn trigger_script(params: &VaultParams) -> ScriptBuf {
         let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
             .expect("Unvaulting contract definition is valid")
@@ -230,8 +226,10 @@ contract! {
         // witness: <ctv_hash> — terminal (CTV withdraw)
         clause withdraw {
             args {
+                #[from_state]
                 ctv_hash: [u8; 32],
             }
+            timelock |p| p.spend_delay;
             script Unvaulting::withdraw_script;
         }
 
@@ -256,9 +254,6 @@ impl Unvaulting {
             -1
             { CCV_FLAG_CHECK_INPUT }
             CHECKCONTRACTVERIFY
-            { params.spend_delay }
-            CSV
-            DROP
             CHECKTEMPLATEVERIFY
         }
     }

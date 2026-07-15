@@ -42,6 +42,7 @@ contract! {
                 #[signer(p.owner_pk)]
                 sig: Signature,
             }
+            timelock |p| p.delay;
             script TimeLock::withdraw_script;
         }
 
@@ -60,9 +61,6 @@ contract! {
 impl TimeLock {
     fn withdraw_script(params: &TimeLockParams) -> ScriptBuf {
         script! {
-            { params.delay }
-            CSV
-            DROP
             { params.owner_pk }
             CHECKSIG
         }
@@ -127,7 +125,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx = handle
         .withdraw()
         .sign(owner_signer)
-        .sequence(params.delay) // satisfy the CSV timelock
         .outputs(vec![TxOut {
             script_pubkey: dest.script_pubkey(),
             value: Amount::from_sat(99_000),

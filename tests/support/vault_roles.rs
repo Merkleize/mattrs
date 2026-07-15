@@ -111,7 +111,7 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             // also sets the withdrawal's sequence to the same delay).
             Ok(Action::wait_or_send_final(
                 p.spend_delay,
-                h.withdraw(state.ctv_hash).outputs(outputs),
+                h.withdraw()?.outputs(outputs),
                 VaultOutcome::Withdrawn { amount },
             ))
         })

@@ -245,9 +245,8 @@ impl Repl {
 
         let unvaulting: UnvaultingHandle = handle.try_into().expect("kind checked");
         unvaulting
-            .withdraw(ctv_hash)
+            .withdraw()?
             .outputs(outputs)
-            .sequence(SPEND_DELAY)
             .exec_none(&mut self.manager)?;
         println!("Withdrawn via the CTV template {}", hex::encode(ctv_hash));
         Ok(())
@@ -329,19 +328,21 @@ impl Repl {
 /// Start the manager's inspector server when `--inspector` was given (and the
 /// binary was built with the `inspector` feature).
 #[cfg(feature = "inspector")]
-fn maybe_enable_inspector(manager: &mut ContractManager, port: Option<u16>) {
+fn maybe_enable_inspector(manager: &mut ContractManager, port: Option<u16>) -> AppResult {
     if let Some(port) = port {
-        manager.enable_inspector(port);
+        manager.enable_inspector(port)?;
         println!("Inspector server on 127.0.0.1:{port} (run `cargo run -p mattrs-inspector`)");
     }
+    Ok(())
 }
 
 #[cfg(not(feature = "inspector"))]
-fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) {
+fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) -> AppResult {
     if port.is_some() {
         eprintln!("warning: built without the `inspector` feature; --inspector is ignored");
         eprintln!("         (rebuild with `--features inspector`)");
     }
+    Ok(())
 }
 
 fn main() -> AppResult {
@@ -383,7 +384,7 @@ fn main() -> AppResult {
 
     let client = regtest_rpc_client(&wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
-    maybe_enable_inspector(&mut manager, inspector);
+    maybe_enable_inspector(&mut manager, inspector)?;
     let mut repl = Repl {
         manager,
         params,

@@ -7,7 +7,7 @@
 //! or spent. The `mattrs-inspector` workspace crate is a ratatui client for it;
 //! `nc localhost 34443` works too.
 
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -18,14 +18,14 @@ use serde::{Deserialize, Serialize};
 use crate::contracts::ContractInstance;
 
 /// One push of the manager's whole state: every instance it tracks.
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManagerSnapshot {
     pub timestamp_ms: u64,
     pub instances: Vec<InstanceSnapshot>,
 }
 
 /// One contract instance, flattened to displayable fields.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct InstanceSnapshot {
     /// Position in the manager's instance list.
     pub index: usize,
@@ -86,22 +86,39 @@ pub fn snapshot_instance(
 
 /// Milliseconds since the Unix epoch, for [`ManagerSnapshot::timestamp_ms`].
 pub fn now_ms() -> u64 {
-    SystemTime::now()
+    let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
+        .unwrap_or_default()
+        .as_millis();
+    u64::try_from(millis).unwrap_or(u64::MAX)
 }
 
 /// Serve `state` on `127.0.0.1:port`: each client gets the current snapshot on
 /// connect, then a fresh one (a single JSON line) whenever `notify` fires.
+///
+/// # Errors
+///
+/// Returns an error if the loopback listener cannot bind to `port`.
 pub fn start_inspector_server(
     state: Arc<Mutex<ManagerSnapshot>>,
     notify: Arc<Condvar>,
     port: u16,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-            .expect("Failed to bind inspector server");
+) -> io::Result<JoinHandle<()>> {
+    let listener = TcpListener::bind(("127.0.0.1", port))?;
+
+    Ok(thread::spawn(move || {
+        fn lock_snapshot(
+            state: &Mutex<ManagerSnapshot>,
+        ) -> std::sync::MutexGuard<'_, ManagerSnapshot> {
+            state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        fn write_snapshot(stream: &mut impl Write, snapshot: &ManagerSnapshot) -> io::Result<()> {
+            serde_json::to_writer(&mut *stream, snapshot).map_err(io::Error::other)?;
+            stream.write_all(b"\n")
+        }
 
         for stream in listener.incoming() {
             let stream = match stream {
@@ -114,32 +131,22 @@ pub fn start_inspector_server(
 
             thread::spawn(move || {
                 let mut stream = stream;
-
-                // Send initial snapshot
-                {
-                    let snap = state.lock().unwrap();
-                    let mut data = serde_json::to_string(&*snap).unwrap();
-                    data.push('\n');
-                    if stream.write_all(data.as_bytes()).is_err() {
-                        return;
-                    }
+                let mut last_sent = lock_snapshot(&state).clone();
+                if write_snapshot(&mut stream, &last_sent).is_err() {
+                    return;
                 }
 
                 loop {
-                    // Wait for notification
-                    {
-                        let lock = state.lock().unwrap();
-                        let _lock = notify.wait(lock).unwrap();
-                    }
-
-                    let snap = state.lock().unwrap();
-                    let mut data = serde_json::to_string(&*snap).unwrap();
-                    data.push('\n');
-                    if stream.write_all(data.as_bytes()).is_err() {
+                    let current = notify
+                        .wait_while(lock_snapshot(&state), |snapshot| snapshot == &last_sent)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    if write_snapshot(&mut stream, &current).is_err() {
                         return; // client disconnected
                     }
+                    last_sent = current;
                 }
             });
         }
-    })
+    }))
 }

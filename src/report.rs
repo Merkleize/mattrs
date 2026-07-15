@@ -51,10 +51,9 @@ pub fn format_tx_markdown(tx: &Transaction, title: &str) -> String {
     s.push_str("  witnesses:\n");
     for (i, inp) in tx.input.iter().enumerate() {
         let items = inp.witness.to_vec();
-        let wit_bytes: usize = items
-            .iter()
-            .map(|item| if item.is_empty() { 1 } else { item.len() })
-            .sum();
+        // Consensus serialization includes the stack-item count and each
+        // item's CompactSize length, including the empty-item prefix.
+        let wit_bytes = serialize(&inp.witness).len();
         let wit_vb = wit_bytes as f64 / 4.0;
         writeln!(&mut s, "    - [{i}] ({wit_bytes} bytes, {wit_vb} vB)")
             .expect("writing to a String cannot fail");
@@ -156,6 +155,24 @@ mod tests {
                 "```\n\n</details>\n\n",
             ),
         );
+    }
+
+    #[test]
+    fn transaction_markdown_counts_serialized_witness_bytes() {
+        let input = bitcoin::TxIn {
+            witness: bitcoin::Witness::from_slice(&[Vec::new(), vec![0u8; 253]]),
+            ..Default::default()
+        };
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![input],
+            output: vec![],
+        };
+
+        // count prefix (1), empty item (1), 253-byte item's CompactSize prefix
+        // (3), and its payload (253).
+        assert!(format_tx_markdown(&tx, "witness").contains("[0] (258 bytes, 64.5 vB)"));
     }
 
     #[test]

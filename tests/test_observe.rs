@@ -54,9 +54,8 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
         })
         .collect();
     unvaulting_a
-        .withdraw(ctv_hash)
+        .withdraw()?
         .outputs(withdraw_outputs)
-        .sequence(10)
         .exec_none(&mut actor)?;
 
     // ---- The observer follows it, after the fact. ----

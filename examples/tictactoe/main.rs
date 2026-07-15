@@ -212,7 +212,7 @@ fn run_alice(
     // Fund the game with both stakes and tell Bob where it lives.
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
-    maybe_enable_inspector(&mut manager, inspector);
+    maybe_enable_inspector(&mut manager, inspector)?;
     let game = TicTacToe::new(params)?.fund(
         &mut manager,
         Amount::from_sat((2 * stake) as u64),
@@ -279,7 +279,7 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     };
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
-    maybe_enable_inspector(&mut manager, inspector);
+    maybe_enable_inspector(&mut manager, inspector)?;
     let entry = manager.track_instance(
         TicTacToe::new(params)?.as_erased(),
         Some(Box::new(TttState::initial()) as Box<dyn ErasedState>),
@@ -305,19 +305,21 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
 /// Start the manager's inspector server when `--inspector` was given (and the
 /// binary was built with the `inspector` feature).
 #[cfg(feature = "inspector")]
-fn maybe_enable_inspector(manager: &mut ContractManager, port: Option<u16>) {
+fn maybe_enable_inspector(manager: &mut ContractManager, port: Option<u16>) -> AppResult {
     if let Some(port) = port {
-        manager.enable_inspector(port);
+        manager.enable_inspector(port)?;
         println!("Inspector server on 127.0.0.1:{port} (run `cargo run -p mattrs-inspector`)");
     }
+    Ok(())
 }
 
 #[cfg(not(feature = "inspector"))]
-fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) {
+fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) -> AppResult {
     if port.is_some() {
         eprintln!("warning: built without the `inspector` feature; --inspector is ignored");
         eprintln!("         (rebuild with `--features inspector`)");
     }
+    Ok(())
 }
 
 fn main() -> AppResult {

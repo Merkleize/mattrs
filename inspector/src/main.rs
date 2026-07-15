@@ -7,7 +7,7 @@
 
 use std::io::{self, BufRead, BufReader};
 use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use clap::Parser;
@@ -40,6 +40,32 @@ struct AppState {
     connected: bool,
 }
 
+fn lock_app(state: &Mutex<AppState>) -> MutexGuard<'_, AppState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct TerminalCleanup;
+
+impl TerminalCleanup {
+    fn enter() -> io::Result<Self> {
+        enable_raw_mode()?;
+        if let Err(error) = io::stdout().execute(EnterAlternateScreen) {
+            let _ = disable_raw_mode();
+            return Err(error);
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for TerminalCleanup {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = io::stdout().execute(LeaveAlternateScreen);
+    }
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
@@ -55,7 +81,7 @@ fn main() -> io::Result<()> {
     std::thread::spawn(move || loop {
         if let Ok(stream) = TcpStream::connect(format!("{host}:{port}")) {
             {
-                let mut state = net_state.lock().unwrap();
+                let mut state = lock_app(&net_state);
                 state.connected = true;
             }
             let reader = BufReader::new(stream);
@@ -63,7 +89,7 @@ fn main() -> io::Result<()> {
                 match line {
                     Ok(line) => {
                         if let Ok(snapshot) = serde_json::from_str::<ManagerSnapshot>(&line) {
-                            let mut state = net_state.lock().unwrap();
+                            let mut state = lock_app(&net_state);
                             state.snapshot = Some(snapshot);
                         }
                     }
@@ -71,7 +97,7 @@ fn main() -> io::Result<()> {
                 }
             }
             {
-                let mut state = net_state.lock().unwrap();
+                let mut state = lock_app(&net_state);
                 state.connected = false;
             }
         }
@@ -79,14 +105,19 @@ fn main() -> io::Result<()> {
     });
 
     // Terminal setup
-    enable_raw_mode()?;
-    io::stdout().execute(EnterAlternateScreen)?;
+    let _cleanup = TerminalCleanup::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
     let mut table_state = TableState::default();
 
     loop {
-        let app = state.lock().unwrap().clone();
+        let app = lock_app(&state).clone();
+        clamp_selection(
+            &mut table_state,
+            app.snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.instances.len()),
+        );
 
         terminal.draw(|f| {
             ui(f, &app, &mut table_state);
@@ -121,9 +152,15 @@ fn main() -> io::Result<()> {
         }
     }
 
-    disable_raw_mode()?;
-    io::stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+fn clamp_selection(state: &mut TableState, count: usize) {
+    if count == 0 {
+        state.select(None);
+    } else if let Some(selected) = state.selected() {
+        state.select(Some(selected.min(count - 1)));
+    }
 }
 
 fn status_color(status: &str) -> Color {
@@ -136,10 +173,12 @@ fn status_color(status: &str) -> Color {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
+    } else if max <= 3 {
+        ".".repeat(max)
     } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
+        format!("{}...", s.chars().take(max - 3).collect::<String>())
     }
 }
 
@@ -290,4 +329,26 @@ fn format_detail(inst: &InstanceSnapshot) -> String {
     }
 
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_respects_character_boundaries_and_width() {
+        assert_eq!(truncate("abcdef", 6), "abcdef");
+        assert_eq!(truncate("abcdef", 5), "ab...");
+        assert_eq!(truncate("éclair", 5), "éc...");
+        assert_eq!(truncate("abcdef", 2), "..");
+    }
+
+    #[test]
+    fn selection_is_cleared_or_clamped_to_the_snapshot() {
+        let mut state = TableState::default().with_selected(4);
+        clamp_selection(&mut state, 2);
+        assert_eq!(state.selected(), Some(1));
+        clamp_selection(&mut state, 0);
+        assert_eq!(state.selected(), None);
+    }
 }
