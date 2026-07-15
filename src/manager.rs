@@ -1392,7 +1392,7 @@ impl InstanceHandle {
 
     /// The instance's typed params `P`: read back by downcast when the contract
     /// carries them (every contract built from a typed `P` does — see
-    /// [`ErasedContract::params_any`](crate::contracts::ErasedContract::params_any)),
+    /// [`ErasedContract::params_any`]),
     /// else decoded from the encoded bytes. `None` only if `P` is the wrong
     /// type *and* the bytes don't decode as a `P`.
     pub fn params<P: crate::contracts::ContractParams + 'static>(&self) -> Option<P> {

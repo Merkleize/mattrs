@@ -5,9 +5,9 @@
 //! batch variant) perform no RPC, so a spend can be built and inspected against a
 //! *fake-funded* instance: [`fund_fake`] materializes an instance at a made-up
 //! outpoint paying the contract's own address, and [`offline_client`] supplies a
-//! [`ContractManager`](crate::manager::ContractManager) client that is never
+//! [`ContractManager`] client that is never
 //! actually contacted. Drive real funding/spending against a live node with
-//! [`ContractManager`](crate::manager::ContractManager) instead.
+//! [`ContractManager`] instead.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -22,7 +22,7 @@ use crate::manager::{Children, ContractManager, InstanceHandle, ManagerError, Sp
 
 /// An RPC client that is never actually contacted: building (as opposed to
 /// broadcasting) a spend performs no RPC, so this lets a
-/// [`ContractManager`](crate::manager::ContractManager) run fully offline.
+/// [`ContractManager`] run fully offline.
 pub fn offline_client() -> Client {
     Client::new("http://127.0.0.1:1", Auth::None).expect("offline client is infallible")
 }
