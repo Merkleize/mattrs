@@ -252,6 +252,9 @@ pub mod roles {
         pub m_b: i64,
     }
 
+    /// A fallible demo hook run before Alice broadcasts the adjudication.
+    pub type AdjudicationHook = dyn Fn(i64, RpsResult) -> Result<(), ProtocolError>;
+
     /// The game rule, off-chain — the single mirror of the scripts'
     /// `diff = (m_b - m_a) mod 3`: 0 = tie, 1 = Bob wins, 2 = Alice wins.
     pub fn outcome_of(m_a: i64, m_b: i64) -> RpsResult {
@@ -277,7 +280,7 @@ pub mod roles {
         pub r_a: [u8; 32],
         /// Demo pacing hook, called with Bob's revealed move and the outcome
         /// just before the adjudication is broadcast.
-        pub before_adjudicating: Option<Box<dyn Fn(i64, RpsResult)>>,
+        pub before_adjudicating: Option<Box<AdjudicationHook>>,
     }
 
     /// Alice funds the game, so her role starts watching: Bob moves first.
@@ -298,7 +301,7 @@ pub mod roles {
 
                 let result = outcome_of(d.m_a, m_b);
                 if let Some(pace) = &d.before_adjudicating {
-                    pace(m_b, result);
+                    pace(m_b, result)?;
                 }
                 let builder = match result {
                     RpsResult::Tie => h.tie(m_b, d.m_a, d.r_a),

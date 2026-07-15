@@ -39,7 +39,7 @@
 #[allow(dead_code)]
 mod contracts;
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::rc::Rc;
 use std::str::FromStr;
@@ -49,7 +49,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{RpcChain, Runner};
+use mattrs::protocol::{ProtocolError, RpcChain, Runner};
 
 use contracts::roles::{alice_role, bob_role, clause_of, AliceData, BobData};
 use contracts::{alice_move_commitment, RpsGameS0, RpsParams, DEFAULT_STAKE};
@@ -69,7 +69,7 @@ fn move_str(m: i64) -> &'static str {
     }
 }
 
-fn urandom<const N: usize>() -> std::io::Result<[u8; N]> {
+fn urandom<const N: usize>() -> io::Result<[u8; N]> {
     let mut buf = [0u8; N];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
     Ok(buf)
@@ -173,7 +173,8 @@ fn run_alice(
         before_adjudicating: Some(Box::new(|m_b, result| {
             println!("Bob played {}", move_str(m_b));
             println!("Outcome: {}", clause_of(result).name());
-            wait_for_enter("Press ENTER to broadcast the adjudication transaction...");
+            wait_for_enter("Press ENTER to broadcast the adjudication transaction...")
+                .map_err(|e| ProtocolError::Other(format!("failed to read confirmation: {e}")))
         })),
     };
     let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
@@ -257,28 +258,29 @@ fn run_bob(
 // CLI
 // ----------------------------------------------------------------------------
 
-fn prompt_move() -> i64 {
-    let stdin = std::io::stdin();
+fn prompt_move() -> io::Result<i64> {
+    let stdin = io::stdin();
     loop {
         print!("Choose your move [r]ock, [p]aper, [s]cissors: ");
-        std::io::stdout().flush().unwrap();
+        io::stdout().flush()?;
 
         let mut line = String::new();
-        stdin.lock().read_line(&mut line).unwrap();
+        stdin.lock().read_line(&mut line)?;
         match line.trim().to_lowercase().as_str() {
-            "r" | "rock" => return 0,
-            "p" | "paper" => return 1,
-            "s" | "scissors" => return 2,
+            "r" | "rock" => return Ok(0),
+            "p" | "paper" => return Ok(1),
+            "s" | "scissors" => return Ok(2),
             _ => println!("Invalid choice. Please enter r, p, or s."),
         }
     }
 }
 
-fn wait_for_enter(msg: &str) {
-    print!("{}", msg);
-    std::io::stdout().flush().unwrap();
+fn wait_for_enter(msg: &str) -> io::Result<()> {
+    print!("{msg}");
+    io::stdout().flush()?;
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).unwrap();
+    io::stdin().lock().read_line(&mut line)?;
+    Ok(())
 }
 
 /// Start the manager's inspector server when `--inspector` was given (and the
@@ -325,7 +327,10 @@ fn main() -> AppResult {
         }
     }
 
-    let mv = mv.unwrap_or_else(prompt_move);
+    let mv = match mv {
+        Some(mv) => mv,
+        None => prompt_move()?,
+    };
 
     match role {
         Some("alice") => run_alice(mv, &addr, &wallet, inspector),
