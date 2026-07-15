@@ -273,8 +273,12 @@ pub fn compute_claim_with_lie(
 /// A party's reveal arguments for bisection range `[i, j]`, derived from its
 /// claimed `hs`: the midpoint commitment and the two half traces.
 pub fn reveal_mids(hs: &[[u8; 32]], i: usize, j: usize) -> ([u8; 32], [u8; 32], [u8; 32]) {
-    let m = (j - i + 1) / 2;
-    (hs[i + m], trace(hs, i, i + m - 1), trace(hs, i + m, j))
+    let midpoint_offset = (j - i).div_ceil(2);
+    (
+        hs[i + midpoint_offset],
+        trace(hs, i, i + midpoint_offset - 1),
+        trace(hs, i + midpoint_offset, j),
+    )
 }
 
 // ============================================================================
