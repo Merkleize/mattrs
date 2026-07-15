@@ -418,7 +418,7 @@ impl<const N: usize> WitnessEncodable for WitProof<N> {
 /// account for the right number of witness elements.
 #[derive(Debug, Clone)]
 pub struct MerkleProofType {
-    pub depth: usize,
+    depth: usize,
 }
 
 impl MerkleProofType {
@@ -429,11 +429,42 @@ impl MerkleProofType {
 
 impl ArgType for MerkleProofType {
     fn consume(&self, witness: &[Vec<u8>]) -> Result<usize, WitnessError> {
-        let needed = 2 * self.depth + 1;
+        let needed = self
+            .depth
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .ok_or_else(|| WitnessError::InvalidValue("proof depth is too large".into()))?;
         if witness.len() < needed {
             return Err(WitnessError::InsufficientData);
         }
+        for level in 0..self.depth {
+            if witness[2 * level].len() != 32 {
+                return Err(WitnessError::InvalidValue(format!(
+                    "proof hash at level {level} must be 32 bytes"
+                )));
+            }
+            match vch2bn(&witness[2 * level + 1])? {
+                0 | 1 => {}
+                direction => {
+                    return Err(WitnessError::InvalidValue(format!(
+                        "proof direction at level {level} must be 0 or 1, got {direction}"
+                    )));
+                }
+            }
+        }
+        if witness[needed - 1].len() != 32 {
+            return Err(WitnessError::InvalidValue(
+                "proof leaf must be 32 bytes".into(),
+            ));
+        }
         Ok(needed)
+    }
+
+    fn witness_elements(&self) -> usize {
+        self.depth
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .expect("Merkle proof depth is too large")
     }
 
     fn clone_boxed(&self) -> Box<dyn ArgType> {

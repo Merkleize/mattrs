@@ -61,8 +61,24 @@ impl StackScript {
     /// Start from a clause's own `ArgSpec` list, so the witness layout and the
     /// tracked names have a single source of truth.
     pub fn from_specs(specs: &[ArgSpec]) -> Self {
+        let mut stack = Vec::new();
+        for spec in specs {
+            let count = spec.arg_type.witness_elements();
+            assert!(
+                count > 0,
+                "argument `{}` has an empty witness layout",
+                spec.name
+            );
+            for slot in 0..count {
+                if slot + 1 == count {
+                    stack.push(spec.name.clone());
+                } else {
+                    stack.push(format!("<{}:{}>", spec.name, slot));
+                }
+            }
+        }
         Self {
-            stack: specs.iter().map(|a| a.name.clone()).collect(),
+            stack,
             alt: Vec::new(),
             parts: Vec::new(),
         }
@@ -83,7 +99,10 @@ impl StackScript {
         self.parts.push(match depth {
             0 => script! { OP_DUP },
             1 => script! { OP_OVER },
-            d => script! { { d as i64 } OP_PICK },
+            d => script! {
+                { i64::try_from(d).expect("stack depth exceeds script-number range") }
+                OP_PICK
+            },
         });
         self.stack.push(name.to_string());
     }
@@ -95,7 +114,10 @@ impl StackScript {
             0 => {}
             1 => self.parts.push(script! { OP_SWAP }),
             2 => self.parts.push(script! { OP_ROT }),
-            d => self.parts.push(script! { { d as i64 } OP_ROLL }),
+            d => self.parts.push(script! {
+                { i64::try_from(d).expect("stack depth exceeds script-number range") }
+                OP_ROLL
+            }),
         }
         let pos = self.stack.len() - 1 - depth;
         let item = self.stack.remove(pos);
@@ -180,6 +202,7 @@ impl StackScript {
     /// Reduce the top `n` elements (already in leaf order, deepest = leaf 0)
     /// to their Merkle root, tracked as `name`.
     pub fn merkle_top(&mut self, n: usize, name: &str) {
+        assert!(n > 0, "cannot reduce an empty Merkle tree on the stack");
         self.parts.push(merkle_root(n));
         for _ in 0..n {
             self.stack.pop().expect("merkle_top past stack bottom");
@@ -246,5 +269,43 @@ impl StackScript {
         }
         self.parts.push(script! { OP_TRUE });
         concat(&self.parts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::argtypes::BytesType;
+    use crate::merkle::MerkleProofType;
+    use std::sync::Arc;
+
+    #[test]
+    fn from_specs_accounts_for_multi_element_arguments() {
+        let specs = vec![
+            ArgSpec {
+                name: "prefix".to_string(),
+                arg_type: Arc::new(BytesType),
+            },
+            ArgSpec {
+                name: "proof".to_string(),
+                arg_type: Arc::new(MerkleProofType::new(1)),
+            },
+            ArgSpec {
+                name: "suffix".to_string(),
+                arg_type: Arc::new(BytesType),
+            },
+        ];
+
+        assert_eq!(specs[1].arg_type.witness_elements(), 3);
+        let stack = StackScript::from_specs(&specs);
+        assert_eq!(stack.depth("prefix"), 4);
+        assert_eq!(stack.depth("proof"), 1);
+        assert_eq!(stack.depth("suffix"), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot reduce an empty Merkle tree")]
+    fn merkle_top_rejects_an_empty_tree() {
+        StackScript::with_witness(&[]).merkle_top(0, "root");
     }
 }

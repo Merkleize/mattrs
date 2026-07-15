@@ -286,13 +286,11 @@ pub trait SingleWitnessElement: WitnessEncodable {
 /// encoding the `#[derive(ContractParams)]` codec frames to carry a contract's
 /// params on its instance. It is *not* a consensus/witness format.
 ///
-/// Every [`WitnessEncodable`] type is `ParamEncodable` for free (via the blanket
-/// impl below), so params can hold hashes, keys, and script-number integers. In
-/// addition, the fixed-width **unsigned** integers (`u8`/`u16`/`u32`/`u64`) are
-/// `ParamEncodable` *only*: their little-endian bytes are not a valid Bitcoin
-/// script number, so they must never be a witness element. That exclusion is the
-/// point of the split — it is a compile error to use a `u32` as a clause argument
-/// or a state leaf; use `i64` for anything a script reads.
+/// Standard witness scalar types also implement `ParamEncodable`, so params can
+/// hold hashes, keys, and script-number integers. The implementations are
+/// explicit rather than blanket: a user type may derive both `ClauseArgs` and
+/// `ContractParams` without conflicting trait implementations. Fixed-width
+/// **unsigned** integers (`u8`/`u16`/`u32`/`u64`) remain `ParamEncodable` only.
 pub trait ParamEncodable {
     /// Encode into the framed-serialization elements the params codec wraps.
     fn encode_param(&self) -> Vec<Vec<u8>>;
@@ -303,17 +301,18 @@ pub trait ParamEncodable {
         Self: Sized;
 }
 
-/// Every witness element is trivially usable as a params field (same encoding).
-/// The fixed-width unsigned integers add their own `ParamEncodable` impls below,
-/// and are the only `ParamEncodable` types that are *not* `WitnessEncodable`.
-impl<T: WitnessEncodable> ParamEncodable for T {
-    fn encode_param(&self) -> Vec<Vec<u8>> {
-        self.encode_to_witness()
-    }
+macro_rules! impl_param_via_witness {
+    ($($t:ty),+ $(,)?) => {$ (
+        impl ParamEncodable for $t {
+            fn encode_param(&self) -> Vec<Vec<u8>> {
+                self.encode_to_witness()
+            }
 
-    fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        Self::decode_from_witness(elements)
-    }
+            fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+                Self::decode_from_witness(elements)
+            }
+        }
+    )+ };
 }
 
 // ============================================================================
@@ -347,6 +346,7 @@ macro_rules! impl_scriptnum_witness {
 }
 
 impl_scriptnum_witness!(i32, i64);
+impl_param_via_witness!(i32, i64);
 
 impl SingleWitnessElement for i32 {}
 impl SingleWitnessElement for i64 {}
@@ -373,6 +373,16 @@ impl<const N: usize> WitnessEncodable for [u8; N] {
     }
 }
 
+impl<const N: usize> ParamEncodable for [u8; N] {
+    fn encode_param(&self) -> Vec<Vec<u8>> {
+        self.encode_to_witness()
+    }
+
+    fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        Self::decode_from_witness(elements)
+    }
+}
+
 impl<const N: usize> SingleWitnessElement for [u8; N] {}
 
 impl WitnessEncodable for Vec<u8> {
@@ -389,6 +399,7 @@ impl WitnessEncodable for Vec<u8> {
 }
 
 impl SingleWitnessElement for Vec<u8> {}
+impl_param_via_witness!(Vec<u8>);
 
 /// Unsigned integers serialize as their fixed-width little-endian bytes, one
 /// element. They are [`ParamEncodable`] only — deliberately *not* witness elements,
@@ -443,6 +454,7 @@ impl WitnessEncodable for bool {
 }
 
 impl SingleWitnessElement for bool {}
+impl_param_via_witness!(bool);
 
 impl WitnessEncodable for XOnlyPublicKey {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -466,6 +478,7 @@ impl WitnessEncodable for XOnlyPublicKey {
 }
 
 impl SingleWitnessElement for XOnlyPublicKey {}
+impl_param_via_witness!(XOnlyPublicKey);
 
 impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
@@ -492,6 +505,33 @@ impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
             }
             other => Err(WitnessError::InvalidValue(format!(
                 "not a canonical option flag: {other:02x?}",
+            ))),
+        }
+    }
+}
+
+impl<T: ParamEncodable> ParamEncodable for Option<T> {
+    fn encode_param(&self) -> Vec<Vec<u8>> {
+        match self {
+            Some(value) => {
+                let mut result = vec![vec![1u8]];
+                result.extend(value.encode_param());
+                result
+            }
+            None => vec![Vec::new()],
+        }
+    }
+
+    fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        match elements.first().map(Vec::as_slice) {
+            None => Err(WitnessError::StackUnderflow),
+            Some([]) => Ok((None, 1)),
+            Some([1]) => {
+                let (value, consumed) = T::decode_param(&elements[1..])?;
+                Ok((Some(value), consumed + 1))
+            }
+            Some(other) => Err(WitnessError::InvalidValue(format!(
+                "not a canonical option flag: {other:02x?}"
             ))),
         }
     }
@@ -549,6 +589,7 @@ impl WitnessEncodable for Signature {
 }
 
 impl SingleWitnessElement for Signature {}
+impl_param_via_witness!(Signature);
 
 // ============================================================================
 // Marker Trait Implementations
@@ -785,6 +826,8 @@ impl WitnessEncodable for () {
         Ok(((), 0))
     }
 }
+
+impl_param_via_witness!(());
 
 // ============================================================================
 // Clause Output Types
@@ -2217,8 +2260,8 @@ mod encoding_role_tests {
     }
 
     #[test]
-    fn witness_types_are_param_encodable_via_the_blanket() {
-        // The blanket delegates to the script-facing encoding, unchanged:
+    fn standard_witness_types_keep_their_param_encoding() {
+        // The explicit implementations delegate to the script-facing encoding:
         // a signed int is a minimal script number (bn2vch), a hash stays raw.
         assert_eq!(
             ParamEncodable::encode_param(&1i64),

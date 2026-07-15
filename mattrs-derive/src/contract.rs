@@ -10,6 +10,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
+use syn::spanned::Spanned;
 use syn::{
     braced, bracketed, parenthesized, Attribute, Block, Expr, Field, Ident, Pat, Token, Type,
 };
@@ -109,18 +110,36 @@ impl Parse for ContractDef {
             let section: Ident = body.parse()?;
             match section.to_string().as_str() {
                 "params" => {
+                    if params_ty.is_some() {
+                        return Err(syn::Error::new(
+                            section.span(),
+                            "duplicate `params` section",
+                        ));
+                    }
                     params_ty = Some(body.parse()?);
                     body.parse::<Token![;]>()?;
                 }
                 "ctx" => {
+                    if ctx_ty.is_some() {
+                        return Err(syn::Error::new(section.span(), "duplicate `ctx` section"));
+                    }
                     ctx_ty = Some(body.parse()?);
                     body.parse::<Token![;]>()?;
                 }
                 "state" => {
+                    if state_ty.is_some() {
+                        return Err(syn::Error::new(section.span(), "duplicate `state` section"));
+                    }
                     state_ty = Some(body.parse()?);
                     body.parse::<Token![;]>()?;
                 }
                 "internal_key" => {
+                    if ikey.is_some() {
+                        return Err(syn::Error::new(
+                            section.span(),
+                            "duplicate `internal_key` section",
+                        ));
+                    }
                     let closure: syn::ExprClosure = body.parse()?;
                     let p = closure_ident(&closure)?;
                     ikey = Some((p, *closure.body));
@@ -130,6 +149,9 @@ impl Parse for ContractDef {
                     clauses.push(parse_clause(&body)?);
                 }
                 "tree" => {
+                    if tree.is_some() {
+                        return Err(syn::Error::new(section.span(), "duplicate `tree` section"));
+                    }
                     if body.peek(Token![|]) || body.peek(Token![move]) {
                         // Dynamic form: `tree |p| <expr>;`.
                         let closure: syn::ExprClosure = body.parse()?;
@@ -156,6 +178,21 @@ impl Parse for ContractDef {
         }
 
         let tree = tree.ok_or_else(|| syn::Error::new(name_span, "missing `tree [ .. ];`"))?;
+        let mut clause_names = std::collections::HashSet::new();
+        for clause in &clauses {
+            if !clause_names.insert(clause.name.to_string()) {
+                return Err(syn::Error::new(
+                    clause.name.span(),
+                    format!("duplicate clause `{}`", clause.name),
+                ));
+            }
+            if state_ty.is_none() && clause.next.as_ref().is_some_and(|next| next.s.is_some()) {
+                return Err(syn::Error::new(
+                    clause.name.span(),
+                    "a stateless contract's `next` section takes exactly two identifiers",
+                ));
+            }
+        }
         // The static form's clause references are resolved at macro-expansion
         // time, so validate them here for a spanned error. The dynamic form's
         // references are ordinary locals, checked by the compiler.
@@ -205,6 +242,7 @@ fn validate_tree_names(tree_tokens: &TokenStream2, clauses: &[ClauseDef]) -> syn
     fn check_level(
         input: ParseStream,
         names: &std::collections::HashSet<String>,
+        seen: &mut Vec<(String, proc_macro2::Span)>,
     ) -> syn::Result<()> {
         let mut entries = 0usize;
         while !input.is_empty() {
@@ -218,7 +256,7 @@ fn validate_tree_names(tree_tokens: &TokenStream2, clauses: &[ClauseDef]) -> syn
             if input.peek(syn::token::Bracket) {
                 let inner;
                 bracketed!(inner in input);
-                check_level(&inner, names)?;
+                check_level(&inner, names, seen)?;
             } else {
                 let ident: Ident = input.parse()?;
                 if !names.contains(&ident.to_string()) {
@@ -227,6 +265,7 @@ fn validate_tree_names(tree_tokens: &TokenStream2, clauses: &[ClauseDef]) -> syn
                         format!("unknown clause `{}` in `tree [..]`", ident),
                     ));
                 }
+                seen.push((ident.to_string(), ident.span()));
             }
             if !input.is_empty() {
                 input.parse::<Token![,]>()?;
@@ -235,8 +274,27 @@ fn validate_tree_names(tree_tokens: &TokenStream2, clauses: &[ClauseDef]) -> syn
         Ok(())
     }
 
-    let parser = |input: ParseStream| check_level(input, &names);
-    parser.parse2(tree_tokens.clone())
+    let mut seen = Vec::new();
+    let parser = |input: ParseStream| check_level(input, &names, &mut seen);
+    parser.parse2(tree_tokens.clone())?;
+    let mut counts = std::collections::HashMap::new();
+    for (name, span) in seen {
+        let count = counts.entry(name.clone()).or_insert((0usize, span));
+        count.0 += 1;
+        if count.0 > 1 {
+            return Err(syn::Error::new(
+                span,
+                format!("clause `{name}` appears more than once in the static tree"),
+            ));
+        }
+    }
+    if let Some(missing) = names.iter().find(|name| !counts.contains_key(*name)) {
+        return Err(syn::Error::new(
+            tree_tokens.span(),
+            format!("declared clause `{missing}` is missing from the static tree"),
+        ));
+    }
+    Ok(())
 }
 
 /// Rewrite the `#[signer(p.field)]` shorthand into the full closure form
@@ -275,6 +333,9 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
         let section: Ident = body.parse()?;
         match section.to_string().as_str() {
             "args" if body.peek(syn::token::Brace) => {
+                if args.is_some() {
+                    return Err(syn::Error::new(section.span(), "duplicate `args` section"));
+                }
                 let args_body;
                 braced!(args_body in body);
                 let mut fields: Vec<ClauseField> = Vec::new();
@@ -287,6 +348,32 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                             &field,
                             "#[signer(..)] and #[from_state] cannot both be applied to one \
                              field (signatures are already filled at spend time)",
+                        ));
+                    }
+                    for attr_name in ["signer", "arg_type", "from_state"] {
+                        if field
+                            .attrs
+                            .iter()
+                            .filter(|a| a.path().is_ident(attr_name))
+                            .count()
+                            > 1
+                        {
+                            return Err(syn::Error::new_spanned(
+                                &field,
+                                format!("duplicate `#[{attr_name}]` attribute"),
+                            ));
+                        }
+                    }
+                    if is_signer
+                        && !matches!(
+                            &field.ty,
+                            Type::Path(path)
+                                if path.path.segments.last().is_some_and(|s| s.ident == "Signature")
+                        )
+                    {
+                        return Err(syn::Error::new_spanned(
+                            &field.ty,
+                            "a `#[signer(..)]` field must have type `Signature`",
                         ));
                     }
                     let ident = field
@@ -315,6 +402,9 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                 args = Some(ClauseArgsDef::Typed(fields));
             }
             "args" => {
+                if args.is_some() {
+                    return Err(syn::Error::new(section.span(), "duplicate `args` section"));
+                }
                 // Raw form: `args raw <expr>;`.
                 let kw: Ident = body.parse()?;
                 if kw != "raw" {
@@ -327,14 +417,29 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                 body.parse::<Token![;]>()?;
             }
             "script" => {
+                if script_expr.is_some() {
+                    return Err(syn::Error::new(
+                        section.span(),
+                        "duplicate `script` section",
+                    ));
+                }
                 script_expr = Some(body.parse()?);
                 body.parse::<Token![;]>()?;
             }
             "timelock" => {
+                if timelock.is_some() {
+                    return Err(syn::Error::new(
+                        section.span(),
+                        "duplicate `timelock` section",
+                    ));
+                }
                 timelock = Some(body.parse()?);
                 body.parse::<Token![;]>()?;
             }
             "next" => {
+                if next.is_some() {
+                    return Err(syn::Error::new(section.span(), "duplicate `next` section"));
+                }
                 let params;
                 parenthesized!(params in body);
                 let idents: syn::punctuated::Punctuated<Ident, Token![,]> =
@@ -347,6 +452,12 @@ fn parse_clause(input: ParseStream) -> syn::Result<ClauseDef> {
                     .next()
                     .ok_or_else(|| syn::Error::new(name_span, "next(p, a) needs an args ident"))?;
                 let s = it.next();
+                if let Some(extra) = it.next() {
+                    return Err(syn::Error::new(
+                        extra.span(),
+                        "`next` takes at most three identifiers: params, args, and state",
+                    ));
+                }
                 let block: Block = body.parse()?;
                 next = Some(NextDef {
                     p,
@@ -989,5 +1100,61 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 ::core::any::TypeId::of::<#identity_ident>()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::ContractDef;
+
+    fn error(source: &str) -> String {
+        syn::parse_str::<ContractDef>(source)
+            .err()
+            .expect("definition should be rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn rejects_duplicate_sections_and_clauses() {
+        assert!(error(
+            "contract C { params (); params (); clause a { script |_| unimplemented!(); } tree [a]; }"
+        )
+        .contains("duplicate `params`"));
+        assert!(error(
+            "contract C { params (); clause a { script |_| unimplemented!(); } clause a { script |_| unimplemented!(); } tree [a]; }"
+        )
+        .contains("duplicate clause `a`"));
+        assert!(error(
+            "contract C { params (); clause a { script |_| unimplemented!(); script |_| unimplemented!(); } tree [a]; }"
+        )
+        .contains("duplicate `script`"));
+    }
+
+    #[test]
+    fn static_tree_contains_every_clause_once() {
+        assert!(error(
+            "contract C { params (); clause a { script |_| unimplemented!(); } clause b { script |_| unimplemented!(); } tree [a]; }"
+        )
+        .contains("clause `b` is missing"));
+        assert!(error(
+            "contract C { params (); clause a { script |_| unimplemented!(); } tree [a, a]; }"
+        )
+        .contains("clause `a` appears more than once"));
+    }
+
+    #[test]
+    fn validates_next_arity_and_signer_type() {
+        assert!(error(
+            "contract C { params (); clause a { script |_| unimplemented!(); next(p, a, s, extra) { Ok(vec![]) } } tree [a]; }"
+        )
+        .contains("at most three identifiers"));
+        assert!(error(
+            "contract C { params (); clause a { args { #[signer([0u8; 32])] sig: Vec<u8> } script |_| unimplemented!(); } tree [a]; }"
+        )
+        .contains("must have type `Signature`"));
+        assert!(error(
+            "contract C { params (); clause a { script |_| unimplemented!(); next(p, a, s) { Ok(vec![]) } } tree [a]; }"
+        )
+        .contains("stateless contract"));
     }
 }

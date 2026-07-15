@@ -5,6 +5,7 @@ use mattrs::script_utils;
 use mattrs::{
     ClauseArgs as DeriveClauseArgs, ContractParams, ContractState as DeriveContractState,
 };
+use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -253,6 +254,80 @@ struct SampleArgs {
     amount: i64,
     blob: Vec<u8>,
     hash: [u8; 32],
+}
+
+// A type may intentionally be used both as a witness argument and as nested
+// contract parameters. These derives must not create overlapping impls.
+#[derive(Debug, Clone, DeriveClauseArgs, ContractParams)]
+struct DualCodec {
+    value: i64,
+}
+
+#[derive(Debug, Clone, DeriveClauseArgs)]
+struct GenericArgs<T>
+where
+    T: WitnessEncodable + Debug + Clone + Send + Sync,
+{
+    #[arg_type(mattrs::argtypes::BytesType)]
+    value: T,
+}
+
+#[derive(Debug, Clone, ContractParams)]
+struct GenericParams<T>
+where
+    T: ParamEncodable + Debug + Clone + Send + Sync,
+{
+    value: T,
+}
+
+#[derive(Debug, Clone, DeriveContractState)]
+struct GenericState<T>
+where
+    T: SingleWitnessElement + Debug + Clone + Send + Sync,
+{
+    value: T,
+}
+
+#[test]
+fn test_derived_codecs_support_generics_and_multiple_roles() {
+    let dual = DualCodec { value: 17 };
+    let witness = <DualCodec as ClauseArgs>::encode_to_witness(&dual);
+    assert_eq!(
+        <DualCodec as ClauseArgs>::decode_from_witness(&witness)
+            .unwrap()
+            .value,
+        dual.value
+    );
+    let params = <DualCodec as ContractParams>::encode(&dual);
+    assert_eq!(
+        <DualCodec as ContractParams>::decode(&params)
+            .unwrap()
+            .value,
+        dual.value
+    );
+
+    let args = GenericArgs::new(vec![1u8, 2, 3]);
+    let witness = <GenericArgs<Vec<u8>> as ClauseArgs>::encode_to_witness(&args);
+    assert_eq!(
+        <GenericArgs<Vec<u8>> as ClauseArgs>::decode_from_witness(&witness)
+            .unwrap()
+            .value,
+        args.value
+    );
+
+    let generic_params = GenericParams { value: 42i64 };
+    let encoded = generic_params.encode();
+    assert_eq!(
+        GenericParams::<i64>::decode(&encoded).unwrap().value,
+        generic_params.value
+    );
+
+    let state = GenericState { value: [7u8; 32] };
+    let encoded = state.encode();
+    assert_eq!(
+        GenericState::<[u8; 32]>::decode(&encoded).unwrap().value,
+        state.value
+    );
 }
 
 #[test]

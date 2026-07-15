@@ -136,6 +136,7 @@ pub fn derive_clause_args(input: TokenStream) -> TokenStream {
 
 fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     // Check for #[clause_args(params = ParamsType)] attribute
     let params_type = extract_params_type(&input.attrs)?;
@@ -250,7 +251,7 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     Ok(quote! {
-        impl ::mattrs::contracts::WitnessEncodable for #name {
+        impl #impl_generics ::mattrs::contracts::WitnessEncodable for #name #ty_generics #where_clause {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut stack = Vec::new();
                 #(#encode_fields)*
@@ -269,7 +270,7 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl ::mattrs::contracts::ClauseArgs for #name {
+        impl #impl_generics ::mattrs::contracts::ClauseArgs for #name #ty_generics #where_clause {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 <Self as ::mattrs::contracts::WitnessEncodable>::encode_to_witness(self)
             }
@@ -293,7 +294,7 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl #name {
+        impl #impl_generics #name #ty_generics #where_clause {
             #new_impl
             #static_arg_specs_impl
             #arg_specs_for_params_impl
@@ -314,6 +315,18 @@ fn arg_spec_item(field: &syn::Field, params_ty: Option<&Type>) -> syn::Result<To
         return Err(syn::Error::new_spanned(
             field,
             "#[signer(..)] and #[arg_type(..)] cannot both be applied to one field",
+        ));
+    }
+    if signer_info.is_some()
+        && !matches!(
+            &field.ty,
+            Type::Path(path)
+                if path.path.segments.last().is_some_and(|segment| segment.ident == "Signature")
+        )
+    {
+        return Err(syn::Error::new_spanned(
+            &field.ty,
+            "a `#[signer(..)]` field must have type `Signature`",
         ));
     }
 
@@ -372,38 +385,57 @@ fn extract_params_type(attrs: &[syn::Attribute]) -> syn::Result<Option<Type>> {
         }
     }
 
+    let mut result = None;
     for attr in attrs {
         if attr.path().is_ident("clause_args") {
             let ParamsArg(ty) = attr.parse_args()?;
-            return Ok(Some(ty));
+            if result.replace(ty).is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "duplicate `#[clause_args(..)]` attribute",
+                ));
+            }
         }
     }
-    Ok(None)
+    Ok(result)
 }
 
 /// Extract #[signer(...)] attribute info.
 fn extract_signer_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<SignerAttrInfo>> {
+    let mut result = None;
     for attr in attrs {
         if attr.path().is_ident("signer") {
             let expr: syn::Expr = attr.parse_args()?;
-            return Ok(Some(match expr {
+            let value = match expr {
                 syn::Expr::Closure(_) => SignerAttrInfo::Closure(quote! { #expr }),
                 _ => SignerAttrInfo::Static(quote! { #expr }),
-            }));
+            };
+            if result.replace(value).is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "duplicate `#[signer(..)]` attribute",
+                ));
+            }
         }
     }
-    Ok(None)
+    Ok(result)
 }
 
 /// Extract #[arg_type(...)] attribute.
 fn extract_arg_type_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<TokenStream2>> {
+    let mut result = None;
     for attr in attrs {
         if attr.path().is_ident("arg_type") {
             let expr: syn::Expr = attr.parse_args()?;
-            return Ok(Some(quote! { #expr }));
+            if result.replace(quote! { #expr }).is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "duplicate `#[arg_type(..)]` attribute",
+                ));
+            }
         }
     }
-    Ok(None)
+    Ok(result)
 }
 
 /// Whether a type is a path of exactly one segment named `ident` with no generics
@@ -494,6 +526,7 @@ pub fn derive_contract_params(input: TokenStream) -> TokenStream {
 
 fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let fields = named_fields(input, "ContractParams")?;
 
     let encode_param_fields = fields.iter().map(|f| {
@@ -604,7 +637,7 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let field_names_for_bytes = fields.iter().map(|f| &f.ident);
 
     Ok(quote! {
-        impl ::mattrs::contracts::ParamEncodable for #name {
+        impl #impl_generics ::mattrs::contracts::ParamEncodable for #name #ty_generics #where_clause {
             fn encode_param(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
                 #(#encode_param_fields)*
@@ -620,7 +653,7 @@ fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl ::mattrs::contracts::ContractParams for #name {
+        impl #impl_generics ::mattrs::contracts::ContractParams for #name #ty_generics #where_clause {
             fn encode(&self) -> Vec<u8> {
                 let mut bytes = Vec::new();
                 #(#encode_to_bytes_fields)*
@@ -660,23 +693,30 @@ enum LeafKind {
 
 /// Extract `#[leaf(sha256)]` / `#[leaf(each)]` from a state field.
 fn extract_leaf_kind(field: &syn::Field) -> syn::Result<LeafKind> {
+    let mut result = None;
     for attr in &field.attrs {
         if attr.path().is_ident("leaf") {
             let ident: syn::Ident = attr.parse_args()?;
-            return match ident.to_string().as_str() {
-                "sha256" => Ok(LeafKind::Sha256),
-                "each" => Ok(LeafKind::Each),
+            let kind = match ident.to_string().as_str() {
+                "sha256" => LeafKind::Sha256,
+                "each" => LeafKind::Each,
                 other => Err(syn::Error::new(
                     ident.span(),
                     format!(
                         "unknown leaf kind `{}` (expected `sha256` or `each`)",
                         other
                     ),
-                )),
+                ))?,
             };
+            if result.replace(kind).is_some() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "duplicate `#[leaf(..)]` attribute",
+                ));
+            }
         }
     }
-    Ok(LeafKind::Raw)
+    Ok(result.unwrap_or(LeafKind::Raw))
 }
 
 /// Derive macro for ContractState trait.
@@ -723,12 +763,19 @@ pub fn derive_contract_state(input: TokenStream) -> TokenStream {
 
 fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let fields = named_fields(input, "ContractState")?;
 
     // #[commit(merkle)] on the struct selects the hash-committed form.
     let mut merkle_commit = false;
     for attr in &input.attrs {
         if attr.path().is_ident("commit") {
+            if merkle_commit {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "duplicate `#[commit(..)]` attribute",
+                ));
+            }
             let ident: syn::Ident = attr.parse_args()?;
             if ident != "merkle" {
                 return Err(syn::Error::new(
@@ -741,7 +788,7 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     if merkle_commit {
-        return expand_merkle_state(name, fields);
+        return expand_merkle_state(name, fields, &impl_generics, &ty_generics, where_clause);
     }
 
     // A #[leaf(..)] attribute only makes sense under #[commit(merkle)].
@@ -787,10 +834,12 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     });
 
     let field_names = fields.iter().map(|f| &f.ident);
-    let field_type = &fields.first().expect("length checked above").ty;
+    let only_field = fields.first().expect("length checked above");
+    let field_type = &only_field.ty;
+    let state_field_name = only_field.ident.as_ref().expect("named fields");
 
     Ok(quote! {
-        impl ::mattrs::contracts::WitnessEncodable for #name {
+        impl #impl_generics ::mattrs::contracts::WitnessEncodable for #name #ty_generics #where_clause {
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
                 #(#encode_fields)*
@@ -806,29 +855,22 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl ::mattrs::contracts::ContractState for #name {
+        impl #impl_generics ::mattrs::contracts::ContractState for #name #ty_generics #where_clause {
             fn encode(&self) -> Vec<u8> {
                 fn assert_single<T: ::mattrs::contracts::SingleWitnessElement>() {}
                 assert_single::<#field_type>();
-                let mut elements =
-                    ::mattrs::contracts::WitnessEncodable::encode_to_witness(self);
-                debug_assert_eq!(elements.len(), 1);
-                elements.pop().expect("SingleWitnessElement produced one element")
+                <#field_type as ::mattrs::contracts::SingleWitnessElement>::encode_single(
+                    &self.#state_field_name
+                ).expect("SingleWitnessElement contract violated")
             }
 
             fn decode(bytes: &[u8]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError> {
                 fn assert_single<T: ::mattrs::contracts::SingleWitnessElement>() {}
                 assert_single::<#field_type>();
-                let witness = vec![bytes.to_vec()];
-                let (state, consumed) =
-                    <Self as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(&witness)?;
-                if consumed != 1 {
-                    return Err(::mattrs::contracts::WitnessError::InvalidData(format!(
-                        "contract state consumed {} element(s), expected one",
-                        consumed,
-                    )));
-                }
-                Ok(state)
+                let value = <#field_type as ::mattrs::contracts::SingleWitnessElement>::decode_single(
+                    bytes.to_vec()
+                )?;
+                Ok(Self { #state_field_name: value })
             }
         }
     })
@@ -840,6 +882,9 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
 fn expand_merkle_state(
     name: &syn::Ident,
     fields: &Punctuated<syn::Field, syn::Token![,]>,
+    impl_generics: &syn::ImplGenerics<'_>,
+    ty_generics: &syn::TypeGenerics<'_>,
+    where_clause: Option<&syn::WhereClause>,
 ) -> syn::Result<TokenStream2> {
     let mut leaf_pushes = Vec::new();
     for f in fields {
@@ -870,7 +915,7 @@ fn expand_merkle_state(
     );
 
     Ok(quote! {
-        impl ::mattrs::contracts::ContractState for #name {
+        impl #impl_generics ::mattrs::contracts::ContractState for #name #ty_generics #where_clause {
             fn encode(&self) -> Vec<u8> {
                 let mut leaves: Vec<[u8; 32]> = Vec::new();
                 #(#leaf_pushes)*

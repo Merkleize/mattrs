@@ -161,6 +161,18 @@ fn test_merkle_proof_type_arg_consumes_2n_plus_1() {
     stack.push([9u8; 32].to_vec()); // a trailing argument
 
     assert_eq!(mpt.consume(&stack).unwrap(), 5);
+
+    let mut bad_hash = stack.clone();
+    bad_hash[0].pop();
+    assert!(mpt.consume(&bad_hash).is_err());
+
+    let mut bad_direction = stack.clone();
+    bad_direction[1] = mattrs::script_utils::bn2vch(2);
+    assert!(mpt.consume(&bad_direction).is_err());
+
+    let mut bad_leaf = stack;
+    bad_leaf[4].pop();
+    assert!(mpt.consume(&bad_leaf).is_err());
 }
 
 #[test]
