@@ -56,6 +56,8 @@ use mattrs::signer::HotSigner;
 
 use contracts::{UnvaultingHandle, UnvaultingState, Vault, VaultHandle, VaultParams};
 
+type AppResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
 // Demo keys (the pymatt reference fixtures; never use on mainnet).
 const UNVAULT_XPRIV: &str = "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN";
 const RECOVER_XPRIV: &str = "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ";
@@ -116,7 +118,7 @@ impl Repl {
     // Commands
     // ------------------------------------------------------------------
 
-    fn fund(&mut self, amount_str: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn fund(&mut self, amount_str: &str) -> AppResult {
         let amount: u64 = amount_str.parse()?;
         let vault =
             Vault::new(self.params.clone()).fund(&mut self.manager, Amount::from_sat(amount))?;
@@ -161,7 +163,7 @@ impl Repl {
         &mut self,
         ids: &str,
         outputs: &[&str],
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> AppResult {
         // The vaults being unvaulted.
         let mut vaults: Vec<(usize, InstanceHandle)> = Vec::new();
         for id in ids.split(',') {
@@ -229,7 +231,7 @@ impl Repl {
         Ok(())
     }
 
-    fn withdraw(&mut self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn withdraw(&mut self, id: &str) -> AppResult {
         let (idx, handle) = self.item(id)?;
         if handle.status() != InstanceStatus::Funded
             || !matches!(self.kind(&handle), Some(Kind::Unvaulting))
@@ -256,7 +258,7 @@ impl Repl {
         Ok(())
     }
 
-    fn recover(&mut self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn recover(&mut self, id: &str) -> AppResult {
         let (idx, handle) = self.item(id)?;
         if handle.status() != InstanceStatus::Funded {
             return Err(format!("instance {idx} is not funded").into());
@@ -290,14 +292,14 @@ impl Repl {
         Ok(())
     }
 
-    fn mine(&self, n_str: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    fn mine(&self, n_str: Option<&str>) -> AppResult {
         let n: u64 = n_str.map(str::parse).transpose()?.unwrap_or(1);
         self.manager.mine_blocks(n)?;
         println!("Mined {n} block(s)");
         Ok(())
     }
 
-    fn execute(&mut self, line: &str) -> Result<(), Box<dyn std::error::Error>> {
+    fn execute(&mut self, line: &str) -> AppResult {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             return Ok(());
@@ -345,7 +347,7 @@ fn maybe_enable_inspector(_manager: &mut ContractManager, port: Option<u16>) {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> AppResult {
     let mut script: Option<String> = None;
     let mut wallet = "testwallet".to_string();
     let mut inspector: Option<u16> = None;
