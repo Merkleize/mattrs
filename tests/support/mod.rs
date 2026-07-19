@@ -15,6 +15,11 @@ pub mod aggregate_exits;
 pub mod game256;
 #[allow(dead_code)]
 pub mod game256_roles;
+// The MATT-VM contracts live with their demo (examples/matt_vm/); the tests
+// compile the same single source.
+#[allow(dead_code, unused_imports)]
+#[path = "../../examples/matt_vm/contracts/mod.rs"]
+pub mod matt_vm;
 #[allow(dead_code)]
 pub mod minivault;
 #[allow(dead_code)]
