@@ -76,6 +76,8 @@ pub mod script_utils;
 pub mod signer;
 pub mod stack;
 pub mod testutil;
+pub mod timelock;
+pub use timelock::BlockDelay;
 
 /// NUMS ("nothing-up-my-sleeve") x-only public key, used as a taproot internal key
 /// when a contract has no key-spend path.

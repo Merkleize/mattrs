@@ -35,6 +35,7 @@ contract! {
     ///   a false claim is what the challenge clauses are for.
     contract Unwind {
         params PoolParams;
+        validate PoolParams::validate_timelocks;
         state UnwindState;
 
         // witness: <pk> <bal> (<h_l> <d_l>) x depth <root>
@@ -96,9 +97,9 @@ impl Unwind {
 
         // Output 0 pays the revealed account key.
         // TODO(OP_AMOUNT): enforce that output 0 carries exactly `bal` sats.
-        // Until then a malicious spender could zero the leaf while paying the
-        // account less than its balance, which is why withdrawals stay
-        // honest-executor-only in the demo.
+        // Until then a spender can underpay and zero the account, or overpay
+        // its key using other users' funds. The remaining pool output only
+        // preserves what is left after this caller-selected deduction.
         s.ccv(
             Source::None,
             0,

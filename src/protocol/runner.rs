@@ -332,11 +332,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 current,
                 parent,
                 Some({
-                    if blocks == 0 {
-                        return Err(ProtocolError::Other(
-                            "timeout duration must be greater than zero".to_string(),
-                        ));
-                    }
+                    crate::BlockDelay::new(blocks).map_err(ManagerError::from)?;
                     Timeout { blocks, on_timeout }
                 }),
             ),

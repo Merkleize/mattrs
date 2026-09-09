@@ -1,5 +1,8 @@
 //! Aggregate exits demo: optimistic aggregated withdrawals from a shared UTXO.
 //!
+//! Incomplete regtest experiment: missing amount checks permit over-withdrawal
+//! and omitted bonds. See SPEC.md; this demo does not enforce pool safety.
+//!
 //! Runs the protocol of `aggregate_exits.md` (concrete spec in `SPEC.md`) on a
 //! MATT-enabled regtest node, one scenario per execution path:
 //!
@@ -15,8 +18,8 @@
 //! `delegation-defend` (Ingrid reveals the CHECKSIGFROMSTACK delegation),
 //! `delegation-timeout` (she cannot, and the withdrawal reverts).
 //!
-//! Needs a regtest `bitcoind` with OP_CHECKCONTRACTVERIFY (and ideally
-//! OP_CHECKSIGFROMSTACK) and a funded `testwallet`; see the repo README. Auth
+//! Needs a regtest `bitcoind` enforcing OP_CAT, OP_CHECKCONTRACTVERIFY and
+//! OP_CHECKSIGFROMSTACK, and a funded `testwallet`; see the repo README. Auth
 //! follows `regtest_rpc_client` (`BITCOIN_RPC_URL`/`_USER`/`_PASSWORD` or the
 //! regtest cookie).
 
@@ -420,6 +423,9 @@ const SCENARIOS: [(&str, Scenario); 6] = [
 ];
 
 fn main() {
+    eprintln!(
+        "Incomplete regtest experiment: amount checks are missing; over-withdrawal and omitted bonds are possible. See examples/aggregate_exits/SPEC.md."
+    );
     let scenario_names = SCENARIOS.map(|(n, _)| n).join("|");
     let args: Vec<String> = std::env::args().collect();
     let mut wallet = "testwallet".to_string();

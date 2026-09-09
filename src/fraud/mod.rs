@@ -86,6 +86,8 @@ pub enum FraudError {
     TraceRangeNotPowerOfTwo { i: usize, j: usize },
     /// A forfait must require at least one confirmation block.
     ZeroForfaitTimeout,
+    /// A non-zero timeout is not a representable CSV block duration.
+    InvalidForfaitTimeout(u32),
 }
 
 impl std::fmt::Display for FraudError {
@@ -103,6 +105,9 @@ impl std::fmt::Display for FraudError {
                 write!(f, "trace range [{i}, {j}] does not have power-of-two size")
             }
             Self::ZeroForfaitTimeout => write!(f, "forfait timeout must be at least one block"),
+            Self::InvalidForfaitTimeout(blocks) => {
+                write!(f, "forfait timeout exceeds 65535 blocks: {blocks}")
+            }
         }
     }
 }
@@ -148,6 +153,8 @@ impl BisectCtx {
         if forfait_timeout == 0 {
             return Err(FraudError::ZeroForfaitTimeout);
         }
+        crate::BlockDelay::new(forfait_timeout)
+            .map_err(|_| FraudError::InvalidForfaitTimeout(forfait_timeout))?;
         Ok(Self {
             leaf_factory,
             forfait_timeout,
@@ -872,5 +879,16 @@ mod tests {
             BisectCtx::new(factory, 0),
             Err(FraudError::ZeroForfaitTimeout)
         ));
+    }
+
+    #[test]
+    fn oversized_forfait_timeouts_are_rejected() {
+        for blocks in [65_536, 1 << 22, 1 << 31, u32::MAX] {
+            let factory: LeafFactory = Arc::new(|_| panic!("factory is not called"));
+            assert!(matches!(
+                BisectCtx::new(factory, blocks),
+                Err(FraudError::InvalidForfaitTimeout(_))
+            ));
+        }
     }
 }

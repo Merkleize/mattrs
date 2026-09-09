@@ -30,6 +30,8 @@ struct ContractDef {
     state_ty: Option<Type>,
     /// The `internal_key |p| ..` closure; `None` defaults to the NUMS key.
     ikey: Option<(Ident, Expr)>,
+    /// Fallible validation run before constructing keys, scripts, or children.
+    validate: Option<Expr>,
     clauses: Vec<ClauseDef>,
     tree: TreeDef,
 }
@@ -103,6 +105,7 @@ impl Parse for ContractDef {
         let mut ctx_ty: Option<Type> = None;
         let mut state_ty: Option<Type> = None;
         let mut ikey: Option<(Ident, Expr)> = None;
+        let mut validate: Option<Expr> = None;
         let mut clauses: Vec<ClauseDef> = Vec::new();
         let mut tree: Option<TreeDef> = None;
 
@@ -147,6 +150,16 @@ impl Parse for ContractDef {
                 }
                 "clause" => {
                     clauses.push(parse_clause(&body)?);
+                }
+                "validate" => {
+                    if validate.is_some() {
+                        return Err(syn::Error::new(
+                            section.span(),
+                            "duplicate `validate` section",
+                        ));
+                    }
+                    validate = Some(body.parse()?);
+                    body.parse::<Token![;]>()?;
                 }
                 "tree" => {
                     if tree.is_some() {
@@ -223,6 +236,7 @@ impl Parse for ContractDef {
             ctx_ty,
             state_ty,
             ikey,
+            validate,
             clauses,
             tree,
         })
@@ -595,7 +609,9 @@ fn timelock_tokens(
         Some(expr) => {
             let blocks_call = call_builder(expr, quote! { u32 });
             (
-                quote! { let __csv_blocks: u32 = #blocks_call; },
+                quote! {
+                    let __csv_blocks = ::mattrs::BlockDelay::new(#blocks_call)?.blocks();
+                },
                 quote! {
                     ::mattrs::script_helpers::concat(&[
                         ::mattrs::script_helpers::older(__csv_blocks),
@@ -689,6 +705,15 @@ fn codegen(def: ContractDef) -> TokenStream2 {
     };
 
     let mut args_structs: Vec<TokenStream2> = Vec::new();
+    let validation = def.validate.as_ref().map(|expr| {
+        let call = call_builder(
+            expr,
+            quote! {
+                ::core::result::Result<(), ::mattrs::contracts::ContractError>
+            },
+        );
+        quote! { #call?; }
+    });
     let mut clause_locals: Vec<TokenStream2> = Vec::new();
     let mut methods: Vec<TokenStream2> = Vec::new();
 
@@ -997,6 +1022,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 params: #params_ty #ctx_new_param
             ) -> ::core::result::Result<Self, ::mattrs::contracts::ContractError> {
                 #ctx_init
+                #validation
                 #ikey_init
                 #(#clause_locals)*
                 #tree_init
@@ -1116,6 +1142,9 @@ mod parser_tests {
 
     #[test]
     fn rejects_duplicate_sections_and_clauses() {
+        assert!(error(
+            "contract C { params (); validate |_| Ok(()); validate |_| Ok(()); clause a { script |_| unimplemented!(); } tree [a]; }"
+        ).contains("duplicate `validate`"));
         assert!(error(
             "contract C { params (); params (); clause a { script |_| unimplemented!(); } tree [a]; }"
         )

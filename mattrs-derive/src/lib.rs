@@ -41,6 +41,15 @@ mod contract;
 /// }
 /// ```
 ///
+/// Optional `validate |p| ...;` performs contract-wide checks before keys,
+/// scripts, or child contracts are built. It returns `Result<(), ContractError>`
+/// and receives `(&params, &ctx)` when construction context is declared.
+/// Use it to reject invalid shared parameters before nested constructors run.
+///
+/// A clause's `timelock |p| ...;` returns a block count (`u32`) in 1..=65,535.
+/// Construction rejects invalid delays; valid delays prepend `CSV DROP` to
+/// the script and set metadata used to validate the spending input's sequence.
+///
 /// Three optional forms cover contracts whose shape is only known at runtime
 /// (see `mattrs::fraud` for a worked example of all three):
 ///

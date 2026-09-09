@@ -19,9 +19,9 @@ The crate is unpublished; use it as a path dependency:
 
 ```toml
 [dependencies]
-mattrs = { path = "../mattrs2" }
+mattrs = { path = "../mattrs" }
 bitcoin = "0.32"
-bitcoin-script = { path = "../mattrs2/bitcoin-script" }   # patched vendor, see below
+bitcoin-script = { path = "../mattrs/bitcoin-script" }   # patched vendor, see below
 ```
 
 Then run the offline example — it defines a two-clause contract with the
@@ -34,7 +34,8 @@ cargo run --example getting_started
 > **Note on `bitcoin-script/`**: this repository vendors a *patched* copy of
 > [BitVM/rust-bitcoin-script](https://github.com/BitVM/rust-bitcoin-script) v0.2.0.
 > The patch (`bitcoin-script/src/parse.rs`) teaches the `script!` macro the MATT
-> opcodes `OP_CHECKTEMPLATEVERIFY` (0xb3) and `OP_CHECKCONTRACTVERIFY` (0xbb),
+> opcodes `OP_CHECKTEMPLATEVERIFY` (0xb3), `OP_CHECKCONTRACTVERIFY` (0xbb), and
+> `OP_CHECKSIGFROMSTACK` (0xcc),
 > which upstream does not know. Do not "upgrade" it back to upstream.
 
 ## Design: one source of truth
@@ -127,6 +128,19 @@ with `MissingSigner`.
 
 A complete worked example (a two-stage vault) lives in `examples/vault/contracts.rs`.
 
+Contract-wide checks can run before any keys or nested scripts are built:
+`validate |p| mattrs::BlockDelay::new(p.spend_delay).map(|_| ());`.
+The validator returns `Result<(), ContractError>` and receives `&params`
+(and `&ctx` if declared), like script builders. Use it for constraints shared
+with child contracts so invalid configuration returns an error at the entry
+constructor. The `timelock` section validates its own block delay automatically.
+For hand-written scripts, `BlockDelay::new(blocks)?.script()` supplies a checked
+block delay; `older(u32)` remains the low-level helper for raw sequence operands.
+
+`exec_one` and `exec_none` resolve outputs and check child counts before asking
+for signatures. A successful execution signs once and records the actual
+broadcast witness, including filled signature arguments.
+
 ## Fraud proofs: `mattrs::fraud`
 
 The generic bisection fraud-proof protocol (pymatt's `hub/fraud.py`) is a library
@@ -215,7 +229,10 @@ cargo run --example vault                                    # interactive
 cargo run --example vault -- --script examples/vault/scripts/revault.txt
 ```
 
-**Aggregate exits** (`examples/aggregate_exits/`) implements optimistic
+**Aggregate exits** (`examples/aggregate_exits/`) is an incomplete regtest
+experiment: exact amount checks are missing, permitting over-withdrawal and
+omitted bonds. It does not enforce pool safety (see the gaps in `SPEC.md`).
+It demonstrates optimistic
 aggregated withdrawals from a pooled UTXO (the protocol of
 `examples/aggregate_exits/aggregate_exits.md`; concrete spec in `SPEC.md`):
 direct Merkle-proof exits, plus an intermediary who withdraws a set of small
@@ -252,7 +269,8 @@ cargo run -p mattrs-inspector       # or: nc localhost 34443
   a pot with nothing but a signature).
 - **Declared timelocks** — a clause's `timelock |p| ..;` section prepends the
   CSV `older()` fragment to its script *and* seeds the spend's `nSequence`, so
-  the two cannot disagree.
+  both use the same validated delay (1 through 65,535 blocks). Sequence
+  overrides are checked against the declared delay before signing.
 - **Typed handles** — spends return `Children` (`.typed::<H>(i)?` / `.one()`),
   and a handle's `params()` / `state_req()` read the typed values directly.
 - **Expanded state** — an instance can carry logical state richer than its on-chain

@@ -69,6 +69,7 @@ contract! {
     /// half-slashed to the challenger, half burned.
     contract DelegationChallenge {
         params PoolParams;
+        validate PoolParams::validate_timelocks;
         state DelegationChallengeState;
 
         // witness: the seven state leaves (STATE_ITEMS order), then <sig>

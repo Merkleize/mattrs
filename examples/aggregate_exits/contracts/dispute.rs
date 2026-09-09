@@ -321,6 +321,7 @@ contract! {
     /// challenger collects by `forfait`.
     contract ExitBisect1 {
         params BisectRangeParams;
+        validate |p| p.pool.validate_timelocks();
         state ExitBisect1State;
 
         // witness: <h_start> <h_end_i> <h_end_c> <trace_i> <trace_c> <carry>
@@ -489,6 +490,7 @@ contract! {
     /// the half is a single step). Stalling forfaits to Ingrid.
     contract ExitBisect2 {
         params BisectRangeParams;
+        validate |p| p.pool.validate_timelocks();
         state ExitBisect2State;
 
         // witness: <state leaves x 9-with-carry> <h_mid_c> <t_left_c> <t_right_c>
@@ -776,6 +778,7 @@ contract! {
     /// settlement mirrors the forfait clauses.
     contract ExitLeaf {
         params LeafStepParams;
+        validate |p| p.pool.validate_timelocks();
         state ExitLeafState;
 
         clause ingrid_noop {

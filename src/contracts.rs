@@ -106,6 +106,8 @@ impl From<ContractError> for ClauseError {
 /// Errors from contract address / key-derivation operations.
 #[derive(Debug)]
 pub enum ContractError {
+    /// A block-based CSV delay is outside 1..=65,535.
+    InvalidBlockDelay { blocks: u32 },
     /// An augmented-contract operation needs state but none was provided.
     MissingState,
     /// A stateless contract was given logical state.
@@ -132,6 +134,12 @@ pub enum ContractError {
 impl fmt::Display for ContractError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ContractError::InvalidBlockDelay { blocks } => {
+                write!(
+                    f,
+                    "CSV block delay must be between 1 and 65535, got {blocks}"
+                )
+            }
             ContractError::MissingState => write!(f, "state required for augmented contract"),
             ContractError::UnexpectedState => write!(f, "stateless contract cannot carry state"),
             ContractError::WrongStateType => {
@@ -1479,11 +1487,12 @@ where
         }
     }
 
-    /// Record the clause's CSV timelock (in blocks). The `contract!` DSL's
-    /// `timelock` section uses this after prepending the matching
-    /// [`older`](crate::script_helpers::older) fragment to the script; the
-    /// manager then seeds the spend's `nSequence` from it, so the script and
-    /// the transaction cannot disagree.
+    /// Record the clause's CSV timelock (1..=65,535 blocks). Contract construction
+    /// rejects invalid metadata, and the manager checks the final `nSequence`
+    /// against this delay before signing.
+    ///
+    /// This only records metadata: direct callers must put a matching CSV check
+    /// in their script. The `contract!` DSL's `timelock` section does both.
     pub fn with_csv_blocks(mut self, blocks: u32) -> Self {
         self.csv_blocks = Some(blocks);
         self
@@ -1698,6 +1707,11 @@ impl P2trContractCore {
     ) -> Result<Self, ContractError> {
         let clauses = clause_tree.clauses();
         validate_unique_clauses(&clauses)?;
+        for clause in &clauses {
+            if let Some(blocks) = clause.csv_blocks() {
+                crate::BlockDelay::new(blocks)?;
+            }
+        }
         let taptree = Arc::new(clause_tree.to_script_tree());
         Ok(Self {
             name,

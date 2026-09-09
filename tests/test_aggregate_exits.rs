@@ -135,6 +135,32 @@ fn honest_claim_computation() {
     assert_eq!(padded.r_prime, claim.r_prime);
 }
 
+/// Documents an existing enforcement gap, not a desired secure withdrawal.
+/// This construction test does not execute Script. SPEC.md explains why the
+/// CCV checks do not bind the payout to the authenticated account balance.
+#[test]
+fn known_amount_gap_allows_an_account_to_over_withdraw() {
+    let pool = pool();
+    let unwind: UnwindHandle = try_handle(fund_fake(
+        Unwind::new(params()).unwrap().as_erased(),
+        Some(Box::new(UnwindState { root: pool.root() })),
+        POOL_TOTAL,
+        1,
+    ));
+    assert_eq!(pool.accounts[0].unwrap().1, 1_000);
+    let tx = unwind
+        .withdraw_direct(&pool, 0)
+        .output_amount(0, Amount::from_sat(20_000))
+        .build_tx(&offline_manager())
+        .unwrap();
+    assert_eq!(tx.output[0].value, Amount::from_sat(20_000));
+    assert_eq!(
+        tx.output[0].script_pubkey,
+        opaque_p2tr(pool.accounts[0].unwrap().0)
+    );
+    assert_eq!(tx.output[1].value, Amount::from_sat(1_000));
+}
+
 #[test]
 fn lying_claim_diverges_at_the_lie() {
     let pool = pool();

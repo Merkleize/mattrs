@@ -224,7 +224,14 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
         (),
         zero_entry,
     );
-    assert!(matches!(zero.step(), Err(ProtocolError::Other(_))));
+    assert!(matches!(
+        zero.step(),
+        Err(ProtocolError::Manager(
+            mattrs::manager::ManagerError::ContractError(
+                mattrs::contracts::ContractError::InvalidBlockDelay { blocks: 0 }
+            )
+        ))
+    ));
 
     let chain = Rc::new(LocalChain::new());
     let entry = fund_fake(

@@ -34,6 +34,7 @@ contract! {
     /// the specific pot the batch builds.
     contract ExitBond {
         params ExitBondParams;
+        validate |p| p.pool.validate_timelocks();
 
         // witness: <sig>
         clause stake {

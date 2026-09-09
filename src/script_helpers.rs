@@ -61,7 +61,11 @@ pub fn check_output_contract(
     }
 }
 
-/// A relative-timelock (`CHECKSEQUENCEVERIFY`) fragment, like miniscript's `older`.
+/// A raw `CHECKSEQUENCEVERIFY` fragment, like miniscript's `older`.
+///
+/// `n` is a sequence operand, including its flags, not a validated block count.
+/// For block-based delays use [`crate::BlockDelay::script`] or the `contract!`
+/// DSL's validated `timelock` section.
 pub fn older(n: u32) -> ScriptBuf {
     script! {
         { n }

@@ -164,9 +164,7 @@ fn validate_terms(stake: i64, timeout_blocks: u32) -> AppResult {
     if stake <= 0 || stake > i64::MAX / 2 {
         return Err("stake must be positive and small enough to double".into());
     }
-    if timeout_blocks == 0 {
-        return Err("timeout must be at least one block".into());
-    }
+    mattrs::BlockDelay::new(timeout_blocks)?;
     Ok(())
 }
 

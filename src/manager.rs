@@ -302,6 +302,32 @@ impl From<WrongContractType> for ManagerError {
     }
 }
 
+/// An unsigned batch whose outputs and input constraints have been resolved.
+/// Kept separate from signing so validation never prompts a signer.
+struct PreparedBatch {
+    tx: Transaction,
+    prevouts: Vec<TxOut>,
+    nexts: Vec<NextOutputs>,
+}
+
+impl PreparedBatch {
+    fn child_count(&self) -> usize {
+        let mut indices = std::collections::BTreeSet::new();
+        for (vin, next) in self.nexts.iter().enumerate() {
+            match next {
+                NextOutputs::Contracts(outputs) => {
+                    indices.extend(outputs.iter().map(|output| output.index.resolve(vin)));
+                }
+                NextOutputs::Join { index } => {
+                    indices.insert(*index);
+                }
+                NextOutputs::Template(_) => {}
+            }
+        }
+        indices.len()
+    }
+}
+
 /// Manages contract instances and their lifecycle.
 pub struct ContractManager {
     /// RPC client for blockchain interaction.
@@ -484,15 +510,35 @@ impl ContractManager {
     /// vaults triggering to the same next contract merge into one output). CTV
     /// template clauses are single-input only and are rejected here.
     pub fn spend_batch(&mut self, builders: &[SpendBuilder]) -> Result<Children, ManagerError> {
-        let (tx, nexts) = self.assemble(builders)?;
+        let prepared = self.prepare(builders)?;
+        self.execute_prepared(builders, prepared)
+    }
+
+    fn execute_prepared(
+        &mut self,
+        builders: &[SpendBuilder],
+        prepared: PreparedBatch,
+    ) -> Result<Children, ManagerError> {
+        let (tx, nexts) = self.sign_prepared(builders, prepared)?;
 
         self.rpc.send_raw_transaction(&tx)?;
+        self.record_batch(builders, &tx, &nexts)
+    }
+
+    /// Record the transaction actually broadcast, including filled signatures.
+    fn record_batch(
+        &mut self,
+        builders: &[SpendBuilder],
+        tx: &Transaction,
+        nexts: &[NextOutputs],
+    ) -> Result<Children, ManagerError> {
         for (vin, builder) in builders.iter().enumerate() {
+            let parsed = parse_script_path_witness(&tx.input[vin].witness)?;
             builder.instance.borrow_mut().mark_spent(
                 tx.clone(),
                 vin,
                 builder.clause_name.to_string(),
-                builder.witness_args.clone(),
+                parsed.args,
             );
         }
 
@@ -500,9 +546,9 @@ impl ContractManager {
         // `PreserveOutput` index) yield one child instance, linked to each parent.
         // Contract outputs first: a `Join` references a child another input defines.
         let mut handles: Vec<InstanceHandle> = Vec::new();
-        for (vin, (builder, next)) in builders.iter().zip(&nexts).enumerate() {
+        for (vin, (builder, next)) in builders.iter().zip(nexts).enumerate() {
             if let NextOutputs::Contracts(outputs) = next {
-                for child in self.materialize_outputs(&builder.instance, outputs, &tx, vin)? {
+                for child in self.materialize_outputs(&builder.instance, outputs, tx, vin)? {
                     let handle = InstanceHandle { instance: child };
                     if !handles.contains(&handle) {
                         handles.push(handle);
@@ -511,7 +557,7 @@ impl ContractManager {
             }
         }
         let txid = tx.compute_txid();
-        for (builder, next) in builders.iter().zip(&nexts) {
+        for (builder, next) in builders.iter().zip(nexts) {
             if let NextOutputs::Join { index } = next {
                 let outpoint = OutPoint { txid, vout: *index };
                 let child = self
@@ -538,6 +584,10 @@ impl ContractManager {
         &self,
         builders: &[SpendBuilder],
     ) -> Result<(Transaction, Vec<NextOutputs>), ManagerError> {
+        self.sign_prepared(builders, self.prepare(builders)?)
+    }
+
+    fn prepare(&self, builders: &[SpendBuilder]) -> Result<PreparedBatch, ManagerError> {
         if builders.is_empty() {
             return Err(ManagerError::TransactionBuildError(
                 "empty batch spend".to_string(),
@@ -565,6 +615,12 @@ impl ContractManager {
                 )));
             }
             let prevout = inst.prevout().ok_or(ManagerError::NotFunded)?;
+            let clause = inst
+                .contract()
+                .get_clause(builder.clause_name)
+                .ok_or_else(|| ManagerError::ClauseNotFound(builder.clause_name.to_string()))?;
+            validate_clause_witness(clause.as_ref(), &builder.witness_args, true)
+                .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
             prevouts.push(prevout);
             tx_inputs.push(TxIn {
                 previous_output: outpoint,
@@ -600,6 +656,42 @@ impl ContractManager {
             tx.input[0].sequence = sequence;
         }
 
+        // Check the final sequence, including any CTV-selected sequence, before
+        // signing. A caller may lengthen a delay but cannot disable or shorten it.
+        for (vin, builder) in builders.iter().enumerate() {
+            let inst = builder.instance.borrow();
+            if let Some(blocks) = inst
+                .contract()
+                .get_clause(builder.clause_name)
+                .and_then(|clause| clause.csv_blocks())
+            {
+                let delay = crate::BlockDelay::new(blocks)?;
+                if !delay.is_satisfied_by(tx.input[vin].sequence) {
+                    return Err(ManagerError::TransactionBuildError(format!(
+                        "clause '{}' requires at least {blocks} CSV blocks; nSequence {} does not satisfy it",
+                        builder.clause_name, tx.input[vin].sequence,
+                    )));
+                }
+            }
+        }
+
+        Ok(PreparedBatch {
+            tx,
+            prevouts,
+            nexts,
+        })
+    }
+
+    fn sign_prepared(
+        &self,
+        builders: &[SpendBuilder],
+        prepared: PreparedBatch,
+    ) -> Result<(Transaction, Vec<NextOutputs>), ManagerError> {
+        let PreparedBatch {
+            mut tx,
+            prevouts,
+            nexts,
+        } = prepared;
         // Fill + finalize each input's witness (every sighash sees all prevouts).
         for (input_index, builder) in builders.iter().enumerate() {
             tx.input[input_index].witness =
@@ -1931,19 +2023,18 @@ impl SpendBuilder {
         Rc::ptr_eq(&self.instance, &handle.instance)
     }
 
-    fn expected_children(&self, manager: &ContractManager) -> Result<usize, ManagerError> {
-        let (_, next) = manager.build_spend_tx(self)?;
-        Ok(match next {
-            NextOutputs::Contracts(outputs) => {
-                let mut indices = std::collections::BTreeSet::new();
-                for output in outputs {
-                    indices.insert(output.index.resolve(0));
-                }
-                indices.len()
-            }
-            NextOutputs::Template(_) => 0,
-            NextOutputs::Join { .. } => 1,
-        })
+    fn exec_with_child_count(
+        self,
+        manager: &mut ContractManager,
+        expected: usize,
+    ) -> Result<Children, ManagerError> {
+        let builders = std::slice::from_ref(&self);
+        let prepared = manager.prepare(builders)?;
+        let got = prepared.child_count();
+        if got != expected {
+            return Err(ManagerError::UnexpectedOutputCount { expected, got });
+        }
+        manager.execute_prepared(builders, prepared)
     }
 
     /// Register a signer (matched to the clause's signature args by public key).
@@ -1984,14 +2075,7 @@ impl SpendBuilder {
 
     /// Like [`exec`](Self::exec) but asserts exactly one child instance is produced.
     pub fn exec_one(self, manager: &mut ContractManager) -> Result<InstanceHandle, ManagerError> {
-        let expected = self.expected_children(manager)?;
-        if expected != 1 {
-            return Err(ManagerError::UnexpectedOutputCount {
-                expected: 1,
-                got: expected,
-            });
-        }
-        let mut outputs = self.exec(manager)?.into_vec();
+        let mut outputs = self.exec_with_child_count(manager, 1)?.into_vec();
         if outputs.len() != 1 {
             return Err(ManagerError::UnexpectedOutputCount {
                 expected: 1,
@@ -2003,14 +2087,7 @@ impl SpendBuilder {
 
     /// Like [`exec`](Self::exec) but asserts the clause is terminal (no children).
     pub fn exec_none(self, manager: &mut ContractManager) -> Result<(), ManagerError> {
-        let expected = self.expected_children(manager)?;
-        if expected != 0 {
-            return Err(ManagerError::UnexpectedOutputCount {
-                expected: 0,
-                got: expected,
-            });
-        }
-        let outputs = self.exec(manager)?;
+        let outputs = self.exec_with_child_count(manager, 0)?;
         if !outputs.is_empty() {
             return Err(ManagerError::UnexpectedOutputCount {
                 expected: 0,
@@ -2033,6 +2110,166 @@ mod tests {
 
     fn offline_manager() -> ContractManager {
         ContractManager::new(offline_client(), bitcoin::Network::Regtest)
+    }
+
+    /// A one-request RPC endpoint: acknowledge and return the broadcast tx.
+    fn broadcast_rpc() -> (Client, std::thread::JoinHandle<Transaction>) {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(&mut stream);
+            let mut len = None;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let mut body = vec![0; len.unwrap()];
+            reader.read_exact(&mut body).unwrap();
+            let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(request["method"], "sendrawtransaction");
+            let tx: Transaction = bitcoin::consensus::deserialize(
+                &hex::decode(request["params"][0].as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            let response = serde_json::json!({
+                "result": tx.compute_txid().to_string(), "error": null, "id": request["id"],
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response.len(),
+                response
+            )
+            .unwrap();
+            tx
+        });
+        (
+            Client::new(&url, bitcoincore_rpc::Auth::None).unwrap(),
+            server,
+        )
+    }
+
+    struct CountingSigner {
+        calls: Rc<std::cell::Cell<usize>>,
+        signer: crate::signer::HotSigner,
+    }
+
+    impl Signer for CountingSigner {
+        fn public_key(&self) -> XOnlyPublicKey {
+            self.signer.public_key()
+        }
+        fn sign(&self, hash: &[u8; 32]) -> Result<crate::Signature, crate::signer::SignerError> {
+            self.calls.set(self.calls.get() + 1);
+            self.signer.sign(hash)
+        }
+    }
+
+    fn signed_spend_fixture(
+        child: bool,
+    ) -> (InstanceHandle, SpendBuilder, Rc<std::cell::Cell<usize>>) {
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let signer = CountingSigner {
+            calls: calls.clone(),
+            signer: crate::signer::HotSigner::new(
+                bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &[42]).unwrap(),
+            ),
+        };
+        let pk = signer.public_key();
+        let dest = test_contract(90, None);
+        let next = if child {
+            vec![ClauseOutput::at(0).to(dest.clone()).build()]
+        } else {
+            vec![]
+        };
+        let clause = StandardClause::<(), (), RawArgs>::new(
+            "spend".into(),
+            bitcoin::script::Builder::new()
+                .push_x_only_key(&pk)
+                .push_opcode(bitcoin::opcodes::all::OP_CHECKSIG)
+                .into_script(),
+            vec![crate::contracts::ArgSpec {
+                name: "sig".into(),
+                arg_type: Arc::new(crate::argtypes::SignerType::new(pk.serialize())),
+            }],
+            Some(Arc::new(move |_, _, _| {
+                Ok(NextOutputs::Contracts(next.clone()))
+            })),
+        );
+        let c = Arc::new(
+            StandardP2TR::new(
+                "Signed",
+                crate::nums_key(),
+                &(),
+                ClauseTree::leaf(Arc::new(clause)),
+            )
+            .unwrap(),
+        );
+        let h = fund_fake(c, None, sat(10_000), 1);
+        let mut builder = h.spend_clause("spend", vec![vec![]]).sign(signer);
+        if !child {
+            builder = builder.outputs(vec![TxOut {
+                value: sat(9_000),
+                script_pubkey: spk_of(&dest),
+            }]);
+        }
+        (h, builder, calls)
+    }
+
+    #[test]
+    fn child_count_errors_do_not_request_signatures() {
+        let (_, builder, calls) = signed_spend_fixture(false);
+        assert!(matches!(
+            builder.exec_one(&mut offline_manager()),
+            Err(ManagerError::UnexpectedOutputCount {
+                expected: 1,
+                got: 0
+            })
+        ));
+        assert_eq!(calls.get(), 0);
+        let (_, builder, calls) = signed_spend_fixture(true);
+        assert!(matches!(
+            builder.exec_none(&mut offline_manager()),
+            Err(ManagerError::UnexpectedOutputCount {
+                expected: 0,
+                got: 1
+            })
+        ));
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn checked_execution_signs_once_and_records_the_broadcast_witness() {
+        for child in [false, true] {
+            let (h, builder, calls) = signed_spend_fixture(child);
+            let (rpc, server) = broadcast_rpc();
+            let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+            if child {
+                builder.exec_one(&mut manager).unwrap();
+            } else {
+                builder.exec_none(&mut manager).unwrap();
+            }
+            let tx = server.join().unwrap();
+            assert_eq!(calls.get(), 1);
+            let recorded = h.spending_args().unwrap();
+            assert_eq!(recorded[0], tx.input[0].witness.to_vec()[0]);
+            assert_eq!(recorded[0].len(), 64);
+
+            let (observer, _, _) = signed_spend_fixture(child);
+            offline_manager().observe_spend(&observer, &tx).unwrap();
+            assert_eq!(observer.spending_args(), h.spending_args());
+        }
     }
 
     fn sat(n: u64) -> Amount {

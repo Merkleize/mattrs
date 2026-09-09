@@ -104,6 +104,7 @@ contract! {
     /// period — each retry costs another challenger half their bond).
     contract PendingExit {
         params PoolParams;
+        validate PoolParams::validate_timelocks;
         state PendingExitState;
 
         // witness: <unwind_taptree> <r> <r_prime> <s_root> <ingrid_pk> <trace_i> <x>

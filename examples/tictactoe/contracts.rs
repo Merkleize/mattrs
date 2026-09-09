@@ -176,6 +176,7 @@ impl ContractState for TttState {
 contract! {
     contract TicTacToe {
         params TttParams;
+        validate |p| mattrs::BlockDelay::new(p.timeout_blocks).map(|_| ());
         state TttState;
 
         // witness: <prefix> <suffix> <alice_sig>
