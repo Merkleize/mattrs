@@ -123,8 +123,12 @@ pub enum ManagerError {
     /// The outpoint given to [`ContractManager::track_instance`] does not pay
     /// the contract's expected script (wrong contract, params, or state).
     WrongFundingScript(OutPoint),
-    /// The spend produces no transaction outputs: a terminal clause constrains
-    /// none, so they must be supplied with [`SpendBuilder::outputs`].
+    /// The transaction does not satisfy the clause's declared CTV commitment.
+    CtvTemplateMismatch {
+        input_index: usize,
+    },
+    /// The spend produces no transaction outputs. Childless clauses without a
+    /// full template need outputs supplied with [`SpendBuilder::outputs`].
     NoOutputs,
     /// Two spends of a batch set a different amount for the same output index.
     ConflictingOutputAmount {
@@ -223,8 +227,12 @@ impl std::fmt::Display for ManagerError {
             ),
             ManagerError::NoOutputs => write!(
                 f,
-                "The spend produces no outputs; terminal clauses need explicit \
-                 outputs (SpendBuilder::outputs)"
+                "The spend produces no outputs; provide nonempty outputs \
+                 (SpendBuilder::outputs or the clause's output constraints)"
+            ),
+            ManagerError::CtvTemplateMismatch { input_index } => write!(
+                f,
+                "Transaction does not match the CTV commitment at input {input_index}"
             ),
             ManagerError::ConflictingOutputAmount { index } => {
                 write!(f, "Conflicting amounts were set for output index {}", index)
@@ -321,7 +329,7 @@ impl PreparedBatch {
                 NextOutputs::Join { index } => {
                     indices.insert(*index);
                 }
-                NextOutputs::Template(_) => {}
+                NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => {}
             }
         }
         indices.len()
@@ -644,6 +652,9 @@ impl ContractManager {
         }
 
         let (outputs, template_sequence) = Self::derive_tx_outputs(builders, &nexts, &prevouts)?;
+        if outputs.is_empty() {
+            return Err(ManagerError::NoOutputs);
+        }
 
         let mut tx = Transaction {
             version: bitcoin::transaction::Version::TWO,
@@ -656,9 +667,10 @@ impl ContractManager {
             tx.input[0].sequence = sequence;
         }
 
-        // Check the final sequence, including any CTV-selected sequence, before
-        // signing. A caller may lengthen a delay but cannot disable or shorten it.
+        // Check CTV commitments and the final sequence before signing. A caller
+        // may lengthen a CSV delay only if any exact CTV commitment still matches.
         for (vin, builder) in builders.iter().enumerate() {
+            validate_ctv_commitment(&nexts[vin], &tx, vin)?;
             let inst = builder.instance.borrow();
             if let Some(blocks) = inst
                 .contract()
@@ -721,8 +733,16 @@ impl ContractManager {
 
         let template = nexts.iter().find_map(|next| match next {
             NextOutputs::Template(template) => Some(template),
-            NextOutputs::Contracts(_) | NextOutputs::Join { .. } => None,
+            _ => None,
         });
+        let committed_hash = nexts
+            .iter()
+            .any(|next| matches!(next, NextOutputs::TemplateHash(_)));
+        if committed_hash && !single {
+            return Err(ManagerError::TransactionBuildError(
+                "CTV template-hash clauses are single-input only; not supported in a batch".into(),
+            ));
+        }
 
         if let Some(explicit) = builders.iter().find_map(|b| b.explicit_outputs.as_ref()) {
             if !single {
@@ -738,9 +758,10 @@ impl ContractManager {
                 ));
             }
             if !matches!(nexts.first(), Some(NextOutputs::Contracts(outputs)) if outputs.is_empty())
+                && !committed_hash
             {
                 return Err(ManagerError::TransactionBuildError(
-                    "explicit outputs are only valid for a terminal unconstrained clause"
+                    "explicit outputs require a clause with no declared output constraints or a CTV template hash"
                         .to_string(),
                 ));
             }
@@ -765,6 +786,12 @@ impl ContractManager {
                 _ => {}
             }
             return Ok((template.outputs.clone(), Some(template.sequence)));
+        }
+        if committed_hash {
+            return Err(ManagerError::TransactionBuildError(
+                "a CTV template-hash clause requires explicit outputs (SpendBuilder::outputs)"
+                    .into(),
+            ));
         }
 
         // Pool the per-builder DeductOutput amounts; setting the same index to
@@ -798,7 +825,9 @@ impl ContractManager {
                 NextOutputs::Contracts(clause_outputs) => clause_outputs,
                 // Joins contribute to outputs other inputs define; second pass.
                 NextOutputs::Join { .. } => continue,
-                NextOutputs::Template(_) => unreachable!("templates are handled above"),
+                NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => {
+                    unreachable!("templates are handled above")
+                }
             };
 
             let mut remaining = prevouts[input_index].value;
@@ -1274,6 +1303,7 @@ impl ContractManager {
         if let NextOutputs::Contracts(outputs) = &next {
             validate_observed_contract_amounts(handle, outputs, spending_tx, vin)?;
         }
+        validate_ctv_commitment(&next, spending_tx, vin)?;
 
         let children = match &next {
             // A re-observed instance with no cached children got here only to
@@ -1283,20 +1313,7 @@ impl ContractManager {
             NextOutputs::Contracts(outputs) => {
                 self.materialize_outputs(&handle.instance, outputs, spending_tx, vin)?
             }
-            NextOutputs::Template(template) => {
-                if spending_tx.version != bitcoin::transaction::Version::TWO
-                    || spending_tx.lock_time != bitcoin::absolute::LockTime::ZERO
-                    || spending_tx.input.len() != 1
-                    || vin != 0
-                    || spending_tx.input[0].sequence != template.sequence
-                    || spending_tx.output != template.outputs
-                {
-                    return Err(ManagerError::UnrecognizedSpend(
-                        "transaction does not match the clause's CTV template".to_string(),
-                    ));
-                }
-                Vec::new()
-            }
+            NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => Vec::new(),
             // A joining input contributes to a child another input's clause
             // defines: link it when that input's observation already
             // materialized the child; otherwise return nothing (a later
@@ -1550,6 +1567,23 @@ pub(crate) fn is_tx_not_found(e: &bitcoincore_rpc::Error) -> bool {
         bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::error::Error::Rpc(rpc_err))
             if rpc_err.code == -5
     )
+}
+
+/// Apply the same CTV commitment check before signing and during observation.
+fn validate_ctv_commitment(
+    next: &NextOutputs,
+    tx: &Transaction,
+    input_index: usize,
+) -> Result<(), ManagerError> {
+    let expected = match next {
+        NextOutputs::Template(template) => template.ctv_hash(),
+        NextOutputs::TemplateHash(hash) => *hash,
+        _ => return Ok(()),
+    };
+    if crate::ctv::compute_ctv_hash_for_tx(tx, input_index as u32) != expected {
+        return Err(ManagerError::CtvTemplateMismatch { input_index });
+    }
+    Ok(())
 }
 
 /// Validate a clause's witness against every declared argument specification,
@@ -2044,8 +2078,12 @@ impl SpendBuilder {
         self
     }
 
-    /// Provide the transaction outputs explicitly (e.g. a CTV template), instead of
-    /// deriving them from the clause's outputs.
+    /// Supply outputs for a clause with no declared output constraints or a
+    /// [`NextOutputs::TemplateHash`] commitment. Single-input spends only.
+    ///
+    /// A hash commitment validates these outputs and the final sequence before
+    /// signing. This cannot override declared covenant outputs or a
+    /// full [`NextOutputs::Template`].
     pub fn outputs(mut self, outputs: Vec<TxOut>) -> Self {
         self.explicit_outputs = Some(outputs);
         self
@@ -2085,7 +2123,8 @@ impl SpendBuilder {
         Ok(outputs.pop().expect("length checked"))
     }
 
-    /// Like [`exec`](Self::exec) but asserts the clause is terminal (no children).
+    /// Like [`exec`](Self::exec) but asserts no tracked children are produced.
+    /// Output constraints (including CTV commitments) are still checked.
     pub fn exec_none(self, manager: &mut ContractManager) -> Result<(), ManagerError> {
         let outputs = self.exec_with_child_count(manager, 0)?;
         if !outputs.is_empty() {
@@ -2179,6 +2218,13 @@ mod tests {
     fn signed_spend_fixture(
         child: bool,
     ) -> (InstanceHandle, SpendBuilder, Rc<std::cell::Cell<usize>>) {
+        signed_spend_with_constraint(child, None)
+    }
+
+    fn signed_spend_with_constraint(
+        child: bool,
+        constraint: Option<NextOutputs>,
+    ) -> (InstanceHandle, SpendBuilder, Rc<std::cell::Cell<usize>>) {
         let calls = Rc::new(std::cell::Cell::new(0));
         let signer = CountingSigner {
             calls: calls.clone(),
@@ -2193,6 +2239,7 @@ mod tests {
         } else {
             vec![]
         };
+        let next = constraint.unwrap_or(NextOutputs::Contracts(next));
         let clause = StandardClause::<(), (), RawArgs>::new(
             "spend".into(),
             bitcoin::script::Builder::new()
@@ -2203,9 +2250,7 @@ mod tests {
                 name: "sig".into(),
                 arg_type: Arc::new(crate::argtypes::SignerType::new(pk.serialize())),
             }],
-            Some(Arc::new(move |_, _, _| {
-                Ok(NextOutputs::Contracts(next.clone()))
-            })),
+            Some(Arc::new(move |_, _, _| Ok(next.clone()))),
         );
         let c = Arc::new(
             StandardP2TR::new(
@@ -2247,6 +2292,40 @@ mod tests {
             })
         ));
         assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn template_hash_is_checked_before_signing_and_executes_without_children() {
+        let (_, builder, _) = signed_spend_fixture(false);
+        let hash = crate::ctv::compute_ctv_hash(
+            builder.explicit_outputs.as_ref().unwrap(),
+            Sequence::ZERO,
+        );
+        let (_, invalid, calls) =
+            signed_spend_with_constraint(false, Some(NextOutputs::TemplateHash(hash)));
+        let err = invalid
+            .sequence(1)
+            .exec_none(&mut offline_manager())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ManagerError::CtvTemplateMismatch { input_index: 0 }
+        ));
+        assert_eq!(calls.get(), 0);
+
+        let (h, valid, calls) =
+            signed_spend_with_constraint(false, Some(NextOutputs::TemplateHash(hash)));
+        let (rpc, server) = broadcast_rpc();
+        let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+        valid.exec_none(&mut manager).unwrap();
+        let tx = server.join().unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(h.status(), InstanceStatus::Spent);
+        assert!(h.outputs().is_empty());
+        assert_eq!(
+            h.spending_args().unwrap()[0],
+            tx.input[0].witness.to_vec()[0]
+        );
     }
 
     #[test]
@@ -2770,6 +2849,30 @@ mod tests {
 
     // ------------------------------------------------------------------
     // CTV templates and explicit outputs
+
+    #[test]
+    fn empty_outputs_are_rejected_even_for_childless_spends() {
+        let template = CtvTemplate::new(vec![], Sequence::ZERO);
+        for next in [
+            NextOutputs::Contracts(vec![]),
+            NextOutputs::Template(template.clone()),
+            NextOutputs::TemplateHash(template.ctv_hash()),
+        ] {
+            let explicit = !matches!(next, NextOutputs::Template(_));
+            let c = test_contract(1, Some(Arc::new(move |_, _, _| Ok(next.clone()))));
+            let h = fund_fake(c, None, sat(10_000), 1);
+            let builder = spend(&h);
+            let builder = if explicit {
+                builder.outputs(vec![])
+            } else {
+                builder
+            };
+            assert!(matches!(
+                builder.build_tx(&offline_manager()),
+                Err(ManagerError::NoOutputs)
+            ));
+        }
+    }
     // ------------------------------------------------------------------
 
     fn template_to(dest: &Arc<dyn ErasedContract>, amount: Amount, sequence: u32) -> CtvTemplate {
@@ -2897,12 +3000,20 @@ mod tests {
         let c = contract_with_template(1, template_to(&dest, sat(50_000), 5));
         let h = fund_fake(c, None, sat(50_000), 1);
         let mut manager = offline_manager();
-        let mut tx = spend(&h).build_tx(&manager).unwrap();
-        tx.output[0].value = sat(49_999);
-
-        let err = manager.observe_spend(&h, &tx).unwrap_err();
-        assert!(matches!(err, ManagerError::UnrecognizedSpend(_)));
-        assert_eq!(h.status(), InstanceStatus::Funded);
+        let tx = spend(&h).build_tx(&manager).unwrap();
+        let mut wrong_amount = tx.clone();
+        wrong_amount.output[0].value = sat(49_999);
+        let mut wrong_script_sig = tx.clone();
+        wrong_script_sig.input[0].script_sig = ScriptBuf::from_bytes(vec![0x51]);
+        for invalid in [wrong_amount, wrong_script_sig] {
+            let err = manager.observe_spend(&h, &invalid).unwrap_err();
+            assert!(matches!(
+                err,
+                ManagerError::CtvTemplateMismatch { input_index: 0 }
+            ));
+            assert_eq!(h.status(), InstanceStatus::Funded);
+        }
+        assert!(manager.observe_spend(&h, &tx).unwrap().is_empty());
     }
 
     #[test]

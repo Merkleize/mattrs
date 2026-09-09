@@ -909,8 +909,11 @@ impl ClauseOutput {
         ClauseOutputTo(OutputIndex::Same)
     }
 
-    /// Create a terminal output set (no next contract).
-    /// Useful for recovery or withdrawal clauses that don't constrain the output.
+    /// Declare no output constraints in the host-side model (and no children).
+    ///
+    /// This does not mean the script is unconstrained. For a childless CTV
+    /// withdrawal, use [`NextOutputs::Template`] or [`NextOutputs::TemplateHash`]
+    /// so the manager can validate its transaction too.
     pub fn terminal() -> Vec<ClauseOutput> {
         Vec::new()
     }
@@ -1012,15 +1015,25 @@ impl CtvTemplate {
 
 /// What a clause produces when spent.
 ///
-/// Either a set of covenant ([`ClauseOutput`]) outputs whose amounts are derived
-/// from the input, or a fixed CTV [`CtvTemplate`]. A clause with no next-outputs
-/// function is terminal and yields `Contracts(vec![])`.
+/// Output constraints and child tracking are distinct: a CTV spend has no
+/// tracked children but still constrains its transaction. A clause with no
+/// next-outputs function yields `Contracts(vec![])`, which declares no
+/// host-side output checks; it does not imply its script is unconstrained.
 #[derive(Debug, Clone)]
 pub enum NextOutputs {
     /// `CHECKCONTRACTVERIFY` outputs — (possibly stateful) contracts, amounts derived.
     Contracts(Vec<ClauseOutput>),
     /// A fixed `CHECKTEMPLATEVERIFY` template — terminal (no child instances).
     Template(CtvTemplate),
+    /// A CTV commitment whose outputs are supplied at spending time, e.g. a
+    /// template hash stored in contract state. Creates no child instances.
+    ///
+    /// The builder requires explicit `.outputs(...)` and supports single-input
+    /// spends (version 2, locktime 0). The final transaction must match this
+    /// BIP-119 hash before signing. Observation checks the actual transaction's
+    /// hash, including its input index. The script must enforce the same hash;
+    /// this metadata alone adds no on-chain constraint.
+    TemplateHash([u8; 32]),
     /// Contribute this input's whole amount to the transaction output at
     /// `index`, whose contract and state must be defined by *another input's*
     /// clause in the same batch spend — the "bond joins the pot" pattern: the
@@ -1469,7 +1482,8 @@ where
     A: ClauseArgs + 'static,
 {
     /// Build a clause from its name, tapscript, witness-layout specs, and the
-    /// optional function computing its next outputs (`None` = terminal clause).
+    /// optional function computing its output constraints (`None` declares no
+    /// host-side output checks and no children).
     /// `arg_specs` must describe exactly the witness layout `A` encodes to.
     pub fn new(
         name: String,
@@ -1499,7 +1513,8 @@ where
     }
 
     /// Compute next outputs from typed parameters, arguments and state. A clause
-    /// without a next-outputs function is terminal and yields no outputs.
+    /// without a next-outputs function declares no host-side output constraints
+    /// and no children; it still needs transaction outputs when spent.
     pub fn next_outputs(
         &self,
         params: &P,

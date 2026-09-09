@@ -232,6 +232,13 @@ contract! {
             }
             timelock |p| p.spend_delay;
             script Unvaulting::withdraw_script;
+            next(_p, a, s) {
+                let s = s.ok_or(mattrs::contracts::ContractError::MissingState)?;
+                if a.ctv_hash != s.ctv_hash {
+                    return Err(ClauseError::Other("withdrawal hash does not match committed state".into()));
+                }
+                Ok(mattrs::contracts::NextOutputs::TemplateHash(s.ctv_hash))
+            }
         }
 
         // witness: <out_i> — terminal (spends to recover_pk)

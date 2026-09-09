@@ -141,6 +141,29 @@ block delay; `older(u32)` remains the low-level helper for raw sequence operands
 for signatures. A successful execution signs once and records the actual
 broadcast witness, including filled signature arguments.
 
+### Childless does not mean unconstrained
+
+`exec_none` asserts that a spend creates no *tracked contract instances*, not
+that its transaction outputs are unrestricted. Declare CTV constraints in `next`
+even for a terminal withdrawal:
+
+- `NextOutputs::Template(CtvTemplate)` supplies the exact outputs and sequence.
+- `NextOutputs::TemplateHash([u8; 32])` supplies only the commitment. The caller
+  provides `.outputs(...)` and, if needed, `.sequence(...)`; the manager checks
+  the resulting transaction against the hash before signing.
+
+Both forms create no children and use the same commitment check when observing
+a spend. The vault's `Unvaulting::withdraw` demonstrates a hash committed in
+state. A wrong payment, sequence, or revealed state hash now fails locally.
+Construction supports single-input CTV transactions with version 2 and locktime
+0; `compute_ctv_hash_for_tx` also hashes general transactions for observation.
+
+Omitting `next` (or returning `ClauseOutput::terminal()`) declares **no host-side
+output checks**. It does not make a script unconstrained. Output metadata does
+not generate script checks, and observation is not full consensus/script
+validation. The vault's recovery destination checks still exist only in its
+script; those terminal CCV payments are not yet represented in the host model.
+
 ## Fraud proofs: `mattrs::fraud`
 
 The generic bisection fraud-proof protocol (pymatt's `hub/fraud.py`) is a library
