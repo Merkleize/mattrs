@@ -51,7 +51,6 @@ use bitcoin::{Address, Amount, Sequence, TxOut, XOnlyPublicKey};
 use mattrs::contracts::InstanceStatus;
 use mattrs::ctv::create_ctv_template;
 use mattrs::manager::{ContractManager, InstanceHandle, regtest_rpc_client};
-use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
 use contracts::{UnvaultingHandle, UnvaultingState, Vault, VaultHandle, VaultParams};
@@ -258,27 +257,16 @@ impl Repl {
             return Err(format!("instance {idx} is not funded").into());
         }
         let value = handle.prevout().expect("funded").value;
-        // The recover clauses' CCV (empty data, empty taptree) constrains output 0
-        // to pay the recovery key as the witness program, with no further tweak.
-        let recover_out = vec![TxOut {
-            script_pubkey: opaque_p2tr(self.params.recover_pk),
-            value,
-        }];
+        // Recovery metadata derives the destination and preserves the full value.
 
         match self.kind(&handle) {
             Some(Kind::Vault) => {
                 let vault: VaultHandle = handle.try_into().expect("kind checked");
-                vault
-                    .recover(0)
-                    .outputs(recover_out)
-                    .exec_none(&mut self.manager)?
+                vault.recover(0).exec_none(&mut self.manager)?
             }
             Some(Kind::Unvaulting) => {
                 let unvaulting: UnvaultingHandle = handle.try_into().expect("kind checked");
-                unvaulting
-                    .recover(0)
-                    .outputs(recover_out)
-                    .exec_none(&mut self.manager)?
+                unvaulting.recover(0).exec_none(&mut self.manager)?
             }
             None => return Err(format!("instance {idx} is not recoverable").into()),
         }

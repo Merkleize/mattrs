@@ -19,7 +19,6 @@ use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
 use mattrs::manager::{InstanceHandle, ManagerError};
 use mattrs::protocol::{Action, ProtocolError, Role, StepCtx};
-use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
 use super::vault::{
@@ -137,14 +136,9 @@ pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
             if d.authorized.contains(&state.ctv_hash) {
                 return Ok(Action::Wait);
             }
-            let p = h.params();
             let amount = h.handle().prevout().ok_or(ManagerError::NotFunded)?.value;
-            let sweep = TxOut {
-                script_pubkey: opaque_p2tr(p.recover_pk),
-                value: amount,
-            };
             Ok(Action::SendFinal(
-                h.recover(0).outputs(vec![sweep]),
+                h.recover(0),
                 VaultOutcome::Recovered { amount },
             ))
         })

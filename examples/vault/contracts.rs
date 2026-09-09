@@ -20,7 +20,7 @@
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{ClauseError, ClauseOutput};
+use mattrs::contracts::{ClauseError, ClauseOutput, PaymentOutput};
 use mattrs::{
     ContractParams, ContractState, Signature, contract, contracts::CCV_FLAG_CHECK_INPUT,
     contracts::CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, internal_key_or_nums, optional_key_script,
@@ -31,6 +31,16 @@ define_pushable!();
 fn output_index(value: i64, name: &str) -> Result<u32, ClauseError> {
     u32::try_from(value)
         .map_err(|_| ClauseError::Other(format!("{name} must be between 0 and u32::MAX")))
+}
+
+fn recovery_output(index: i64, key: XOnlyPublicKey) -> Result<PaymentOutput, ClauseError> {
+    // CCV with empty data and taptree pays the output key without a tweak.
+    let script = mattrs::script_helpers::opaque_p2tr(key);
+    Ok(if index == -1 {
+        PaymentOutput::at_same_index(script)
+    } else {
+        PaymentOutput::at(output_index(index, "out_i")?, script)
+    })
 }
 
 // ============================================================================
@@ -109,6 +119,7 @@ contract! {
                 out_i: i64,
             }
             script Vault::recover_script;
+            next(p, a) { recovery_output(a.out_i, p.recover_pk) }
         }
 
         tree [trigger, [trigger_and_revault, recover]];
@@ -247,6 +258,7 @@ contract! {
                 out_i: i64,
             }
             script Unvaulting::recover_script;
+            next(p, a) { recovery_output(a.out_i, p.recover_pk) }
         }
 
         tree [withdraw, recover];

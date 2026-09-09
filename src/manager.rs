@@ -30,6 +30,7 @@ use crate::{
     contracts::{
         ClauseError, ClauseOutput, ClauseOutputAmountBehaviour, ContractError, ContractInstance,
         ContractState, ErasedClause, ErasedContract, ErasedState, InstanceStatus, NextOutputs,
+        OutputIndex,
     },
     signer::Signer,
 };
@@ -82,6 +83,52 @@ impl ContractOutputIdentity {
             params: instance.contract().params_bytes().to_vec(),
             state: instance.committed_state_bytes(),
         }
+    }
+}
+
+/// Preserve tracking identity separately from the script being paid.
+#[derive(PartialEq, Eq)]
+enum OutputIdentity {
+    Contract(ContractOutputIdentity),
+    Payment(bitcoin::ScriptBuf),
+}
+
+/// Shared representation for amount accounting; only contract outputs are
+/// materialized as children. Keep payments out of the instance registry.
+struct ResolvedOutput {
+    index: OutputIndex,
+    script_pubkey: bitcoin::ScriptBuf,
+    amount: ClauseOutputAmountBehaviour,
+    identity: OutputIdentity,
+}
+
+fn resolve_outputs(next: &NextOutputs) -> Result<Vec<ResolvedOutput>, ManagerError> {
+    match next {
+        NextOutputs::Contracts(outputs) => outputs
+            .iter()
+            .map(|output| {
+                Ok(ResolvedOutput {
+                    index: output.index,
+                    script_pubkey: output
+                        .next_contract
+                        .script_pubkey(output.committed_state_bytes().as_deref())?,
+                    amount: output.next_amount,
+                    identity: OutputIdentity::Contract(ContractOutputIdentity::from_clause_output(
+                        output,
+                    )),
+                })
+            })
+            .collect(),
+        NextOutputs::Payments(outputs) => Ok(outputs
+            .iter()
+            .map(|output| ResolvedOutput {
+                index: output.index,
+                script_pubkey: output.script_pubkey.clone(),
+                amount: output.amount,
+                identity: OutputIdentity::Payment(output.script_pubkey.clone()),
+            })
+            .collect()),
+        _ => Ok(Vec::new()),
     }
 }
 
@@ -145,8 +192,8 @@ pub enum ManagerError {
     UnusedOutputAmount {
         index: u32,
     },
-    /// Contributions merged at one output index describe different nominal
-    /// contracts, parameters, or committed states.
+    /// Contributions merged at one output index disagree on their destination
+    /// or tracking identity (contract type/params/state, or untracked payment).
     ConflictingOutputContract {
         index: u32,
     },
@@ -156,6 +203,10 @@ pub enum ManagerError {
     /// A clause's derived child script does not match the corresponding output
     /// in the observed transaction.
     WrongContractOutput(OutPoint),
+    /// An untracked payment output is missing or has the wrong script.
+    PaymentOutputMismatch {
+        index: u32,
+    },
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
@@ -249,7 +300,7 @@ impl std::fmt::Display for ManagerError {
             ),
             ManagerError::ConflictingOutputContract { index } => write!(
                 f,
-                "Output index {} merges different contracts, parameters, or states",
+                "Output index {} merges incompatible destinations or tracking identities",
                 index
             ),
             ManagerError::MissingContractOutput(outpoint) => write!(
@@ -261,6 +312,10 @@ impl std::fmt::Display for ManagerError {
                 f,
                 "The observed output at {} does not pay the clause's child contract",
                 outpoint
+            ),
+            ManagerError::PaymentOutputMismatch { index } => write!(
+                f,
+                "Payment output {index} is missing or has the wrong script"
             ),
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
@@ -329,7 +384,9 @@ impl PreparedBatch {
                 NextOutputs::Join { index } => {
                     indices.insert(*index);
                 }
-                NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => {}
+                NextOutputs::Payments(_)
+                | NextOutputs::Template(_)
+                | NextOutputs::TemplateHash(_) => {}
             }
         }
         indices.len()
@@ -671,6 +728,14 @@ impl ContractManager {
         // may lengthen a CSV delay only if any exact CTV commitment still matches.
         for (vin, builder) in builders.iter().enumerate() {
             validate_ctv_commitment(&nexts[vin], &tx, vin)?;
+            if matches!(nexts[vin], NextOutputs::Payments(_)) {
+                validate_output_constraints(
+                    prevouts[vin].value,
+                    &resolve_outputs(&nexts[vin])?,
+                    &tx,
+                    vin,
+                )?;
+            }
             let inst = builder.instance.borrow();
             if let Some(blocks) = inst
                 .contract()
@@ -722,8 +787,8 @@ impl ContractManager {
     /// checks: each `PreserveOutput` moves its input's whole remaining amount
     /// (net of that input's earlier `DeductOutput`s) into its output, and a
     /// `DeductOutput` sets its output to the caller-supplied amount. An output
-    /// index must not mix the two semantics. Note that an `IgnoreOutput` index
-    /// no other input funds ends up as a zero-value output.
+    /// index must not mix the two semantics. `IgnoreOutput` also requires an
+    /// explicit amount, but imposes no input/output value relationship.
     fn derive_tx_outputs(
         builders: &[SpendBuilder],
         nexts: &[NextOutputs],
@@ -759,10 +824,18 @@ impl ContractManager {
             }
             if !matches!(nexts.first(), Some(NextOutputs::Contracts(outputs)) if outputs.is_empty())
                 && !committed_hash
+                && !matches!(nexts.first(), Some(NextOutputs::Payments(_)))
             {
                 return Err(ManagerError::TransactionBuildError(
-                    "explicit outputs require a clause with no declared output constraints or a CTV template hash"
+                    "explicit outputs require an unconstrained clause, payments, or a CTV template hash"
                         .to_string(),
+                ));
+            }
+            if matches!(nexts.first(), Some(NextOutputs::Payments(_)))
+                && !builders[0].output_amounts.is_empty()
+            {
+                return Err(ManagerError::TransactionBuildError(
+                    "explicit payment outputs already supply amounts; do not also set output_amount".into(),
                 ));
             }
             return Ok((explicit.clone(), None));
@@ -818,23 +891,16 @@ impl ContractManager {
             Ignore,
         }
         let mut semantics: BTreeMap<u32, Semantics> = BTreeMap::new();
-        let mut identities: BTreeMap<u32, ContractOutputIdentity> = BTreeMap::new();
+        let mut identities: BTreeMap<u32, OutputIdentity> = BTreeMap::new();
         let mut outputs_map: BTreeMap<u32, TxOut> = BTreeMap::new();
         for (input_index, next) in nexts.iter().enumerate() {
-            let clause_outputs = match next {
-                NextOutputs::Contracts(clause_outputs) => clause_outputs,
-                // Joins contribute to outputs other inputs define; second pass.
-                NextOutputs::Join { .. } => continue,
-                NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => {
-                    unreachable!("templates are handled above")
-                }
-            };
+            let clause_outputs = resolve_outputs(next)?;
 
             let mut remaining = prevouts[input_index].value;
             let mut preserve_used = false;
             for clause_output in clause_outputs {
                 let idx = clause_output.index.resolve(input_index);
-                let identity = ContractOutputIdentity::from_clause_output(clause_output);
+                let identity = clause_output.identity;
                 if identities
                     .get(&idx)
                     .is_some_and(|previous| previous != &identity)
@@ -842,9 +908,7 @@ impl ContractManager {
                     return Err(ManagerError::ConflictingOutputContract { index: idx });
                 }
                 identities.entry(idx).or_insert(identity);
-                let script_pubkey = clause_output
-                    .next_contract
-                    .script_pubkey(clause_output.committed_state_bytes().as_deref())?;
+                let script_pubkey = clause_output.script_pubkey;
                 let entry = outputs_map.entry(idx).or_insert_with(|| TxOut {
                     script_pubkey: script_pubkey.clone(),
                     value: Amount::ZERO,
@@ -855,7 +919,7 @@ impl ContractManager {
                         idx
                     )));
                 }
-                match clause_output.next_amount {
+                match clause_output.amount {
                     ClauseOutputAmountBehaviour::PreserveOutput => {
                         if preserve_used {
                             return Err(ManagerError::TransactionBuildError(
@@ -911,6 +975,9 @@ impl ContractManager {
             let NextOutputs::Join { index } = next else {
                 continue;
             };
+            if !matches!(identities.get(index), Some(OutputIdentity::Contract(_))) {
+                return Err(ManagerError::JoinWithoutTarget { index: *index });
+            }
             let entry = outputs_map
                 .get_mut(index)
                 .ok_or(ManagerError::JoinWithoutTarget { index: *index })?;
@@ -1300,9 +1367,12 @@ impl ContractManager {
             (clause.name().to_string(), next)
         };
 
-        if let NextOutputs::Contracts(outputs) = &next {
-            validate_observed_contract_amounts(handle, outputs, spending_tx, vin)?;
-        }
+        validate_output_constraints(
+            handle.prevout().ok_or(ManagerError::NotFunded)?.value,
+            &resolve_outputs(&next)?,
+            spending_tx,
+            vin,
+        )?;
         validate_ctv_commitment(&next, spending_tx, vin)?;
 
         let children = match &next {
@@ -1313,7 +1383,9 @@ impl ContractManager {
             NextOutputs::Contracts(outputs) => {
                 self.materialize_outputs(&handle.instance, outputs, spending_tx, vin)?
             }
-            NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => Vec::new(),
+            NextOutputs::Payments(_) | NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => {
+                Vec::new()
+            }
             // A joining input contributes to a child another input's clause
             // defines: link it when that input's observation already
             // materialized the child; otherwise return nothing (a later
@@ -1642,30 +1714,41 @@ fn validate_clause_witness(
     Ok(())
 }
 
-/// Mirror the per-input CCV amount rules when following an offline/remote
-/// transaction. Cross-input preserve contributions may make the actual output
-/// larger, so preserve checks a lower bound; deduct uses the actual output
-/// amount exactly as consensus does.
-fn validate_observed_contract_amounts(
-    handle: &InstanceHandle,
-    outputs: &[ClauseOutput],
+/// Check scripts and per-input CCV amounts for resolved outputs. Cross-input
+/// preserve contributions may make the actual output larger, so preserve checks
+/// a lower bound; deduct uses the actual output amount. This is not a
+/// transaction-wide accounting check across other inputs.
+fn validate_output_constraints(
+    input_value: Amount,
+    outputs: &[ResolvedOutput],
     spending_tx: &Transaction,
     vin: usize,
 ) -> Result<(), ManagerError> {
-    let mut remaining = handle.prevout().ok_or(ManagerError::NotFunded)?.value;
+    let mut remaining = input_value;
     let mut preserve_used = false;
     let mut seen: BTreeMap<u32, ClauseOutputAmountBehaviour> = BTreeMap::new();
     for output in outputs {
         let index = output.index.resolve(vin);
-        let actual =
-            spending_tx
-                .output
-                .get(index as usize)
-                .ok_or(ManagerError::MissingContractOutput(OutPoint {
-                    txid: spending_tx.compute_txid(),
-                    vout: index,
-                }))?;
-        match output.next_amount {
+        let payment = matches!(output.identity, OutputIdentity::Payment(_));
+        let outpoint = OutPoint {
+            txid: spending_tx.compute_txid(),
+            vout: index,
+        };
+        let actual = spending_tx.output.get(index as usize).ok_or_else(|| {
+            if payment {
+                ManagerError::PaymentOutputMismatch { index }
+            } else {
+                ManagerError::MissingContractOutput(outpoint)
+            }
+        })?;
+        if actual.script_pubkey != output.script_pubkey {
+            return Err(if payment {
+                ManagerError::PaymentOutputMismatch { index }
+            } else {
+                ManagerError::WrongContractOutput(outpoint)
+            });
+        }
+        match output.amount {
             ClauseOutputAmountBehaviour::PreserveOutput => {
                 if preserve_used
                     || seen
@@ -2078,11 +2161,14 @@ impl SpendBuilder {
         self
     }
 
-    /// Supply outputs for a clause with no declared output constraints or a
-    /// [`NextOutputs::TemplateHash`] commitment. Single-input spends only.
+    /// Supply outputs for a clause with no declared output constraints,
+    /// [`NextOutputs::Payments`], or a [`NextOutputs::TemplateHash`] commitment.
+    /// Single-input spends only. Payment destinations and amount relationships
+    /// are validated; amounts already supplied here cannot also be set with
+    /// [`output_amount`](Self::output_amount).
     ///
     /// A hash commitment validates these outputs and the final sequence before
-    /// signing. This cannot override declared covenant outputs or a
+    /// signing. This cannot override tracked contract outputs or a
     /// full [`NextOutputs::Template`].
     pub fn outputs(mut self, outputs: Vec<TxOut>) -> Self {
         self.explicit_outputs = Some(outputs);
@@ -2349,6 +2435,85 @@ mod tests {
             offline_manager().observe_spend(&observer, &tx).unwrap();
             assert_eq!(observer.spending_args(), h.spending_args());
         }
+    }
+
+    #[test]
+    fn payment_checks_run_before_signing_and_execution_tracks_no_children() {
+        use crate::contracts::PaymentOutput;
+        let (_, fixture, _) = signed_spend_fixture(false);
+        let script = fixture.explicit_outputs.unwrap()[0].script_pubkey.clone();
+        let next = NextOutputs::from(PaymentOutput::at(0, script.clone()));
+        let (_, invalid, calls) = signed_spend_with_constraint(false, Some(next.clone()));
+        // The fixture supplies only 9,000 of the required 10,000 sats.
+        assert!(invalid.exec_none(&mut offline_manager()).is_err());
+        assert_eq!(calls.get(), 0);
+
+        let (h, valid, calls) = signed_spend_with_constraint(false, Some(next.clone()));
+        let (rpc, server) = broadcast_rpc();
+        let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+        valid
+            .outputs(vec![TxOut {
+                value: sat(10_000),
+                script_pubkey: script,
+            }])
+            .exec_none(&mut manager)
+            .unwrap();
+        let tx = server.join().unwrap();
+        assert_eq!(calls.get(), 1);
+        assert!(h.outputs().is_empty());
+        let (observer, _, _) = signed_spend_with_constraint(false, Some(next));
+        assert!(
+            offline_manager()
+                .observe_spend(&observer, &tx)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(observer.spending_args(), h.spending_args());
+    }
+
+    #[test]
+    fn payments_cannot_conflict_with_contract_tracking_or_join_targets() {
+        use crate::contracts::PaymentOutput;
+        let dest = test_contract(90, None);
+        let payment = PaymentOutput::at(0, spk_of(&dest));
+        let paid = test_contract(1, Some(Arc::new(move |_, _, _| Ok(payment.clone().into()))));
+        let h1 = fund_fake(paid, None, sat(10_000), 1);
+        let tracked = contract_yielding(2, vec![ClauseOutput::at(0).to(dest).build()]);
+        let h2 = fund_fake(tracked, None, sat(10_000), 2);
+        assert!(matches!(
+            offline_manager().build_batch_tx(&[spend(&h1), spend(&h2)]),
+            Err(ManagerError::ConflictingOutputContract { index: 0 })
+        ));
+        let joining = test_contract(3, Some(Arc::new(|_, _, _| Ok(NextOutputs::join(0)))));
+        let h3 = fund_fake(joining, None, sat(10_000), 3);
+        assert!(matches!(
+            offline_manager().build_batch_tx(&[spend(&h1), spend(&h3)]),
+            Err(ManagerError::JoinWithoutTarget { index: 0 })
+        ));
+    }
+
+    #[test]
+    fn a_payment_can_share_a_transaction_but_not_tracking_with_a_contract() {
+        use crate::contracts::PaymentOutput;
+        let dest = test_contract(90, None);
+        let payment = PaymentOutput::at(1, spk_of(&dest));
+        let paid = test_contract(1, Some(Arc::new(move |_, _, _| Ok(payment.clone().into()))));
+        let h1 = fund_fake(paid, None, sat(10_000), 1);
+        let tracked = contract_yielding(2, vec![ClauseOutput::at(0).to(dest).build()]);
+        let h2 = fund_fake(tracked, None, sat(20_000), 2);
+        let mut manager = offline_manager();
+        let tx = manager.build_batch_tx(&[spend(&h1), spend(&h2)]).unwrap();
+        assert_eq!(
+            tx.output
+                .iter()
+                .map(|output| output.value)
+                .collect::<Vec<_>>(),
+            vec![sat(20_000), sat(10_000)]
+        );
+        assert!(manager.observe_spend(&h1, &tx).unwrap().is_empty());
+        assert_eq!(manager.observe_spend(&h2, &tx).unwrap().len(), 1);
+        assert!(h1.outputs().is_empty());
+        assert_eq!(h2.outputs()[0].outpoint().unwrap().vout, 0);
     }
 
     fn sat(n: u64) -> Amount {

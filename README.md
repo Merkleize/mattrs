@@ -158,11 +158,31 @@ state. A wrong payment, sequence, or revealed state hash now fails locally.
 Construction supports single-input CTV transactions with version 2 and locktime
 0; `compute_ctv_hash_for_tx` also hashes general transactions for observation.
 
+For a childless CCV payment, return `PaymentOutput::at(index, script_pubkey)`
+from `next`. It preserves the input's residual amount by default; use
+`NextOutputs::Payments(vec![...])` for multiple payments. Deduct and ignore modes
+use the same accounting rules as tracked contract outputs, including requiring
+`.output_amount(index, amount)` when building them. The metadata must match the
+clause's script checks.
+
+The vault's two recovery clauses now declare these payments, so
+`vault.recover(0).exec_none(&mut manager)?` derives the recovery output without
+the caller repeating its script or amount. Explicit `.outputs(...)` still works
+for single-input payment spends, but the supplied outputs must satisfy the
+declared destinations and amount constraints. Recovery calls with index `-1`
+use the spending input's index, matching CCV's same-index convention.
+
+Payment-only spends can aggregate into one output or pay distinct indices in a
+batch. They can also share a transaction with tracked contract outputs at other
+indices. The builder rejects mixing tracked and untracked destinations at the
+same index, and `Join` still requires a tracked child target.
+
 Omitting `next` (or returning `ClauseOutput::terminal()`) declares **no host-side
 output checks**. It does not make a script unconstrained. Output metadata does
 not generate script checks, and observation is not full consensus/script
-validation. The vault's recovery destination checks still exist only in its
-script; those terminal CCV payments are not yet represented in the host model.
+validation. In particular, observation checks amount constraints per input;
+it does not verify transaction-wide CCV accounting across co-inputs. Use a
+validating node to establish consensus validity of external transactions.
 
 ## Fraud proofs: `mattrs::fraud`
 

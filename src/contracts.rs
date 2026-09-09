@@ -912,8 +912,9 @@ impl ClauseOutput {
     /// Declare no output constraints in the host-side model (and no children).
     ///
     /// This does not mean the script is unconstrained. For a childless CTV
-    /// withdrawal, use [`NextOutputs::Template`] or [`NextOutputs::TemplateHash`]
-    /// so the manager can validate its transaction too.
+    /// withdrawal, use [`NextOutputs::Template`] or [`NextOutputs::TemplateHash`].
+    /// For a script-constrained payment, use [`PaymentOutput`]. These let the
+    /// manager validate the transaction even though no children are tracked.
     pub fn terminal() -> Vec<ClauseOutput> {
         Vec::new()
     }
@@ -986,6 +987,60 @@ impl ClauseOutputBuilder {
     }
 }
 
+/// A script-constrained payment that creates no tracked contract instance.
+///
+/// Its amount follows the same CCV rules as [`ClauseOutput`]. The default
+/// preserves the input's residual value; deduct and ignore require an explicit
+/// amount when building a transaction. Metadata does not add script checks:
+/// the clause's script must enforce the declared destination and amount mode.
+///
+/// ```
+/// use mattrs::contracts::{NextOutputs, PaymentOutput};
+/// let payment = PaymentOutput::at(0, mattrs::script_helpers::opaque_p2tr(mattrs::nums_key()));
+/// let next: NextOutputs = payment.into();
+/// ```
+#[derive(Debug, Clone)]
+pub struct PaymentOutput {
+    /// Which transaction output is constrained.
+    pub index: OutputIndex,
+    /// The exact destination script, including any required key tweaks.
+    pub script_pubkey: ScriptBuf,
+    /// How this output relates to the spending input's residual amount.
+    pub amount: ClauseOutputAmountBehaviour,
+}
+
+impl PaymentOutput {
+    /// Preserve the residual input value at this output index and script.
+    pub fn at(index: u32, script_pubkey: ScriptBuf) -> Self {
+        Self {
+            index: OutputIndex::Explicit(index),
+            script_pubkey,
+            amount: ClauseOutputAmountBehaviour::PreserveOutput,
+        }
+    }
+
+    /// Preserve the residual input value at the spending input's index.
+    pub fn at_same_index(script_pubkey: ScriptBuf) -> Self {
+        Self {
+            index: OutputIndex::Same,
+            script_pubkey,
+            amount: ClauseOutputAmountBehaviour::PreserveOutput,
+        }
+    }
+
+    /// Deduct this output's amount from the input's residual value.
+    pub fn deduct_amount(mut self) -> Self {
+        self.amount = ClauseOutputAmountBehaviour::DeductOutput;
+        self
+    }
+
+    /// Impose no amount constraint. This does not protect the input's value.
+    pub fn ignore_amount(mut self) -> Self {
+        self.amount = ClauseOutputAmountBehaviour::IgnoreOutput;
+        self
+    }
+}
+
 /// A CTV (`CHECKTEMPLATEVERIFY`) transaction template: the exact outputs and input
 /// sequence that a clause commits its spending transaction to.
 ///
@@ -1015,14 +1070,19 @@ impl CtvTemplate {
 
 /// What a clause produces when spent.
 ///
-/// Output constraints and child tracking are distinct: a CTV spend has no
-/// tracked children but still constrains its transaction. A clause with no
+/// Output constraints and child tracking are distinct: payments and CTV spends
+/// have no tracked children but still constrain their transactions. A clause with no
 /// next-outputs function yields `Contracts(vec![])`, which declares no
 /// host-side output checks; it does not imply its script is unconstrained.
 #[derive(Debug, Clone)]
 pub enum NextOutputs {
     /// `CHECKCONTRACTVERIFY` outputs — (possibly stateful) contracts, amounts derived.
     Contracts(Vec<ClauseOutput>),
+    /// Script-constrained payments with CCV amount semantics, but no children.
+    /// Payments can aggregate with other payments to the same script and index.
+    /// The builder rejects sharing an index with a tracked contract output or a
+    /// `Join`, because the output's tracking identity would be ambiguous.
+    Payments(Vec<PaymentOutput>),
     /// A fixed `CHECKTEMPLATEVERIFY` template — terminal (no child instances).
     Template(CtvTemplate),
     /// A CTV commitment whose outputs are supplied at spending time, e.g. a
@@ -1062,6 +1122,12 @@ impl From<Vec<ClauseOutput>> for NextOutputs {
 impl From<CtvTemplate> for NextOutputs {
     fn from(template: CtvTemplate) -> Self {
         NextOutputs::Template(template)
+    }
+}
+
+impl From<PaymentOutput> for NextOutputs {
+    fn from(output: PaymentOutput) -> Self {
+        Self::Payments(vec![output])
     }
 }
 
