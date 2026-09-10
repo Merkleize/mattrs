@@ -59,6 +59,7 @@ pub use mattrs_derive::contract;
 pub use contracts::Signature;
 
 pub mod argtypes;
+pub mod ccv;
 pub mod contracts;
 pub mod ctv;
 pub mod fraud;

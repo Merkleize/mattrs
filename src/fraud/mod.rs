@@ -49,6 +49,7 @@ pub mod roles;
 
 use std::sync::Arc;
 
+use crate::ccv::CcvIndex;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
@@ -297,7 +298,7 @@ impl Leaf {
             computer.encoder.clone(), // h_y
             reorder,
             merkle_root(3),
-            check_input_contract(-1, None),
+            check_input_contract(CcvIndex::CURRENT, None),
             script! { { pk } OP_CHECKSIG },
         ])
     }
@@ -542,11 +543,11 @@ impl Bisect1 {
     /// Script fragment handing a spend off into this bisection: consumes the
     /// five entry-state leaves from the stack (`h_start`, `h_end_alice`,
     /// `h_end_bob`, `trace_alice`, `trace_bob`, with `trace_bob` on top) and
-    /// verifies that output `index` (`-1` = same as the input) pays this
+    /// verifies that output `index` ([`CcvIndex::CURRENT`] = same as the input) pays this
     /// [`Bisect1`] committing to them. The `next`-side counterpart is
     /// [`entry_output`](Bisect1::entry_output); embedding contracts use the
     /// pair without knowing the bisection state's layout.
-    pub fn state_output_script(&self, index: i64) -> ScriptBuf {
+    pub fn state_output_script(&self, index: CcvIndex) -> ScriptBuf {
         concat(&[
             merkle_root(5),
             check_output_contract(self.taptree_root(), index, None),
@@ -584,14 +585,14 @@ impl Bisect1 {
             OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
             { dup(5) }
             { merkle_root(5) }
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
             OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
             // t_{i,j;a} = H(h_i || h_{j+1;a} || t_left_a || t_right_a)
             7 OP_PICK 7 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
             5 OP_PICK OP_EQUALVERIFY
             // output: the top 8 elements -> Bisect_2
             { merkle_root(8) }
-            { check_output_contract(bisect2_root, -1, None) }
+            { check_output_contract(bisect2_root, CcvIndex::CURRENT, None) }
             { alice_pk }
             OP_CHECKSIG
         }
@@ -797,7 +798,7 @@ impl Bisect2 {
             OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
             { dup(8) }
             { merkle_root(8) }
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
             OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
             // t_{i,j;b} = H(h_i || h_{j+1;b} || t_left_b || t_right_b)
             10 OP_PICK 9 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
@@ -806,7 +807,7 @@ impl Bisect2 {
             { mid_check }
             { picks }
             { encoder }
-            { check_output_contract(child_root, -1, None) }
+            { check_output_contract(child_root, CcvIndex::CURRENT, None) }
             { script_drop(11) }
             { bob_pk }
             OP_CHECKSIG

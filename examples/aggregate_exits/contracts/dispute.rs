@@ -25,10 +25,7 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::ContractParams;
 use mattrs::contract;
-use mattrs::contracts::{
-    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
-    WitnessReader,
-};
+use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{MerkleTree, NIL, get_directions, is_power_of_2};
 use mattrs::script_utils::{bn2vch, commit_int};
@@ -38,7 +35,8 @@ use super::unwind::{Unwind, UnwindState};
 use super::{
     CARRY_ITEMS, ChallengeContext, ExitClaim, PoolParams, PoolTree, reveal_mids, spec, spec_num,
 };
-use mattrs::stack::{Source, StackScript};
+use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
+use mattrs::stack::StackScript;
 
 define_pushable!();
 
@@ -241,33 +239,33 @@ fn settlement_script(s: &mut StackScript, winner: DisputeWinner) {
         DisputeWinner::Challenger => "challenger_pk",
     };
     s.ccv(
-        Source::None,
-        0,
-        Source::Item(winner_item),
-        Source::None,
-        CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+        CcvData::Empty,
+        CcvIndex::at(0).expect("valid output index"),
+        CcvKey::Item(winner_item),
+        CcvTaptree::None,
+        CcvMode::DeductAmount,
     );
     s.ccv(
-        Source::None,
-        1,
-        Source::Const(mattrs::nums_key().serialize()),
-        Source::None,
-        CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+        CcvData::Empty,
+        CcvIndex::at(1).expect("valid output index"),
+        CcvKey::Const(mattrs::nums_key()),
+        CcvTaptree::None,
+        CcvMode::DeductAmount,
     );
     match winner {
         DisputeWinner::Ingrid => s.ccv(
-            Source::Item("resume"),
-            2,
-            Source::None,
-            Source::Item("pe_taptree"),
-            0,
+            CcvData::Item("resume"),
+            CcvIndex::at(2).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Item("pe_taptree"),
+            CcvMode::Preserve,
         ),
         DisputeWinner::Challenger => s.ccv(
-            Source::Item("r"),
-            2,
-            Source::None,
-            Source::Item("unwind_taptree"),
-            0,
+            CcvData::Item("r"),
+            CcvIndex::at(2).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Item("unwind_taptree"),
+            CcvMode::Preserve,
         ),
     }
 }
@@ -361,11 +359,11 @@ impl ExitBisect1 {
 
         s.merkle_of(&with_carry(&B1_ITEMS), "state");
         s.ccv(
-            Source::Item("state"),
-            -1,
-            Source::None,
-            Source::Current,
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::CheckInput,
         );
 
         // t[i,j] = H(h_i || h_{j+1} || t_left || t_right), against her
@@ -378,11 +376,11 @@ impl ExitBisect1 {
             .expect("ExitBisect2 contract definition is valid")
             .taptree_root();
         s.ccv(
-            Source::Item("b2_state"),
-            -1,
-            Source::None,
-            Source::Const(b2_root),
-            0,
+            CcvData::Item("b2_state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Const(b2_root),
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -431,11 +429,11 @@ impl ExitBisect1 {
         s.sha_cat(&CARRY_ITEMS, "carry");
         s.merkle_of(&with_carry(&B1_ITEMS), "state");
         s.ccv(
-            Source::Item("state"),
-            -1,
-            Source::None,
-            Source::Current,
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::CheckInput,
         );
         settlement_script(&mut s, DisputeWinner::Challenger);
         s.into_script()
@@ -543,11 +541,11 @@ impl ExitBisect2 {
 
         s.merkle_of(&with_carry(&B2_ITEMS), "state");
         s.ccv(
-            Source::Item("state"),
-            -1,
-            Source::None,
-            Source::Current,
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::CheckInput,
         );
 
         // The challenger's reveal, bound to *their* committed trace.
@@ -585,11 +583,11 @@ impl ExitBisect2 {
         };
         s.merkle_of(&child_leaves, "child_state");
         s.ccv(
-            Source::Item("child_state"),
-            -1,
-            Source::None,
-            Source::Const(Self::child_root(p, side)),
-            0,
+            CcvData::Item("child_state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Const(Self::child_root(p, side)),
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -701,11 +699,11 @@ impl ExitBisect2 {
         s.sha_cat(&CARRY_ITEMS, "carry");
         s.merkle_of(&with_carry(&B2_ITEMS), "state");
         s.ccv(
-            Source::Item("state"),
-            -1,
-            Source::None,
-            Source::Current,
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::CheckInput,
         );
         settlement_script(&mut s, DisputeWinner::Ingrid);
         s.into_script()
@@ -879,11 +877,11 @@ impl ExitLeaf {
         s.sha_cat(&CARRY_ITEMS, "carry");
         s.merkle_of(&["h_start", "h_end_i", "h_end_c", "carry"], "state");
         s.ccv(
-            Source::Item("state"),
-            -1,
-            Source::None,
-            Source::Current,
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::CheckInput,
         );
 
         // Prove step k's exit bit against the committed set.

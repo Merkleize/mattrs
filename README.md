@@ -183,6 +183,46 @@ not generate script checks, and observation is not full consensus/script
 validation. Use a validating node to establish consensus validity of external
 transactions.
 
+### Typed CCV script arguments
+
+Use `mattrs::ccv` with `StackScript::ccv` to spell out each operand's meaning:
+
+```rust
+use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
+use mattrs::stack::StackScript;
+
+let mut script = StackScript::with_witness(&["state"]);
+script.ccv(
+    CcvData::Item("state"),
+    CcvIndex::CURRENT,
+    CcvKey::Nums,
+    CcvTaptree::Current,
+    CcvMode::CheckInput,
+);
+let script = script.into_script();
+```
+
+`CcvIndex::at(n)?` validates an explicit index's Script-number range;
+`CcvIndex::try_from(n)?` also accepts the current-input sentinel `-1`.
+`CcvMode::{CheckInput, Preserve, IgnoreAmount, DeductAmount}` are alternatives,
+not bit flags. `CcvMode::try_from(n)?` rejects undefined modes, which would
+otherwise bypass input validation under
+[BIP-443](https://github.com/bitcoin/bips/blob/master/bip-0443.mediawiki).
+
+Migration from the old `Source` arguments: use `CcvData::Empty`, `CcvKey::Nums`,
+and `CcvTaptree::None` for their respective empty operands. The key sentinel is
+`CcvKey::CurrentInternalKey`: it reuses the current **internal** key, not the
+untweaked naked key. Constant keys use `XOnlyPublicKey`; constant data may be
+32 bytes (`Const`) or arbitrary pushed bytes (`Bytes`), passed without hashing.
+Named stack items still require script-side validation. These types do not
+generate or validate the clause's host-side `next` metadata.
+
+The shared `check_input_contract`, `check_output_contract`, and bisection
+`state_output_script` helpers now also take `CcvIndex`. For intentionally
+unchecked operands, use `StackScript::ccv_raw` with `RawCcvSource` (the former
+untyped `Source`), or raw `script!` assembly. The existing `CCV_FLAG_*` integer
+constants remain available for raw scripts; do not combine them as flags.
+
 ### Observing a whole batch
 
 `manager.observe_batch(&[&first, &second], &tx)?` checks all supplied input

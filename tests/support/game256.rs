@@ -18,6 +18,7 @@ use std::sync::Arc;
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::argtypes::IntType;
+use mattrs::ccv::CcvIndex;
 use mattrs::contracts::{ArgSpec, ClauseOutput};
 use mattrs::{ContractParams, ContractState, Signature, contract};
 
@@ -163,7 +164,7 @@ impl G256S0 {
             .taptree_root();
         script! {
             OP_SHA256
-            { check_output_contract(s1_root, -1, None) }
+            { check_output_contract(s1_root, CcvIndex::CURRENT, None) }
             { p.bob_pk }
             OP_CHECKSIG
         }
@@ -210,9 +211,9 @@ impl G256S1 {
         script! {
             OP_DUP
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
             { g256_s2_state_encoder() }
-            { check_output_contract(s2_root, -1, None) }
+            { check_output_contract(s2_root, CcvIndex::CURRENT, None) }
             { p.alice_pk }
             OP_CHECKSIG
         }
@@ -273,14 +274,14 @@ impl G256S2 {
             OP_TOALTSTACK
             { dup(3) }
             { g256_s2_state_encoder() }
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
             OP_SHA256 OP_SWAP OP_SHA256
             OP_ROT
             OP_FROMALTSTACK OP_SHA256
             OP_SWAP
             OP_FROMALTSTACK
             // hand [sha256(x), sha256(y), sha256(z), t_a, t_b] off to Bisect_1
-            { bisect1(p.bisect()).state_output_script(-1) }
+            { bisect1(p.bisect()).state_output_script(CcvIndex::CURRENT) }
             { p.bob_pk }
             OP_CHECKSIG
         }

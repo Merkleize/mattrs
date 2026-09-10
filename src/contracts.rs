@@ -173,14 +173,17 @@ impl From<WitnessError> for ContractError {
 /// Opcode for CHECKTEMPLATEVERIFY
 pub const OP_CHECKTEMPLATEVERIFY: u8 = 0xb3;
 
-/// CCV flag: Check the input (validate introspection)
-pub const CCV_FLAG_CHECK_INPUT: i32 = -1;
+/// Raw CCV mode: check the input. Modes are alternatives, not combinable flags.
+/// Prefer [`crate::ccv::CcvMode`] when assembling typed scripts.
+pub const CCV_FLAG_CHECK_INPUT: i32 = crate::ccv::CcvMode::CheckInput.as_i32();
 
-/// CCV flag: Ignore output amount
-pub const CCV_FLAG_IGNORE_OUTPUT_AMOUNT: i32 = 1;
+/// Raw CCV mode: ignore output amount. Modes are alternatives, not bit flags.
+/// Prefer [`crate::ccv::CcvMode`].
+pub const CCV_FLAG_IGNORE_OUTPUT_AMOUNT: i32 = crate::ccv::CcvMode::IgnoreAmount.as_i32();
 
-/// CCV flag: Deduct output amount from current input
-pub const CCV_FLAG_DEDUCT_OUTPUT_AMOUNT: i32 = 2;
+/// Raw CCV mode: deduct output amount. Modes are alternatives, not bit flags.
+/// Prefer [`crate::ccv::CcvMode`].
+pub const CCV_FLAG_DEDUCT_OUTPUT_AMOUNT: i32 = crate::ccv::CcvMode::DeductAmount.as_i32();
 
 // ============================================================================
 // Core Traits

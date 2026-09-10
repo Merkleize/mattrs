@@ -13,6 +13,7 @@
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
+use mattrs::ccv::CcvIndex;
 use mattrs::contracts::{ClauseError, ClauseOutput};
 use mattrs::{ContractParams, ContractState, contract};
 
@@ -92,7 +93,7 @@ impl Ram {
         let head = script! {
             OP_DUP
             OP_TOALTSTACK
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
         };
         // One Merkle-layer reduction, repeated once per level.
         let layer = script! {
@@ -118,7 +119,7 @@ impl Ram {
         let head = script! {
             OP_DUP
             OP_TOALTSTACK
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
         };
         // Recompute both the old and new roots one layer at a time.
         let layer = script! {

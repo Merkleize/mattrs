@@ -4,10 +4,7 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::define_pushable;
 use mattrs::ContractState;
 use mattrs::contract;
-use mattrs::contracts::{
-    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
-    WitnessReader,
-};
+use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
 use mattrs::script_utils::{bn2vch, commit_int};
 
@@ -17,7 +14,8 @@ use super::unwind::{Unwind, UnwindState};
 use super::{
     ChallengeContext, ExitClaim, PoolParams, PoolTree, dual_proof_layer, spec, spec_num, step_h,
 };
-use mattrs::stack::{Source, StackScript};
+use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
+use mattrs::stack::StackScript;
 
 define_pushable!();
 
@@ -154,11 +152,11 @@ impl PendingExit {
     }
 
     /// Reveal the state leaves on `s`, commit them as `as_name`, and verify
-    /// against the input. `taptree` is `Source::Current` when the clause may
+    /// against the input. `taptree` is `CcvTaptree::Current` when the clause may
     /// rely on the input's own taptree, or the witness `pe_taptree` when the
     /// clause must bind a copy of it for downstream use. Leaves the seven
     /// witness items (and `as_name`) tracked.
-    fn reveal_state(s: &mut StackScript, as_name: &str, taptree: Source) {
+    fn reveal_state(s: &mut StackScript, as_name: &str, taptree: CcvTaptree<'_>) {
         s.pick("x");
         s.sha256_top("x_leaf");
         s.merkle_of(
@@ -174,35 +172,35 @@ impl PendingExit {
             as_name,
         );
         s.ccv(
-            Source::Item(as_name),
-            -1,
-            Source::None,
+            CcvData::Item(as_name),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
             taptree,
-            CCV_FLAG_CHECK_INPUT,
+            CcvMode::CheckInput,
         );
     }
 
     fn finalize_script(_p: &PoolParams) -> ScriptBuf {
         let mut s = StackScript::from_specs(&Self::state_specs());
-        Self::reveal_state(&mut s, "state", Source::Current);
+        Self::reveal_state(&mut s, "state", CcvTaptree::Current);
 
         // Output 0 pays Ingrid.
         // TODO(OP_AMOUNT): enforce that output 0 carries exactly `x + bond`
         // sats — the claimed aggregate plus Ingrid's returned bond.
         s.ccv(
-            Source::None,
-            0,
-            Source::Item("ingrid_pk"),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Item("ingrid_pk"),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 1 continues the pool at the claimed post-exit root.
         s.ccv(
-            Source::Item("r_prime"),
-            1,
-            Source::None,
-            Source::Item("unwind_taptree"),
-            0,
+            CcvData::Item("r_prime"),
+            CcvIndex::at(1).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Item("unwind_taptree"),
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -242,7 +240,7 @@ impl PendingExit {
 
         // Verify the state against the input, binding the witness copy of our
         // own taptree (needed downstream to resume this claim).
-        Self::reveal_state(&mut s, "resume", Source::Item("pe_taptree"));
+        Self::reveal_state(&mut s, "resume", CcvTaptree::Item("pe_taptree"));
 
         // The bisection endpoints: h_start = H(r || bn2vch(0)) = H(r), and
         // Ingrid's claimed end H(r_prime || bn2vch(x)); the challenger commits
@@ -264,11 +262,11 @@ impl PendingExit {
             .expect("ExitBisect1 contract definition is valid")
             .taptree_root();
         s.ccv(
-            Source::Item("b1_state"),
-            0,
-            Source::None,
-            Source::Const(b1_root),
-            0,
+            CcvData::Item("b1_state"),
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Const(b1_root),
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -326,7 +324,7 @@ impl PendingExit {
         let depth = p.depth();
         let mut s = StackScript::from_specs(&Self::challenge_delegation_specs(p));
 
-        Self::reveal_state(&mut s, "resume", Source::Item("pe_taptree"));
+        Self::reveal_state(&mut s, "resume", CcvTaptree::Item("pe_taptree"));
 
         // One shared-direction walk proves that the challenged slot holds
         // `(user_pk, bal)` in the pool root *and* that its exit bit is set.
@@ -359,11 +357,11 @@ impl PendingExit {
             .expect("DelegationChallenge contract definition is valid")
             .taptree_root();
         s.ccv(
-            Source::Item("dc_state"),
-            0,
-            Source::None,
-            Source::Const(dc_root),
-            0,
+            CcvData::Item("dc_state"),
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Const(dc_root),
+            CcvMode::Preserve,
         );
         s.into_script()
     }

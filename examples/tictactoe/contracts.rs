@@ -31,6 +31,7 @@
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
+use mattrs::ccv::CcvIndex;
 use mattrs::contracts::{ClauseError, ClauseOutput, ContractState, CtvTemplate, WitnessError};
 use mattrs::manager::{MissingStateError, SpendBuilder};
 use mattrs::script_helpers::{check_input_contract, concat, dup, key_path_p2tr, older};
@@ -400,7 +401,7 @@ impl TicTacToe {
             OP_SWAP
             OP_CAT
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
 
             // build the next preimage: turn_new || prefix || mark || suffix
             { push_byte(turn_new) }
@@ -434,7 +435,7 @@ impl TicTacToe {
             { dup(10) }
             OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
         }
     }
 
@@ -502,7 +503,7 @@ impl TicTacToe {
             OP_SWAP
             OP_CAT
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
         };
         // Consume the nine originals: each exactly one byte (the preimage
         // only pins their concatenation) and taken.
@@ -538,7 +539,7 @@ impl TicTacToe {
             OP_SWAP
             OP_CAT
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
             { older(timeout_blocks) }
             { ctv_hash }
             OP_CHECKTEMPLATEVERIFY

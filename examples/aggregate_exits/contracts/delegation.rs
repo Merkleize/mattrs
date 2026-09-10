@@ -3,16 +3,14 @@
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
-use mattrs::contracts::{
-    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
-    WitnessReader,
-};
+use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
 
 use super::pending_exit::PendingExit;
 use super::unwind::{Unwind, UnwindState};
 use super::{ChallengeContext, PoolParams, spec};
-use mattrs::stack::{Source, StackScript};
+use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
+use mattrs::stack::StackScript;
 
 define_pushable!();
 
@@ -104,11 +102,11 @@ impl DelegationChallenge {
     fn reveal_state(s: &mut StackScript) {
         s.merkle_of(&STATE_ITEMS, "state");
         s.ccv(
-            Source::Item("state"),
-            -1,
-            Source::None,
-            Source::Current,
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::CheckInput,
         );
     }
 
@@ -134,28 +132,28 @@ impl DelegationChallenge {
         // Output 0: half the challenger's bond to Ingrid.
         // TODO(OP_AMOUNT): enforce that output 0 carries exactly `bond / 2`.
         s.ccv(
-            Source::None,
-            0,
-            Source::Item("ingrid_pk"),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Item("ingrid_pk"),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 1: the other half is burned.
         // TODO(OP_AMOUNT): enforce that output 1 carries `bond - bond / 2`.
         s.ccv(
-            Source::None,
-            1,
-            Source::Const(mattrs::nums_key().serialize()),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(1).expect("valid output index"),
+            CcvKey::Const(mattrs::nums_key()),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 2 resumes the claim (same state, fresh challenge period).
         s.ccv(
-            Source::Item("resume"),
-            2,
-            Source::None,
-            Source::Item("pe_taptree"),
-            0,
+            CcvData::Item("resume"),
+            CcvIndex::at(2).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Item("pe_taptree"),
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -192,28 +190,28 @@ impl DelegationChallenge {
         // Output 0: the challenger's bond back plus half of Ingrid's.
         // TODO(OP_AMOUNT): enforce that output 0 carries `bond + bond / 2`.
         s.ccv(
-            Source::None,
-            0,
-            Source::Item("challenger_pk"),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Item("challenger_pk"),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 1: the other half of Ingrid's bond is burned.
         // TODO(OP_AMOUNT): enforce that output 1 carries `bond - bond / 2`.
         s.ccv(
-            Source::None,
-            1,
-            Source::Const(mattrs::nums_key().serialize()),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(1).expect("valid output index"),
+            CcvKey::Const(mattrs::nums_key()),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 2 reverts the pool to the pre-claim root.
         s.ccv(
-            Source::Item("r"),
-            2,
-            Source::None,
-            Source::Item("unwind_taptree"),
-            0,
+            CcvData::Item("r"),
+            CcvIndex::at(2).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Item("unwind_taptree"),
+            CcvMode::Preserve,
         );
         s.into_script()
     }

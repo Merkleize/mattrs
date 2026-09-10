@@ -10,6 +10,7 @@
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
+use mattrs::ccv::CcvIndex;
 use mattrs::contracts::{ClauseOutput, CtvTemplate};
 use mattrs::{ContractParams, ContractState, Signature, contract, script_utils::commit_int};
 
@@ -98,7 +99,7 @@ impl RpsGameS0 {
 
             // commit sha256(m_b) into the next contract's state (output 0)
             OP_SHA256
-            { check_output_contract(s1_taptree_root, 0, None) }
+            { check_output_contract(s1_taptree_root, CcvIndex::at(0).expect("valid output index"), None) }
         }
     }
 }
@@ -186,7 +187,7 @@ impl RpsGameS1 {
             // commit sha256(m_b) as the current input's state
             OP_DUP
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
 
             // compute (m_b - m_a) mod 3, add 3 if negative
             OP_FROMALTSTACK

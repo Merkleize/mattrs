@@ -2,7 +2,10 @@
 //! pymatt's `matt/script_helpers.py`. These build the small CCV/CSV building
 //! blocks that MATT contracts assemble their tapscripts from.
 
-use crate::{contracts::CCV_FLAG_CHECK_INPUT, optional_key_script};
+use crate::{
+    ccv::{CcvIndex, CcvMode},
+    optional_key_script,
+};
 use bitcoin::key::TweakedPublicKey;
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
@@ -31,32 +34,33 @@ pub fn key_path_p2tr(key: XOnlyPublicKey) -> ScriptBuf {
     ScriptBuf::new_p2tr(&bitcoin::key::Secp256k1::verification_only(), key, None)
 }
 
-/// CCV fragment that constrains the *current input's* contract (the committed
-/// data is expected on the stack). `index = -1` means "this input"; `pubkey`
-/// is the alternate internal key, or `None` for the NUMS default.
-pub fn check_input_contract(index: i64, pubkey: Option<XOnlyPublicKey>) -> ScriptBuf {
+/// CCV fragment that constrains an input's contract, using the executing
+/// input's taptree (the committed data is expected on the stack).
+/// [`CcvIndex::CURRENT`] selects the executing input; `pubkey` is the naked key
+/// before the data tweak, or `None` for the NUMS default.
+pub fn check_input_contract(index: CcvIndex, pubkey: Option<XOnlyPublicKey>) -> ScriptBuf {
     script! {
-        { index }
+        { index.as_i64() }
         { optional_key_script(pubkey) }
         -1
-        { CCV_FLAG_CHECK_INPUT }
+        { CcvMode::CheckInput.as_i32() }
         CHECKCONTRACTVERIFY
     }
 }
 
 /// CCV fragment that constrains an *output's* contract to `taptree_root` (the
-/// committed data is expected on the stack). `index = -1` means "same index as
-/// this input".
+/// committed data is expected on the stack). [`CcvIndex::CURRENT`] means
+/// "same index as this input".
 pub fn check_output_contract(
     taptree_root: [u8; 32],
-    index: i64,
+    index: CcvIndex,
     pubkey: Option<XOnlyPublicKey>,
 ) -> ScriptBuf {
     script! {
-        { index }
+        { index.as_i64() }
         { optional_key_script(pubkey) }
         { taptree_root }
-        0
+        { CcvMode::Preserve.as_i32() }
         CHECKCONTRACTVERIFY
     }
 }
@@ -157,6 +161,33 @@ pub fn dup(n: usize) -> ScriptBuf {
                 parts.push(script! { { (n as i64) - 1 } OP_PICK });
             }
             concat(&parts)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_indices_preserve_ccv_helper_scripts() {
+        for number in [-1, 0, 128, i64::from(i32::MAX)] {
+            for key in [None, Some(crate::nums_key())] {
+                let index = CcvIndex::try_from(number).unwrap();
+                let root = [0x42; 32];
+                assert_eq!(
+                    check_input_contract(index, key),
+                    script! {
+                        { number } { optional_key_script(key) } -1 -1 CHECKCONTRACTVERIFY
+                    }
+                );
+                assert_eq!(
+                    check_output_contract(root, index, key),
+                    script! {
+                        { number } { optional_key_script(key) } { root } 0 CHECKCONTRACTVERIFY
+                    }
+                );
+            }
         }
     }
 }
