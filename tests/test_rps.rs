@@ -105,7 +105,9 @@ fn test_rps_bob_move_commits_s1_state() {
     let expected = RpsGameS1::new(params)
         .unwrap()
         .as_erased()
-        .script_pubkey(Some(move_commitment(1).as_slice()))
+        .script_pubkey(Some(&mattrs::StateCommitment::identity(
+            move_commitment(1).to_vec(),
+        )))
         .unwrap();
     assert_eq!(tx.output[0].script_pubkey, expected);
     assert_eq!(tx.output[0].value, Amount::from_sat(2000));

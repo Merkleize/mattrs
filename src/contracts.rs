@@ -261,6 +261,7 @@ pub trait WitnessEncodable {
 /// use mattrs::ContractState;
 ///
 /// #[derive(Debug, Clone, ContractState)]
+/// #[commit(identity)]
 /// struct InvalidState {
 ///     value: Option<[u8; 32]>,
 /// }
@@ -623,12 +624,92 @@ pub trait ContractParams: Debug + Clone + Send + Sync {
         Self: Sized;
 }
 
-/// Trait for contract state.
+/// The exact CCV data operand, distinct from a logical state's serialization.
+///
+/// Bytes are never implicitly hashed based on their length. Empty data omits
+/// the state tweak; nonempty data is incorporated as `SHA256(naked_key || data)`.
+/// These are the data semantics of
+/// [BIP-443](https://github.com/bitcoin/bips/blob/master/bip-0443.mediawiki).
+/// The script must supply these same bytes to CCV. A commitment need not be
+/// invertible; instances retain their expanded logical state separately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateCommitment(Vec<u8>);
+
+impl StateCommitment {
+    /// Commit to these bytes verbatim, including an already-computed hash/root.
+    /// Empty bytes explicitly mean no data tweak. Script element-size limits
+    /// still apply to data supplied to CCV.
+    pub fn identity(bytes: impl Into<Vec<u8>>) -> Self {
+        Self(bytes.into())
+    }
+
+    /// Explicitly hash a preimage, regardless of its length (including 32 bytes).
+    pub fn sha256(preimage: &[u8]) -> Self {
+        Self(sha256::Hash::hash(preimage).to_byte_array().to_vec())
+    }
+
+    /// The exact bytes passed to CCV and used for addressing.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Take ownership of the exact commitment bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl AsRef<[u8]> for StateCommitment {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+/// Expanded logical contract state and its explicit on-chain commitment.
+///
+/// Serialization, when needed, belongs to [`StateCodec`] or an application
+/// codec. It is never used implicitly for addressing or state recovery.
+///
+/// ```
+/// use mattrs::contracts::{ContractState, StateCodec};
+/// #[derive(Debug, Clone, mattrs::ContractState)]
+/// #[commit(sha256)]
+/// struct Counter { value: i64 }
+/// let state = Counter { value: 7 };
+/// assert_eq!(state.encode(), vec![7]);
+/// assert_eq!(state.commitment().as_bytes().len(), 32);
+/// assert_eq!(Counter::decode(&state.encode()).unwrap().value, 7);
+/// ```
+///
+/// Omitting the commitment strategy is a compile-time error:
+/// ```compile_fail
+/// #[derive(Debug, Clone, mattrs::ContractState)]
+/// struct Ambiguous { bytes: Vec<u8> }
+/// ```
 pub trait ContractState: Debug + Clone + Send + Sync {
-    /// Encode the state to bytes (typically 32 bytes for hash commitment).
+    /// Compute the exact data operand the contract's script supplies to CCV.
+    fn commitment(&self) -> StateCommitment;
+}
+
+/// Optional, lossless serialization of logical state. Not a consensus format.
+///
+/// `decode(encode(state))` should recover the logical state. Merkle-root-only
+/// states need not implement this trait: a root is not a serialization of its
+/// leaves. The manager never calls this codec to recover state from a commitment.
+///
+/// A Merkle-root commitment does not generate a codec for its leaves:
+/// ```compile_fail
+/// use mattrs::StateCodec;
+/// #[derive(Debug, Clone, mattrs::ContractState)]
+/// #[commit(merkle)]
+/// struct Leaves { first: [u8; 32] }
+/// let serialized = Leaves { first: [0; 32] }.encode();
+/// ```
+pub trait StateCodec: ContractState {
+    /// Serialize the full logical state, independently of its commitment.
     fn encode(&self) -> Vec<u8>;
 
-    /// Decode state from bytes.
+    /// Recover logical state from its serialization, not from a commitment.
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError>
     where
         Self: Sized;
@@ -772,6 +853,12 @@ impl ContractParams for () {
 }
 
 impl ContractState for () {
+    fn commitment(&self) -> StateCommitment {
+        StateCommitment::identity(Vec::new())
+    }
+}
+
+impl StateCodec for () {
     fn encode(&self) -> Vec<u8> {
         Vec::new()
     }
@@ -789,17 +876,20 @@ impl ContractState for () {
 
 /// Type-erased *logical* contract state carried on an instance.
 ///
-/// A contract's on-chain commitment is `ContractState::encode` (a fixed-size
-/// taproot state tweak), but its *logical* state can be richer than that
+/// A contract's on-chain commitment is [`ContractState::commitment`], but its
+/// *logical* state can be richer than that
 /// commitment — e.g. a RAM cell vector committed only as a Merkle root. Since the
 /// commitment is generally not invertible, an instance keeps the full typed state
-/// here (in erased form) so a clause's `next_outputs` can read it. `encode` still
-/// yields the committed bytes; `as_any` recovers the concrete `ContractState`.
+/// here (in erased form) so a clause's `next_outputs` can read it.
+/// `as_any` recovers the concrete `ContractState`; commitments are never decoded.
 pub trait ErasedState: Debug + Send + Sync {
-    /// The committed state bytes (same as [`ContractState::encode`]). Named
-    /// distinctly to avoid clashing with `ContractState::encode` on types that
-    /// implement both.
-    fn committed_bytes(&self) -> Vec<u8>;
+    /// The explicit CCV data commitment of the logical state.
+    fn state_commitment(&self) -> StateCommitment;
+
+    /// The exact bytes of [`ContractState::commitment`], not serialized state.
+    fn committed_bytes(&self) -> Vec<u8> {
+        self.state_commitment().into_bytes()
+    }
 
     /// Downcast handle to the concrete state type.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -809,8 +899,8 @@ pub trait ErasedState: Debug + Send + Sync {
 }
 
 impl<S: ContractState + 'static> ErasedState for S {
-    fn committed_bytes(&self) -> Vec<u8> {
-        <Self as ContractState>::encode(self)
+    fn state_commitment(&self) -> StateCommitment {
+        <Self as ContractState>::commitment(self)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -925,6 +1015,11 @@ impl ClauseOutput {
     /// The committed state bytes of the next instance (its taproot commitment).
     pub fn committed_state_bytes(&self) -> Option<Vec<u8>> {
         self.next_state.as_ref().map(|s| s.committed_bytes())
+    }
+
+    /// The next state's explicit CCV data commitment, if any.
+    pub fn state_commitment(&self) -> Option<StateCommitment> {
+        self.next_state.as_ref().map(|s| s.state_commitment())
     }
 }
 
@@ -1370,21 +1465,26 @@ fn validate_unique_clauses(clauses: &[Arc<dyn ErasedClause>]) -> Result<(), Cont
 // ============================================================================
 
 /// Compute a tweaked key for augmented contracts with state commitment.
-/// Uses SHA256(naked_key || state_hash) to derive the tweak.
-pub fn compute_state_tweak(naked_key: &[u8; 32], state_hash: &[u8; 32]) -> [u8; 32] {
-    let mut data = Vec::with_capacity(64);
+/// Uses SHA256(naked_key || data) for a nonempty CCV data operand. There is no
+/// length-dependent prehash. [`apply_state_tweak`] skips the tweak for empty data.
+pub fn compute_state_tweak(naked_key: &[u8; 32], commitment: &[u8]) -> [u8; 32] {
+    let mut data = Vec::with_capacity(32 + commitment.len());
     data.extend_from_slice(naked_key);
-    data.extend_from_slice(state_hash);
+    data.extend_from_slice(commitment);
     let hash = sha256::Hash::hash(&data);
     *hash.as_byte_array()
 }
 
-/// Apply a state tweak to a public key.
+/// Apply the CCV data tweak using the exact commitment bytes. Empty data leaves
+/// the naked key unchanged; all nonempty lengths use the same algorithm.
 pub fn apply_state_tweak(
     naked_key: &XOnlyPublicKey,
-    state_hash: &[u8; 32],
+    commitment: &[u8],
 ) -> Result<XOnlyPublicKey, ContractError> {
-    let tweak_bytes = compute_state_tweak(&naked_key.serialize(), state_hash);
+    if commitment.is_empty() {
+        return Ok(*naked_key);
+    }
+    let tweak_bytes = compute_state_tweak(&naked_key.serialize(), commitment);
 
     let secp = Secp256k1::new();
     let scalar = bitcoin::secp256k1::Scalar::from_be_bytes(tweak_bytes)
@@ -1436,9 +1536,9 @@ pub trait ErasedClause: Debug + Send + Sync {
 
     /// Compute next outputs from the spend's witness stack (args in witness order).
     ///
-    /// The witness stack is the authoritative, ordered argument encoding; params and
-    /// state are the instance's encoded bytes. This decodes them into the clause's
-    /// concrete types and runs the typed `next_outputs`.
+    /// The witness stack is the ordered argument encoding. Params are decoded;
+    /// expanded logical state is downcast to the clause's exact state type.
+    /// Commitments are never used as serialized state.
     fn next_outputs_from_witness(
         &self,
         params_bytes: &[u8],
@@ -1664,12 +1764,12 @@ where
         let params = P::decode(params_bytes)
             .map_err(|e| ClauseError::Other(format!("Failed to decode params: {}", e)))?;
 
-        // Recover the typed state: prefer the instance's logical state (downcast),
-        // falling back to decoding the committed bytes for round-tripping states.
+        // Only the expanded logical state can recover S. A commitment is not
+        // serialized state and must never be decoded as a different state type.
         let state: Option<S> = match state {
             Some(erased) => match erased.as_any().downcast_ref::<S>() {
                 Some(typed) => Some(typed.clone()),
-                None => Some(S::decode(&erased.committed_bytes())?),
+                None => return Err(ContractError::WrongStateType.into()),
             },
             None => None,
         };
@@ -1732,14 +1832,26 @@ pub trait ErasedContract: Debug + Send + Sync {
     /// stateless contract.
     fn state_type_id(&self) -> Option<std::any::TypeId>;
 
-    /// Get the script pubkey for this contract (with optional state).
-    fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError>;
+    /// Get the script pubkey from an explicit commitment, not serialized state.
+    /// For augmented contracts, `None` is missing state; an empty commitment
+    /// explicitly omits the data tweak. Bytes are never implicitly prehashed.
+    ///
+    /// ```compile_fail
+    /// use mattrs::contracts::ErasedContract;
+    /// fn address(contract: &dyn ErasedContract, serialized: Vec<u8>) {
+    ///     contract.script_pubkey(Some(&serialized));
+    /// }
+    /// ```
+    fn script_pubkey(
+        &self,
+        commitment: Option<&StateCommitment>,
+    ) -> Result<ScriptBuf, ContractError>;
 
     /// Get the internal pubkey to use for control block generation.
     /// For augmented contracts with state, this may be state-tweaked.
     fn control_block_internal_key(
         &self,
-        state_bytes: Option<&[u8]>,
+        commitment: Option<&StateCommitment>,
     ) -> Result<XOnlyPublicKey, ContractError>;
 
     /// Get the taptree for this contract.
@@ -1943,13 +2055,16 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
         None
     }
 
-    fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
+    fn script_pubkey(
+        &self,
+        _commitment: Option<&StateCommitment>,
+    ) -> Result<ScriptBuf, ContractError> {
         Ok(self.script_pubkey())
     }
 
     fn control_block_internal_key(
         &self,
-        _state_bytes: Option<&[u8]>,
+        _commitment: Option<&StateCommitment>,
     ) -> Result<XOnlyPublicKey, ContractError> {
         Ok(self.internal_pubkey)
     }
@@ -1960,15 +2075,6 @@ impl<P: ContractParams + 'static> ErasedContract for StandardP2TR<P> {
 
     fn clone_boxed(&self) -> Box<dyn ErasedContract> {
         Box::new(self.clone())
-    }
-}
-
-/// The 32-byte value an augmented internal key is tweaked with: the committed
-/// state bytes themselves when exactly 32 bytes, else their sha256.
-fn state_hash(committed: &[u8]) -> [u8; 32] {
-    match committed.try_into() {
-        Ok(arr) => arr,
-        Err(_) => *sha256::Hash::hash(committed).as_byte_array(),
     }
 }
 
@@ -2022,7 +2128,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> StandardAugmentedP
 
     /// Compute the internal pubkey tweaked with the state.
     pub fn compute_internal_key(&self, state: &S) -> Result<XOnlyPublicKey, ContractError> {
-        self.internal_key_from_committed(&state.encode())
+        self.internal_key_from_committed(state.commitment().as_bytes())
     }
 
     /// The state-tweaked internal key from the *committed* state bytes directly,
@@ -2032,7 +2138,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> StandardAugmentedP
         &self,
         committed: &[u8],
     ) -> Result<XOnlyPublicKey, ContractError> {
-        apply_state_tweak(&self.naked_internal_pubkey, &state_hash(committed))
+        apply_state_tweak(&self.naked_internal_pubkey, committed)
     }
 
     /// Get the taproot output key for this contract with the given state.
@@ -2112,19 +2218,22 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
         Some(std::any::TypeId::of::<S>())
     }
 
-    fn script_pubkey(&self, state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
-        let committed = state_bytes.ok_or(ContractError::MissingState)?;
-        let internal_key = self.internal_key_from_committed(committed)?;
+    fn script_pubkey(
+        &self,
+        commitment: Option<&StateCommitment>,
+    ) -> Result<ScriptBuf, ContractError> {
+        let committed = commitment.ok_or(ContractError::MissingState)?;
+        let internal_key = self.internal_key_from_committed(committed.as_bytes())?;
         let output_key = compute_taproot_output_key(&internal_key, Some(&self.core.taptree));
         Ok(crate::script_helpers::opaque_p2tr(output_key))
     }
 
     fn control_block_internal_key(
         &self,
-        state_bytes: Option<&[u8]>,
+        commitment: Option<&StateCommitment>,
     ) -> Result<XOnlyPublicKey, ContractError> {
-        let committed = state_bytes.ok_or(ContractError::MissingState)?;
-        self.internal_key_from_committed(committed)
+        let committed = commitment.ok_or(ContractError::MissingState)?;
+        self.internal_key_from_committed(committed.as_bytes())
     }
 
     fn taptree(&self) -> &Arc<TapTree> {
@@ -2241,11 +2350,16 @@ impl ContractInstance {
         self.state.as_ref().map(|s| s.committed_bytes())
     }
 
+    /// The state's explicit CCV data commitment, if this instance has state.
+    pub fn state_commitment(&self) -> Option<StateCommitment> {
+        self.state.as_ref().map(|s| s.state_commitment())
+    }
+
     /// The script pubkey this instance pays (the contract's, for the
     /// instance's committed state).
     pub fn script_pubkey(&self) -> Result<ScriptBuf, ContractError> {
         self.contract
-            .script_pubkey(self.committed_state_bytes().as_deref())
+            .script_pubkey(self.state_commitment().as_ref())
     }
 
     /// Current status in the instance lifecycle.

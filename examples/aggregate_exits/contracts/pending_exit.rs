@@ -69,7 +69,8 @@ impl PendingExitState {
     /// dispute needs to resume this claim.
     pub fn hash(&self) -> [u8; 32] {
         use mattrs::contracts::ContractState;
-        self.encode()
+        self.commitment()
+            .as_bytes()
             .try_into()
             .expect("merkle commitment is 32 bytes")
     }

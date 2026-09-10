@@ -60,6 +60,7 @@ pub struct MiniUnvaultingParams {
 }
 
 #[derive(Debug, Clone, ContractState)]
+#[commit(identity)]
 pub struct MiniUnvaultingState {
     pub withdrawal_pk: [u8; 32],
 }

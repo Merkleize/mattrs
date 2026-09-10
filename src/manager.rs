@@ -123,7 +123,7 @@ fn resolve_outputs(next: &NextOutputs) -> Result<Vec<ResolvedOutput>, ManagerErr
                     index: output.index,
                     script_pubkey: output
                         .next_contract
-                        .script_pubkey(output.committed_state_bytes().as_deref())?,
+                        .script_pubkey(output.state_commitment().as_ref())?,
                     amount: output.next_amount,
                     identity: OutputIdentity::Contract(ContractOutputIdentity::from_clause_output(
                         output,
@@ -1152,7 +1152,7 @@ impl ContractManager {
         // Append the leaf script and control block (state-tweaked key for augmented).
         let internal_key = inst
             .contract()
-            .control_block_internal_key(inst.committed_state_bytes().as_deref())?;
+            .control_block_internal_key(inst.state_commitment().as_ref())?;
         let control_block = inst
             .contract()
             .taptree()
@@ -1216,7 +1216,7 @@ impl ContractManager {
                 .ok_or(ManagerError::MissingContractOutput(outpoint))?;
             let expected_script = clause_out
                 .next_contract
-                .script_pubkey(clause_out.committed_state_bytes().as_deref())?;
+                .script_pubkey(clause_out.state_commitment().as_ref())?;
             if actual.script_pubkey != expected_script {
                 return Err(ManagerError::WrongContractOutput(outpoint));
             }
@@ -1358,7 +1358,7 @@ impl ContractManager {
 
             let internal_key = inst
                 .contract()
-                .control_block_internal_key(inst.committed_state_bytes().as_deref())?;
+                .control_block_internal_key(inst.state_commitment().as_ref())?;
             let expected_control = inst
                 .contract()
                 .taptree()
@@ -2291,16 +2291,12 @@ impl InstanceHandle {
             .map(|args| args.to_vec())
     }
 
-    /// This instance's state as `S`, if it has any: the logical state when it is
-    /// an `S` (by downcast), else whatever `S::decode` recovers from the committed
-    /// bytes (for round-tripping states).
+    /// This instance's expanded logical state as `S`, if its type matches.
+    /// Commitments are never decoded or reinterpreted as another state type.
     pub fn state<S: ContractState + 'static>(&self) -> Option<S> {
         let inst = self.instance.borrow();
         let erased = inst.state()?;
-        if let Some(typed) = erased.as_any().downcast_ref::<S>() {
-            return Some(typed.clone());
-        }
-        S::decode(&erased.committed_bytes()).ok()
+        erased.as_any().downcast_ref::<S>().cloned()
     }
 
     /// Get the child instances created from spending this instance.

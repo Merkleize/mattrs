@@ -730,20 +730,27 @@ fn extract_leaf_kind(field: &syn::Field) -> syn::Result<LeafKind> {
 
 /// Derive macro for ContractState trait.
 ///
-/// # Default: single-field identity encoding
+/// An explicit `#[commit(identity)]`, `#[commit(sha256)]`, or `#[commit(merkle)]`
+/// is required; there is no length-dependent default.
 ///
-/// Without attributes, `encode()` is the field's one witness element and
-/// `decode()` reconstructs it from those bytes. The field type must implement
+/// # Single-field identity or SHA256 commitments
+///
+/// `identity` commits the field's one witness element verbatim. `sha256` hashes
+/// that element regardless of its length. Both also implement the independent
+/// `StateCodec` trait: `encode()` serializes the field's witness element and
+/// `decode()` reconstructs it from those serialized bytes (not from the hash).
+/// The field type must implement
 /// `SingleWitnessElement`; variable- and multi-element encodings are rejected.
-/// The attribute-less derive accepts exactly one field. Multi-field state must
+/// These two forms accept exactly one field. Multi-field state must
 /// use `#[commit(merkle)]` or a manual implementation.
 ///
 /// # `#[commit(merkle)]`: hash-committed (lossy) state
 ///
-/// With `#[commit(merkle)]` on the struct, `encode()` is the Merkle root (see
+/// With `#[commit(merkle)]` on the struct, `commitment()` is the Merkle root (see
 /// `mattrs::merkle::MerkleTree`) of the fields' leaves, in declaration order, and
-/// `decode()` fails — the state cannot be recovered from its commitment and rides
-/// along as the instance's expanded state instead. Per-field leaf forms:
+/// no `StateCodec` is generated — the state cannot be recovered from its
+/// commitment and rides along as the instance's expanded state instead.
+/// Applications may implement a separate codec for those leaves. Per-field forms:
 ///
 /// - default: the field is a `[u8; 32]`, used directly as one leaf;
 /// - `#[leaf(sha256)]`: one leaf, the sha256 of the field's witness encoding
@@ -775,28 +782,33 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let fields = named_fields(input, "ContractState")?;
 
-    // #[commit(merkle)] on the struct selects the hash-committed form.
-    let mut merkle_commit = false;
+    let mut commitment = None;
     for attr in &input.attrs {
         if attr.path().is_ident("commit") {
-            if merkle_commit {
+            if commitment.is_some() {
                 return Err(syn::Error::new_spanned(
                     attr,
                     "duplicate `#[commit(..)]` attribute",
                 ));
             }
             let ident: syn::Ident = attr.parse_args()?;
-            if ident != "merkle" {
+            if ident != "merkle" && ident != "identity" && ident != "sha256" {
                 return Err(syn::Error::new(
                     ident.span(),
-                    format!("unknown commitment `{}` (expected `merkle`)", ident),
+                    format!(
+                        "unknown commitment `{}` (expected `identity`, `sha256`, or `merkle`)",
+                        ident
+                    ),
                 ));
             }
-            merkle_commit = true;
+            commitment = Some(ident);
         }
     }
 
-    if merkle_commit {
+    let commitment = commitment.ok_or_else(|| syn::Error::new_spanned(
+        name, "ContractState requires an explicit #[commit(identity)], #[commit(sha256)], or #[commit(merkle)]"
+    ))?;
+    if commitment == "merkle" {
         return expand_merkle_state(name, fields, &impl_generics, &ty_generics, where_clause);
     }
 
@@ -846,6 +858,11 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let only_field = fields.first().expect("length checked above");
     let field_type = &only_field.ty;
     let state_field_name = only_field.ident.as_ref().expect("named fields");
+    let commit_expr = if commitment == "identity" {
+        quote! { ::mattrs::contracts::StateCommitment::identity(bytes) }
+    } else {
+        quote! { ::mattrs::contracts::StateCommitment::sha256(&bytes) }
+    };
 
     Ok(quote! {
         impl #impl_generics ::mattrs::contracts::WitnessEncodable for #name #ty_generics #where_clause {
@@ -865,6 +882,13 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
 
         impl #impl_generics ::mattrs::contracts::ContractState for #name #ty_generics #where_clause {
+            fn commitment(&self) -> ::mattrs::contracts::StateCommitment {
+                let bytes = <Self as ::mattrs::contracts::StateCodec>::encode(self);
+                #commit_expr
+            }
+        }
+
+        impl #impl_generics ::mattrs::contracts::StateCodec for #name #ty_generics #where_clause {
             fn encode(&self) -> Vec<u8> {
                 fn assert_single<T: ::mattrs::contracts::SingleWitnessElement>() {}
                 assert_single::<#field_type>();
@@ -885,9 +909,8 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
-/// The `#[commit(merkle)]` expansion: encode = Merkle root of the fields' leaves,
-/// decode = error (the commitment is lossy; the logical state rides along as the
-/// instance's expanded state).
+/// The `#[commit(merkle)]` expansion: commitment = Merkle root of the fields'
+/// leaves. No serialization codec is generated for this lossy commitment.
 fn expand_merkle_state(
     name: &syn::Ident,
     fields: &Punctuated<syn::Field, syn::Token![,]>,
@@ -918,22 +941,102 @@ fn expand_merkle_state(
         });
     }
 
-    let decode_msg = format!(
-        "{} cannot be recovered from its Merkle-root commitment",
-        name
-    );
-
     Ok(quote! {
         impl #impl_generics ::mattrs::contracts::ContractState for #name #ty_generics #where_clause {
-            fn encode(&self) -> Vec<u8> {
+            fn commitment(&self) -> ::mattrs::contracts::StateCommitment {
                 let mut leaves: Vec<[u8; 32]> = Vec::new();
                 #(#leaf_pushes)*
-                ::mattrs::merkle::MerkleTree::new(leaves).root().to_vec()
-            }
-
-            fn decode(_bytes: &[u8]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError> {
-                Err(::mattrs::contracts::WitnessError::InvalidData(#decode_msg.to_string()))
+                ::mattrs::contracts::StateCommitment::identity(
+                    ::mattrs::merkle::MerkleTree::new(leaves).root().to_vec()
+                )
             }
         }
     })
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn commitment_strategy_is_required_and_validated() {
+        for (input, expected) in [
+            (
+                syn::parse_quote!(
+                    struct State {
+                        value: [u8; 32],
+                    }
+                ),
+                "requires an explicit",
+            ),
+            (
+                syn::parse_quote!(
+                    #[commit(unknown)]
+                    struct State {
+                        value: [u8; 32],
+                    }
+                ),
+                "unknown commitment",
+            ),
+            (
+                syn::parse_quote!(
+                    #[commit(identity)]
+                    #[commit(sha256)]
+                    struct State {
+                        value: [u8; 32],
+                    }
+                ),
+                "duplicate",
+            ),
+            (
+                syn::parse_quote!(
+                    #[commit(identity)]
+                    struct State {
+                        a: i64,
+                        b: i64,
+                    }
+                ),
+                "exactly one field",
+            ),
+            (
+                syn::parse_quote!(
+                    #[commit(sha256)]
+                    struct State {
+                        #[leaf(sha256)]
+                        value: i64,
+                    }
+                ),
+                "requires #[commit(merkle)]",
+            ),
+        ] {
+            let error = expand_contract_state(&input).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn all_explicit_strategies_expand() {
+        for input in [
+            syn::parse_quote!(
+                #[commit(identity)]
+                struct State {
+                    value: [u8; 32],
+                }
+            ),
+            syn::parse_quote!(
+                #[commit(sha256)]
+                struct State {
+                    value: i64,
+                }
+            ),
+            syn::parse_quote!(
+                #[commit(merkle)]
+                struct State {
+                    value: [u8; 32],
+                }
+            ),
+        ] {
+            assert!(expand_contract_state(&input).is_ok());
+        }
+    }
 }

@@ -93,13 +93,47 @@ Multi-field contract state commits with a derive instead of a manual impl:
 
 ```rust
 #[derive(Debug, Clone, ContractState)]
-#[commit(merkle)]                  // encode() = Merkle root of the fields' leaves
+#[commit(merkle)]                  // commitment() = Merkle root of the fields' leaves
 pub struct G256S2State {
     pub t_a: [u8; 32],             // a raw 32-byte leaf
     #[leaf(sha256)] pub y: i64,    // leaf = sha256 of the field's witness encoding
     #[leaf(sha256)] pub x: i64,
 }
 ```
+
+### State commitments and serialization
+
+Every `ContractState` explicitly implements `commitment() -> StateCommitment`.
+This is the exact data operand supplied to CCV, not a serialization to decode.
+The derive requires a commitment strategy:
+
+- `#[commit(identity)]`: commit a single field's witness element verbatim.
+- `#[commit(sha256)]`: hash that element, regardless of its length.
+- `#[commit(merkle)]`: commit the Merkle root of the declared leaves.
+
+The first two also implement `StateCodec` for lossless `encode`/`decode` of the
+single field. Merkle states and `opaque_merkle_state!` do not pretend their roots
+can be decoded; implement an application codec separately if persistence is
+needed. Instances retain expanded logical state, and `handle.state::<S>()`
+only returns it when its type matches — there is no commitment-decoding fallback.
+
+For manual implementations, use `StateCommitment::identity(bytes)` for raw data
+or an existing hash/root, and `StateCommitment::sha256(preimage)` to explicitly
+hash a preimage. No length-dependent hashing takes place during addressing.
+Empty commitment bytes omit the data tweak; they are not SHA256 of empty data.
+Type-erased `script_pubkey` and `control_block_internal_key` now accept
+`Option<&StateCommitment>`; pass `Some(&state.commitment())`, not `state.encode()`.
+
+Migration: add `#[commit(identity)]` to existing 32-byte single-field states;
+use an explicit SHA256 commitment for states that previously relied on implicit
+hashing of non-32-byte serialization. Move manual serialization methods to
+`StateCodec`. Existing example commitments and addresses are preserved (including
+tic-tac-toe's explicit hash of its 10-byte serialization). For variable-length
+legacy states, choose the strategy to match the script: neither strategy
+reproduces the old length-dependent rule for every possible length.
+An augmented contract using unit state `()` now has an empty commitment (no data
+tweak); reproducing its old implicit SHA256-of-empty tweak requires a custom
+state with that explicit hash. Ordinary stateless contracts are unchanged.
 
 ## Spending: a clause is a typed method call
 

@@ -57,6 +57,7 @@ pub use mattrs_derive::contract;
 
 /// A signature witness element, re-exported for use in clause `*Args` structs.
 pub use contracts::Signature;
+pub use contracts::{StateCodec, StateCommitment};
 
 pub mod argtypes;
 pub mod ccv;

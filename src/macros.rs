@@ -89,8 +89,8 @@ macro_rules! clause_tree {
 /// *expanded* state type: the on-chain commitment is the Merkle root of the
 /// type's `leaves()` (a method returning the 32-byte leaves in order, as an
 /// array or `Vec`), and — as with the RAM example's cell vector — the expanded
-/// data cannot be recovered from the root, so `decode` always fails (children
-/// are materialized via `with_state` instead; see
+/// data cannot be recovered from the root. No serialization codec is generated
+/// (children are materialized via `with_state` instead; see
 /// [`ErasedState`](crate::contracts::ErasedState)).
 ///
 /// ```ignore
@@ -105,17 +105,12 @@ macro_rules! clause_tree {
 macro_rules! opaque_merkle_state {
     ($ty:ty) => {
         impl $crate::contracts::ContractState for $ty {
-            fn encode(&self) -> Vec<u8> {
-                $crate::merkle::MerkleTree::new(self.leaves().to_vec())
-                    .root()
-                    .to_vec()
-            }
-
-            fn decode(_bytes: &[u8]) -> Result<Self, $crate::contracts::WitnessError> {
-                Err($crate::contracts::WitnessError::DecodingFailed(format!(
-                    "{} is committed as an opaque Merkle root",
-                    stringify!($ty)
-                )))
+            fn commitment(&self) -> $crate::contracts::StateCommitment {
+                $crate::contracts::StateCommitment::identity(
+                    $crate::merkle::MerkleTree::new(self.leaves().to_vec())
+                        .root()
+                        .to_vec(),
+                )
             }
         }
     };

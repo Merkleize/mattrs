@@ -32,6 +32,7 @@ pub struct RpsParams {
 
 /// The committed state of `RpsGameS1`: `sha256(bn(m_b))`.
 #[derive(Debug, Clone, ContractState)]
+#[commit(identity)]
 pub struct RpsGameS1State {
     pub commitment: [u8; 32],
 }

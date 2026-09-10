@@ -218,7 +218,7 @@ fn test_ram_write_commits_updated_root() {
     let new_root = MerkleTree::new(updated).root();
     let expected = ram
         .as_erased()
-        .script_pubkey(Some(new_root.as_slice()))
+        .script_pubkey(Some(&mattrs::StateCommitment::identity(new_root.to_vec())))
         .unwrap();
 
     assert_eq!(tx.output.len(), 1);

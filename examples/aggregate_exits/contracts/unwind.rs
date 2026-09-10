@@ -18,6 +18,7 @@ define_pushable!();
 
 /// The pool's committed state: the account-tree root (identity commitment).
 #[derive(Debug, Clone, PartialEq, Eq, ContractState)]
+#[commit(identity)]
 pub struct UnwindState {
     pub root: [u8; 32],
 }

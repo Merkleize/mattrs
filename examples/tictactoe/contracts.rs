@@ -32,7 +32,10 @@
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
-use mattrs::contracts::{ClauseError, ClauseOutput, ContractState, CtvTemplate, WitnessError};
+use mattrs::contracts::{
+    ClauseError, ClauseOutput, ContractState, CtvTemplate, StateCodec, StateCommitment,
+    WitnessError,
+};
 use mattrs::manager::{MissingStateError, SpendBuilder};
 use mattrs::script_helpers::{check_input_contract, concat, dup, key_path_p2tr, older};
 use mattrs::{ContractParams, Signature, contract};
@@ -101,8 +104,8 @@ pub struct TttParams {
 }
 
 /// The game state: whose turn it is and the nine cells. Committed on-chain as
-/// the raw 10 bytes `turn || board` (the framework hashes non-32-byte
-/// commitments, and the tapscripts rebuild that same sha256 with `OP_CAT`).
+/// SHA256 of the 10 bytes `turn || board`. Serialization keeps the preimage;
+/// the explicit commitment matches the tapscripts' `OP_CAT`/`OP_SHA256` logic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TttState {
     pub turn: u8,
@@ -147,13 +150,19 @@ impl TttState {
 }
 
 impl ContractState for TttState {
+    fn commitment(&self) -> StateCommitment {
+        StateCommitment::sha256(&self.preimage())
+    }
+}
+
+impl StateCodec for TttState {
     fn encode(&self) -> Vec<u8> {
         self.preimage().to_vec()
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
         let bytes: &[u8; 10] = bytes.try_into().map_err(|_| {
-            WitnessError::InvalidData("a TttState commits exactly 10 bytes".to_string())
+            WitnessError::InvalidData("a TttState serialization is exactly 10 bytes".to_string())
         })?;
         let turn = bytes[0];
         let board: [u8; 9] = bytes[1..].try_into().expect("9 bytes");

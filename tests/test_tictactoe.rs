@@ -17,7 +17,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bitcoin::{Amount, Sequence};
-use mattrs::contracts::ContractState;
+use mattrs::contracts::{ContractState, StateCodec};
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{LocalChain, ProtocolError, Runner};
 use mattrs::script_helpers::key_path_p2tr as p2tr;
@@ -78,7 +78,7 @@ fn board(picture: &str) -> [u8; 9] {
 // ----------------------------------------------------------------------------
 
 #[test]
-fn state_roundtrips_through_its_commitment() {
+fn state_roundtrips_through_its_serialization() {
     let state = TttState {
         turn: TURN_BOB,
         board: board("XO. .X. ..O"),
@@ -94,6 +94,29 @@ fn state_roundtrips_through_its_commitment() {
     let mut bad_cell = bytes.clone();
     bad_cell[3] = 7;
     assert!(TttState::decode(&bad_cell).is_err(), "invalid cell byte");
+}
+
+#[test]
+fn explicit_state_hash_preserves_the_previous_address() {
+    use bitcoin::hashes::{Hash, sha256};
+    use mattrs::contracts::{apply_state_tweak, compute_taproot_output_key};
+    let state = TttState {
+        turn: TURN_BOB,
+        board: board("XO. .X. ..O"),
+    };
+    // Previous addressing implicitly hashed this 10-byte serialization.
+    let legacy_data = sha256::Hash::hash(&state.preimage()).to_byte_array();
+    assert_eq!(state.commitment().as_bytes(), legacy_data);
+    let contract = TicTacToe::new(params()).unwrap().as_erased();
+    let internal = apply_state_tweak(&mattrs::nums_key(), &legacy_data).unwrap();
+    let expected = mattrs::script_helpers::opaque_p2tr(compute_taproot_output_key(
+        &internal,
+        Some(contract.taptree()),
+    ));
+    assert_eq!(
+        contract.script_pubkey(Some(&state.commitment())).unwrap(),
+        expected
+    );
 }
 
 #[test]
@@ -138,7 +161,7 @@ fn moves_commit_the_updated_board() {
     let expected = TicTacToe::new(params())
         .unwrap()
         .as_erased()
-        .script_pubkey(Some(&next.encode()))
+        .script_pubkey(Some(&next.commitment()))
         .unwrap();
     assert_eq!(tx.output[0].script_pubkey, expected);
     assert_eq!(tx.output[0].value, Amount::from_sat(POT));

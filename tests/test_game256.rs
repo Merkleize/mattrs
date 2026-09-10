@@ -119,9 +119,7 @@ fn addr<S: ContractState + 'static>(
     contract: Arc<dyn ErasedContract>,
     state: &S,
 ) -> bitcoin::ScriptBuf {
-    contract
-        .script_pubkey(Some(ContractState::encode(state).as_slice()))
-        .unwrap()
+    contract.script_pubkey(Some(&state.commitment())).unwrap()
 }
 
 #[test]

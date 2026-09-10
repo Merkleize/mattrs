@@ -119,7 +119,7 @@ fn test_minivault_trigger_commits_unvaulting_state() {
     .unwrap();
     let expected = unvaulting
         .as_erased()
-        .script_pubkey(Some(wpk.as_slice()))
+        .script_pubkey(Some(&mattrs::StateCommitment::identity(wpk.to_vec())))
         .unwrap();
 
     assert_eq!(tx.output.len(), 1);

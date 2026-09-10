@@ -63,6 +63,7 @@ pub struct UnvaultingParams {
 }
 
 #[derive(Debug, Clone, ContractState)]
+#[commit(identity)]
 pub struct UnvaultingState {
     pub ctv_hash: [u8; 32],
 }

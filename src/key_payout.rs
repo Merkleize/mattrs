@@ -17,7 +17,7 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
 use crate::contracts::{
     ClauseError, ClauseOutput, ContractError, ErasedClause, ErasedContract, ErasedState,
-    NextOutputs, TapTree,
+    NextOutputs, StateCommitment, TapTree,
 };
 use crate::script_helpers::opaque_p2tr;
 
@@ -91,13 +91,16 @@ impl ErasedContract for KeyPayout {
         None
     }
 
-    fn script_pubkey(&self, _state_bytes: Option<&[u8]>) -> Result<ScriptBuf, ContractError> {
+    fn script_pubkey(
+        &self,
+        _commitment: Option<&StateCommitment>,
+    ) -> Result<ScriptBuf, ContractError> {
         Ok(opaque_p2tr(self.pk))
     }
 
     fn control_block_internal_key(
         &self,
-        _state_bytes: Option<&[u8]>,
+        _commitment: Option<&StateCommitment>,
     ) -> Result<XOnlyPublicKey, ContractError> {
         Ok(self.pk)
     }
