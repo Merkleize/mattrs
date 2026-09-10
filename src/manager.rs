@@ -61,7 +61,7 @@ fn poll_until<T>(
     }
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct ContractOutputIdentity {
     contract_type: std::any::TypeId,
     params: Vec<u8>,
@@ -87,7 +87,7 @@ impl ContractOutputIdentity {
 }
 
 /// Preserve tracking identity separately from the script being paid.
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum OutputIdentity {
     Contract(ContractOutputIdentity),
     Payment(bitcoin::ScriptBuf),
@@ -100,6 +100,18 @@ struct ResolvedOutput {
     script_pubkey: bitcoin::ScriptBuf,
     amount: ClauseOutputAmountBehaviour,
     identity: OutputIdentity,
+}
+
+/// Read-only result of authenticating a known input and resolving its metadata.
+struct ObservedInput {
+    handle: InstanceHandle,
+    vin: usize,
+    value: Amount,
+    clause_name: String,
+    witness_args: Vec<Vec<u8>>,
+    next: NextOutputs,
+    outputs: Vec<ResolvedOutput>,
+    already_spent: bool,
 }
 
 fn resolve_outputs(next: &NextOutputs) -> Result<Vec<ResolvedOutput>, ManagerError> {
@@ -207,6 +219,18 @@ pub enum ManagerError {
     PaymentOutputMismatch {
         index: u32,
     },
+    /// Strict batch observation lacks contract context for these inputs.
+    IncompleteObservation {
+        missing: Vec<OutPoint>,
+    },
+    /// The combined preserve/join contributions exceed the output's amount.
+    InsufficientOutputAmount {
+        index: u32,
+        required: Amount,
+        actual: Amount,
+    },
+    /// Amount accounting overflowed instead of representing a valid sum.
+    AmountOverflow,
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
@@ -317,6 +341,20 @@ impl std::fmt::Display for ManagerError {
                 f,
                 "Payment output {index} is missing or has the wrong script"
             ),
+            ManagerError::IncompleteObservation { missing } => write!(
+                f,
+                "Batch observation needs contract context for {} input(s): {missing:?}",
+                missing.len()
+            ),
+            ManagerError::InsufficientOutputAmount {
+                index,
+                required,
+                actual,
+            } => write!(
+                f,
+                "Output {index} has {actual}, below the combined required amount {required}"
+            ),
+            ManagerError::AmountOverflow => write!(f, "Output amount accounting overflow"),
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
             }
@@ -1187,6 +1225,7 @@ impl ContractManager {
                 let existing = existing.borrow();
                 if ContractOutputIdentity::from_instance(&existing)
                     != ContractOutputIdentity::from_clause_output(clause_out)
+                    || existing.script_pubkey()? != actual.script_pubkey
                 {
                     return Err(ManagerError::ConflictingOutputContract { index: vout });
                 }
@@ -1255,25 +1294,13 @@ impl ContractManager {
         Ok(self.register_instance(instance))
     }
 
-    /// Decode an already-known transaction that spends `handle`'s instance:
-    /// identify the clause from the tapscript in the witness, record the spend
-    /// (clause name + witness arguments) on the instance, execute the clause's
-    /// `next_outputs` against the decoded arguments, and materialize the child
-    /// instances. Performs no RPC.
-    ///
-    /// Returns the child handles (empty for terminal and CTV-template clauses).
-    /// If the instance is already marked spent by this same transaction, the
-    /// previously materialized children are returned.
-    ///
-    /// A `NextOutputs::Join` input's child is defined by *another* input of the
-    /// same transaction: observing the joining input before the defining one
-    /// yields no children yet — re-observe it after the defining input to link
-    /// and return the shared child ([`crate::testutil::apply_batch`] does this).
-    pub fn observe_spend(
-        &mut self,
+    /// Authenticate the witness and resolve one input's declared constraints.
+    /// Does not record the spend, create children, or perform RPC.
+    fn decode_observation(
+        &self,
         handle: &InstanceHandle,
         spending_tx: &Transaction,
-    ) -> Result<Children, ManagerError> {
+    ) -> Result<ObservedInput, ManagerError> {
         let txid = spending_tx.compute_txid();
 
         let already_spent = {
@@ -1283,14 +1310,6 @@ impl ContractManager {
                     return Err(ManagerError::InvalidInstance(
                         "Instance already spent by a different transaction".to_string(),
                     ));
-                }
-                // Re-observation: return the cached children — unless there are
-                // none, which for a joining input observed before its defining
-                // input means the link may still be missing; fall through and
-                // retry it (a no-op for genuinely childless clauses).
-                let outputs = handle.outputs();
-                if !outputs.is_empty() {
-                    return Ok(outputs);
                 }
                 true
             } else if inst.status() != InstanceStatus::Funded {
@@ -1367,13 +1386,47 @@ impl ContractManager {
             (clause.name().to_string(), next)
         };
 
-        validate_output_constraints(
-            handle.prevout().ok_or(ManagerError::NotFunded)?.value,
-            &resolve_outputs(&next)?,
-            spending_tx,
-            vin,
-        )?;
+        let value = handle.prevout().ok_or(ManagerError::NotFunded)?.value;
+        let outputs = resolve_outputs(&next)?;
+        validate_output_constraints(value, &outputs, spending_tx, vin)?;
         validate_ctv_commitment(&next, spending_tx, vin)?;
+
+        Ok(ObservedInput {
+            handle: handle.clone(),
+            vin,
+            value,
+            clause_name,
+            witness_args,
+            next,
+            outputs,
+            already_spent,
+        })
+    }
+
+    /// Observe one input's declared constraints, not transaction-wide accounting.
+    ///
+    /// Use [`observe_batch`](Self::observe_batch) when all input contexts are
+    /// available. This RPC-free method does not execute scripts, verify
+    /// signatures, or establish confirmation/consensus validity. Re-observing a
+    /// spend validates its witness again before returning cached children.
+    /// A join whose defining input has not been observed yet can be retried.
+    pub fn observe_spend(
+        &mut self,
+        handle: &InstanceHandle,
+        spending_tx: &Transaction,
+    ) -> Result<Children, ManagerError> {
+        let ObservedInput {
+            vin,
+            clause_name,
+            witness_args,
+            next,
+            already_spent,
+            ..
+        } = self.decode_observation(handle, spending_tx)?;
+        let txid = spending_tx.compute_txid();
+        if already_spent && !handle.outputs().is_empty() {
+            return Ok(handle.outputs());
+        }
 
         let children = match &next {
             // A re-observed instance with no cached children got here only to
@@ -1422,6 +1475,154 @@ impl ContractManager {
         ))
     }
 
+    /// Validate and observe a complete batch of contract inputs, without RPC.
+    ///
+    /// `handles` must cover every transaction input exactly once, in any order.
+    /// Missing co-input context is an error, never an implicit unconstrained
+    /// input. Ordinary wallet/fee inputs without contract metadata are therefore
+    /// not supported by this strict API yet.
+    ///
+    /// Validates witnesses, declared output scripts, CTV commitments, aggregate
+    /// preserve amounts, cross-input deduct conflicts, and join contributions.
+    /// All checks and child construction finish before any parent or registry is
+    /// changed. Children are deduplicated and returned in output-index order;
+    /// joins are linked in the same call regardless of input/handle ordering.
+    ///
+    /// This validates the declared model, not arbitrary script execution,
+    /// signatures, UTXO availability, confirmations, or full consensus validity.
+    pub fn observe_batch(
+        &mut self,
+        handles: &[&InstanceHandle],
+        spending_tx: &Transaction,
+    ) -> Result<Children, ManagerError> {
+        if spending_tx.input.is_empty() {
+            return Err(ManagerError::InvalidInstance(
+                "cannot observe an empty input set".into(),
+            ));
+        }
+        if spending_tx.output.is_empty() {
+            return Err(ManagerError::NoOutputs);
+        }
+        let mut input_indices = BTreeMap::new();
+        for (vin, input) in spending_tx.input.iter().enumerate() {
+            if input_indices.insert(input.previous_output, vin).is_some() {
+                return Err(ManagerError::InvalidInstance(
+                    "transaction spends an outpoint more than once".into(),
+                ));
+            }
+        }
+        let mut supplied = BTreeMap::new();
+        for handle in handles {
+            let outpoint = handle.outpoint().ok_or(ManagerError::NotFunded)?;
+            let vin = *input_indices.get(&outpoint).ok_or_else(|| {
+                ManagerError::InvalidInstance(format!(
+                    "observation context {outpoint} is not an input of this transaction"
+                ))
+            })?;
+            if supplied.insert(vin, *handle).is_some() {
+                return Err(ManagerError::InvalidInstance(
+                    "duplicate input context in observation".into(),
+                ));
+            }
+        }
+        let missing: Vec<_> = spending_tx
+            .input
+            .iter()
+            .enumerate()
+            .filter(|(vin, _)| !supplied.contains_key(vin))
+            .map(|(_, input)| input.previous_output)
+            .collect();
+        if !missing.is_empty() {
+            return Err(ManagerError::IncompleteObservation { missing });
+        }
+        let observed: Vec<_> = supplied
+            .values()
+            .map(|handle| self.decode_observation(handle, spending_tx))
+            .collect::<Result<_, _>>()?;
+        validate_batch_constraints(&observed, spending_tx)?;
+
+        // Stage every child before mutating the registry or linking any parent.
+        let txid = spending_tx.compute_txid();
+        let mut children: BTreeMap<u32, Rc<RefCell<ContractInstance>>> = BTreeMap::new();
+        let mut new_children = Vec::new();
+        for input in &observed {
+            if let NextOutputs::Contracts(outputs) = &input.next {
+                for output in outputs {
+                    let vout = output.index.resolve(input.vin);
+                    let outpoint = OutPoint { txid, vout };
+                    // Check expanded state type even if this output already exists.
+                    let mut candidate = ContractInstance::new(
+                        output.next_contract.clone(),
+                        output.next_state.clone(),
+                    )?;
+                    let cached = input
+                        .handle
+                        .outputs()
+                        .into_iter()
+                        .find(|child| child.outpoint() == Some(outpoint));
+                    let existing = children
+                        .get(&vout)
+                        .cloned()
+                        .or_else(|| self.find_instance_by_outpoint(outpoint))
+                        .or_else(|| cached.map(|child| child.instance));
+                    let child = if let Some(existing) = existing {
+                        if ContractOutputIdentity::from_instance(&existing.borrow())
+                            != ContractOutputIdentity::from_clause_output(output)
+                            || existing.borrow().script_pubkey()?
+                                != spending_tx.output[vout as usize].script_pubkey
+                        {
+                            return Err(ManagerError::ConflictingOutputContract { index: vout });
+                        }
+                        existing
+                    } else {
+                        candidate.mark_funded(outpoint, spending_tx.clone());
+                        let child = Rc::new(RefCell::new(candidate));
+                        new_children.push(child.clone());
+                        child
+                    };
+                    children.insert(vout, child);
+                }
+            }
+        }
+
+        // Nothing below is fallible: all input metadata and children are staged.
+        self.instances.extend(new_children);
+        for input in &observed {
+            let indices: Vec<_> = match &input.next {
+                NextOutputs::Contracts(outputs) => {
+                    outputs.iter().map(|o| o.index.resolve(input.vin)).collect()
+                }
+                NextOutputs::Join { index } => vec![*index],
+                _ => Vec::new(),
+            };
+            let mut parent = input.handle.instance.borrow_mut();
+            for index in indices {
+                parent.add_output(
+                    children
+                        .get(&index)
+                        .expect("validated child target")
+                        .clone(),
+                );
+            }
+            if !input.already_spent {
+                parent.mark_spent(
+                    spending_tx.clone(),
+                    input.vin,
+                    input.clause_name.clone(),
+                    input.witness_args.clone(),
+                );
+            }
+        }
+        #[cfg(feature = "inspector")]
+        self.notify_inspector();
+        Ok(Children::new(
+            children
+                .into_values()
+                .map(|instance| InstanceHandle { instance })
+                .collect(),
+        ))
+    }
+
     /// Wait until `handle`'s instance is spent on-chain (watching the mempool and
     /// new blocks), then decode the spend and materialize the child instances via
     /// [`observe_spend`](Self::observe_spend).
@@ -1433,6 +1634,36 @@ impl ContractManager {
     /// [`InstanceHandle::spending_args`]).
     pub fn wait_for_spend(&mut self, handle: &InstanceHandle) -> Result<Children, ManagerError> {
         self.wait_for_spend_within(handle, Some(DEFAULT_POLL_WINDOW))
+    }
+
+    /// Wait for a transaction spending the first handle, then strictly observe
+    /// it as one batch. All input contexts must be supplied; if the transaction
+    /// spends only a subset of `handles` or has unknown co-inputs, return an
+    /// error without observing any parent. Performs node reads but no broadcast.
+    ///
+    /// For inputs that may be spent in separate transactions, use
+    /// [`wait_for_spends`](Self::wait_for_spends), which provides per-input checks.
+    pub fn wait_for_batch(
+        &mut self,
+        handles: &[&InstanceHandle],
+    ) -> Result<Children, ManagerError> {
+        let first = handles.first().ok_or_else(|| {
+            ManagerError::InvalidInstance("cannot wait for an empty batch".into())
+        })?;
+        let tx = if first.status() == InstanceStatus::Spent {
+            first.spending_tx().ok_or_else(|| {
+                ManagerError::InvalidInstance("spent instance has no spending transaction".into())
+            })?
+        } else {
+            if first.status() != InstanceStatus::Funded {
+                return Err(ManagerError::NotFunded);
+            }
+            self.wait_for_spending_tx(
+                first.outpoint().ok_or(ManagerError::NotFunded)?,
+                Some(DEFAULT_POLL_WINDOW),
+            )?
+        };
+        self.observe_batch(handles, &tx)
     }
 
     /// [`wait_for_spend`](Self::wait_for_spend) with an explicit polling window:
@@ -1454,6 +1685,8 @@ impl ContractManager {
     /// [`wait_for_spend`](Self::wait_for_spend) for several instances (possibly
     /// spent by one batch transaction). Children merged across inputs are
     /// materialized once and returned once.
+    /// This uses per-input checks, not aggregate accounting. If all handles are
+    /// intended to spend together, use [`wait_for_batch`](Self::wait_for_batch).
     pub fn wait_for_spends(
         &mut self,
         handles: &[InstanceHandle],
@@ -1710,6 +1943,77 @@ fn validate_clause_witness(
             offset,
             witness.len()
         )));
+    }
+    Ok(())
+}
+
+/// Cross-input accounting, after every input's scripts and local constraints
+/// have been checked. Ignore mode does not participate in BIP-443 accounting.
+fn validate_batch_constraints(
+    inputs: &[ObservedInput],
+    tx: &Transaction,
+) -> Result<(), ManagerError> {
+    let mut identities: BTreeMap<u32, OutputIdentity> = BTreeMap::new();
+    let mut minimum: BTreeMap<u32, Amount> = BTreeMap::new();
+    let mut deducted = std::collections::BTreeSet::new();
+    for input in inputs {
+        let mut residual = input.value;
+        for output in &input.outputs {
+            let index = output.index.resolve(input.vin);
+            if identities
+                .get(&index)
+                .is_some_and(|previous| previous != &output.identity)
+            {
+                return Err(ManagerError::ConflictingOutputContract { index });
+            }
+            identities
+                .entry(index)
+                .or_insert_with(|| output.identity.clone());
+            match output.amount {
+                ClauseOutputAmountBehaviour::PreserveOutput => {
+                    if deducted.contains(&index) {
+                        return Err(ManagerError::MixedOutputSemantics { index });
+                    }
+                    let total = minimum.entry(index).or_insert(Amount::ZERO);
+                    *total = total
+                        .checked_add(residual)
+                        .ok_or(ManagerError::AmountOverflow)?;
+                    residual = Amount::ZERO;
+                }
+                ClauseOutputAmountBehaviour::DeductOutput => {
+                    if minimum.contains_key(&index) || !deducted.insert(index) {
+                        return Err(ManagerError::MixedOutputSemantics { index });
+                    }
+                    residual = residual
+                        .checked_sub(tx.output[index as usize].value)
+                        .ok_or(ManagerError::DeductExceedsInput)?;
+                }
+                ClauseOutputAmountBehaviour::IgnoreOutput => {}
+            }
+        }
+    }
+    for input in inputs {
+        if let NextOutputs::Join { index } = input.next {
+            if !matches!(identities.get(&index), Some(OutputIdentity::Contract(_))) {
+                return Err(ManagerError::JoinWithoutTarget { index });
+            }
+            let total = minimum
+                .get_mut(&index)
+                .ok_or(ManagerError::MixedOutputSemantics { index })?;
+            *total = total
+                .checked_add(input.value)
+                .ok_or(ManagerError::AmountOverflow)?;
+        }
+    }
+    for (index, required) in minimum {
+        let actual = tx.output[index as usize].value;
+        if actual < required {
+            return Err(ManagerError::InsufficientOutputAmount {
+                index,
+                required,
+                actual,
+            });
+        }
     }
     Ok(())
 }
@@ -2222,6 +2526,10 @@ impl SpendBuilder {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "manager/observation_tests.rs"]
+mod observation_tests;
 
 #[cfg(test)]
 mod tests {

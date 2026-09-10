@@ -101,7 +101,8 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 #[ignore = "requires a running regtest bitcoind"]
 fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>> {
     // Two vaults triggered by a single batch transaction; the observer tracks
-    // both and `wait_for_spends` returns the merged unvaulting child once.
+    // both and `wait_for_batch` validates the combined contribution and returns
+    // the merged unvaulting child once.
     let params = VaultParams {
         alternate_pk: None,
         spend_delay: 10,
@@ -157,7 +158,7 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(children.len(), 1);
     actor.mine_blocks(1)?;
 
-    let observed = observer.wait_for_spends(&[tracked_1.clone(), tracked_2.clone()])?;
+    let observed = observer.wait_for_batch(&[&tracked_1, &tracked_2])?;
     assert_eq!(observed.len(), 1);
     assert_eq!(tracked_1.clause_name().as_deref(), Some("trigger"));
     assert_eq!(tracked_2.clause_name().as_deref(), Some("trigger"));

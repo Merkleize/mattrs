@@ -180,9 +180,30 @@ same index, and `Join` still requires a tracked child target.
 Omitting `next` (or returning `ClauseOutput::terminal()`) declares **no host-side
 output checks**. It does not make a script unconstrained. Output metadata does
 not generate script checks, and observation is not full consensus/script
-validation. In particular, observation checks amount constraints per input;
-it does not verify transaction-wide CCV accounting across co-inputs. Use a
-validating node to establish consensus validity of external transactions.
+validation. Use a validating node to establish consensus validity of external
+transactions.
+
+### Observing a whole batch
+
+`manager.observe_batch(&[&first, &second], &tx)?` checks all supplied input
+contexts together before recording any spend or registering any child. Supply
+one handle for **every** transaction input, in any order. It rejects missing or
+duplicate contexts, combined preserve underpayments, cross-input deduct
+conflicts, incompatible child identities, and unfunded join contributions.
+Children are returned once, in output-index order; joins link in the same call.
+
+`wait_for_batch(&[&first, &second])?` discovers the spending transaction through
+the node and performs that same strict observation. The offline `apply_batch`
+test helper calls `observe_batch` directly, without the node lookup.
+
+`observe_spend` and `wait_for_spends` remain useful for partial views, but only
+check individual inputs. Two independent lower-bound checks are not equivalent
+to checking a combined contribution. Strict batch observation currently needs
+contract metadata for every input, so transactions with ordinary wallet/fee
+inputs cannot use it until those contexts can be represented. Neither API
+executes arbitrary scripts or verifies signatures; declared metadata must match
+the script. Re-observing a transaction authenticates its witness again, even
+when its transaction ID and children were cached.
 
 ## Fraud proofs: `mattrs::fraud`
 

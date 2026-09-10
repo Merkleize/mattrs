@@ -64,27 +64,19 @@ pub fn fund_fake(
 }
 
 /// Build the batch transaction for `builders` and decode it against each of
-/// `parents` with [`ContractManager::observe_spend`], materializing the
+/// `parents` with [`ContractManager::observe_batch`], materializing the
 /// (deduplicated) children — the offline counterpart of
 /// [`ContractManager::spend_batch`]: no broadcast, no RPC. Children merged
 /// across inputs (a shared `PreserveOutput` index) are returned once, and the
-/// order of `parents` does not matter: a joining input (`NextOutputs::Join`)
-/// observed before its defining input is re-observed after every other parent,
-/// so its link to the shared child is never missed.
+/// order of `parents` does not matter. Every input must have a parent context;
+/// constraints are checked together before any parent is changed, and joins
+/// are linked in the same call.
 pub fn apply_batch(
     manager: &mut ContractManager,
     parents: &[&InstanceHandle],
     builders: &[SpendBuilder],
 ) -> Result<(Transaction, Children), ManagerError> {
     let tx = manager.build_batch_tx(builders)?;
-    let mut children: Vec<InstanceHandle> = Vec::new();
-    // Two passes: the second links any join observed before its defining input.
-    for parent in parents.iter().chain(parents.iter()) {
-        for child in manager.observe_spend(parent, &tx)? {
-            if !children.contains(&child) {
-                children.push(child);
-            }
-        }
-    }
-    Ok((tx, Children::new(children)))
+    let children = manager.observe_batch(parents, &tx)?;
+    Ok((tx, children))
 }
