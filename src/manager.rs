@@ -219,7 +219,7 @@ pub enum ManagerError {
     PaymentOutputMismatch {
         index: u32,
     },
-    /// Strict batch observation lacks contract context for these inputs.
+    /// Strict batch observation lacks contract or external context for these inputs.
     IncompleteObservation {
         missing: Vec<OutPoint>,
     },
@@ -231,6 +231,21 @@ pub enum ManagerError {
     },
     /// Amount accounting overflowed instead of representing a valid sum.
     AmountOverflow,
+    /// An external input is not a supported native wallet spend.
+    UnsupportedExternalInput {
+        outpoint: OutPoint,
+    },
+    /// Supplied input contexts are duplicated, unrelated, or contradictory.
+    InvalidInputContext(String),
+    /// The transaction spends more than its supplied prevouts provide.
+    OutputsExceedInputs,
+    /// Wallet funding changed protected transaction fields or input context.
+    InvalidWalletFunding(String),
+    /// The actual absolute fee exceeds the caller's authorization.
+    FeeTooHigh {
+        fee: Amount,
+        maximum: Amount,
+    },
     TransactionBuildError(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
@@ -355,6 +370,19 @@ impl std::fmt::Display for ManagerError {
                 "Output {index} has {actual}, below the combined required amount {required}"
             ),
             ManagerError::AmountOverflow => write!(f, "Output amount accounting overflow"),
+            ManagerError::UnsupportedExternalInput { outpoint } => write!(
+                f,
+                "Unsupported external input {outpoint}: expected native P2WPKH or Taproot key-path spending"
+            ),
+            ManagerError::InvalidInputContext(msg) => write!(f, "Invalid input context: {msg}"),
+            ManagerError::OutputsExceedInputs => {
+                write!(f, "Transaction outputs exceed supplied input value")
+            }
+            ManagerError::InvalidWalletFunding(msg) => write!(f, "Invalid wallet funding: {msg}"),
+            ManagerError::FeeTooHigh { fee, maximum } => write!(
+                f,
+                "Transaction fee {fee} exceeds authorized maximum {maximum}"
+            ),
             ManagerError::TransactionBuildError(msg) => {
                 write!(f, "Transaction build error: {}", msg)
             }
@@ -402,6 +430,9 @@ impl From<WrongContractType> for ManagerError {
         ManagerError::WrongContract(e)
     }
 }
+
+mod wallet;
+pub use wallet::{BatchObservation, ExternalInput, SignedWalletSpend, WalletSpend};
 
 /// An unsigned batch whose outputs and input constraints have been resolved.
 /// Kept separate from signing so validation never prompts a signer.
@@ -1479,8 +1510,8 @@ impl ContractManager {
     ///
     /// `handles` must cover every transaction input exactly once, in any order.
     /// Missing co-input context is an error, never an implicit unconstrained
-    /// input. Ordinary wallet/fee inputs without contract metadata are therefore
-    /// not supported by this strict API yet.
+    /// input. For ordinary wallet/fee inputs, use
+    /// [`observe_batch_with_external_inputs`](Self::observe_batch_with_external_inputs).
     ///
     /// Validates witnesses, declared output scripts, CTV commitments, aggregate
     /// preserve amounts, cross-input deduct conflicts, and join contributions.
@@ -1493,6 +1524,16 @@ impl ContractManager {
     pub fn observe_batch(
         &mut self,
         handles: &[&InstanceHandle],
+        spending_tx: &Transaction,
+    ) -> Result<Children, ManagerError> {
+        self.observe_batch_inner(handles, &[], spending_tx)
+    }
+
+    // Nonempty external context must first be validated by external_contexts.
+    fn observe_batch_inner(
+        &mut self,
+        handles: &[&InstanceHandle],
+        external: &[ExternalInput],
         spending_tx: &Transaction,
     ) -> Result<Children, ManagerError> {
         if spending_tx.input.is_empty() {
@@ -1529,7 +1570,10 @@ impl ContractManager {
             .input
             .iter()
             .enumerate()
-            .filter(|(vin, _)| !supplied.contains_key(vin))
+            .filter(|(vin, input)| {
+                !supplied.contains_key(vin)
+                    && !external.iter().any(|e| e.outpoint == input.previous_output)
+            })
             .map(|(_, input)| input.previous_output)
             .collect();
         if !missing.is_empty() {
@@ -1647,6 +1691,11 @@ impl ContractManager {
         &mut self,
         handles: &[&InstanceHandle],
     ) -> Result<Children, ManagerError> {
+        let tx = self.wait_for_batch_tx(handles)?;
+        self.observe_batch(handles, &tx)
+    }
+
+    fn wait_for_batch_tx(&self, handles: &[&InstanceHandle]) -> Result<Transaction, ManagerError> {
         let first = handles.first().ok_or_else(|| {
             ManagerError::InvalidInstance("cannot wait for an empty batch".into())
         })?;
@@ -1663,7 +1712,7 @@ impl ContractManager {
                 Some(DEFAULT_POLL_WINDOW),
             )?
         };
-        self.observe_batch(handles, &tx)
+        Ok(tx)
     }
 
     /// [`wait_for_spend`](Self::wait_for_spend) with an explicit polling window:
@@ -2529,6 +2578,8 @@ mod observation_tests;
 
 #[cfg(test)]
 mod tests {
+    mod wallet_tests;
+
     use super::*;
     use crate::contracts::{
         ClauseOutput, ClauseTree, CtvTemplate, NextOutputsFn, RawArgs, StandardClause, StandardP2TR,

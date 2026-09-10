@@ -272,12 +272,55 @@ test helper calls `observe_batch` directly, without the node lookup.
 
 `observe_spend` and `wait_for_spends` remain useful for partial views, but only
 check individual inputs. Two independent lower-bound checks are not equivalent
-to checking a combined contribution. Strict batch observation currently needs
-contract metadata for every input, so transactions with ordinary wallet/fee
-inputs cannot use it until those contexts can be represented. Neither API
+to checking a combined contribution. For ordinary wallet/fee inputs, use
+`observe_batch_with_external_inputs(&handles, &external_inputs, &tx)` instead.
+Supply an `ExternalInput { outpoint, prevout }` from a trusted source for each
+wallet input. Contexts are matched by outpoint, not by their order in the list.
+The result contains deduplicated `children` and the transaction's absolute `fee`.
+Wallet value pays fees/change but never increases a contract's CCV contribution.
+Native P2WPKH and Taproot key-path spends (including annexes) are supported;
+external tapscripts, legacy inputs, and unknown input contexts are rejected.
+`wait_for_batch_with_external_inputs` accepts a caller-supplied prevout resolver;
+use funding transactions or a trusted cache, since the outputs are already spent
+and may no longer be available through `gettxout`. Neither observation API
 executes arbitrary scripts or verifies signatures; declared metadata must match
 the script. Re-observing a transaction authenticates its witness again, even
 when its transaction ID and children were cached.
+
+### Funding contract spends with an external wallet
+
+`prepare_wallet_spend(builders)` produces an unsigned transaction and the
+contract input weights needed by a wallet. Register contract signers on those
+builders, leaving signature arguments empty; preparation never invokes them.
+
+1. Let the wallet fund `prepared.transaction()`, appending fee inputs and change.
+2. Resolve the added inputs' prevouts from a trusted wallet/node.
+3. Call `prepared.sign_funded(&manager, funded_tx, external_inputs, maximum_fee)`.
+   This validates the funded transaction, its fee, and all required signers
+   before generating default-sighash contract signatures against **all** prevouts.
+4. Let the wallet sign its own inputs, then call `signed.validate_final(&tx)`
+   before broadcasting. Only external witnesses may change at this stage.
+5. After node acceptance, call `signed.observe_final(&mut manager, &tx)` to record
+   the final transaction atomically. Preparation/signing never marks parents spent.
+
+Existing inputs, sequences, outputs, version, and locktime must stay unchanged.
+No automatic input/output remapping, fee subtraction from contract outputs,
+PSBT transport, or coin selection is imposed by the library. CTV is rechecked:
+an exact template may prohibit adding fee inputs or change. Fee bumps require a
+fresh authorized transaction and fresh signatures; there is no implicit switch
+to `ANYONECANPAY`. Applications remain responsible for wallet coin locking,
+change ownership, authenticating prevouts, and node acceptance/confirmation policy.
+
+See [`examples/wallet_funding.rs`](examples/wallet_funding.rs) for a complete
+Bitcoin Core `fundrawtransaction` / `signrawtransactionwithwallet` adapter and a
+separate passive observer. Run `cargo run --example wallet_funding` against a
+CCV-enabled regtest node with a funded `testwallet` (broadcasts and mines blocks).
+It passes contract weights via `input_weights` and appends change via
+`changePosition`, following the [Core funding RPC documentation](https://bitcoincore.org/en/doc/30.0.0/rpc/rawtransactions/fundrawtransaction/).
+The separation of contract contributions and fee funding follows
+[BIP-443](https://github.com/bitcoin/bips/blob/master/bip-0443.mediawiki);
+the native Taproot witness classification follows
+[BIP-341](https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki).
 
 ## Fraud proofs: `mattrs::fraud`
 
