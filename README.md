@@ -259,6 +259,13 @@ constants remain available for raw scripts; do not combine them as flags.
 
 ### Observing a whole batch
 
+The manager keeps preparation, signing, constraint validation, chain I/O, and
+lifecycle updates in separate internal components while preserving the public
+API. Ordinary execution and strict batch observation share validated, staged
+child/link updates: execution checks them before broadcast and commits only
+after broadcast succeeds. See the [manager architecture guide](src/manager/README.md)
+for component boundaries and failure semantics.
+
 `manager.observe_batch(&[&first, &second], &tx)?` checks all supplied input
 contexts together before recording any spend or registering any child. Supply
 one handle for **every** transaction input, in any order. It rejects missing or

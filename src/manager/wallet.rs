@@ -1,7 +1,18 @@
 //! External-wallet funding without weakening contract accounting.
 
-use super::*;
+use super::validation::{
+    InputConstraints, resolve_outputs, validate_batch_constraints, validate_ctv_commitment,
+    validate_output_constraints,
+};
+use super::{Children, ContractManager, InstanceHandle, ManagerError, SpendBuilder};
+use super::{
+    signing::input_witness,
+    transaction::{PreparedBatch, prepare},
+};
+use crate::contracts::{InstanceStatus, NextOutputs};
 use bitcoin::hashes::{Hash, hash160};
+use bitcoin::{Amount, OutPoint, Transaction, TxIn, TxOut, XOnlyPublicKey};
+use std::collections::BTreeMap;
 
 /// Prevout context for a non-contract input, to be authenticated by the caller.
 ///
@@ -106,7 +117,13 @@ impl WalletSpend {
             });
         }
 
-        let mut observed = Vec::with_capacity(handles.len());
+        let resolved: Vec<_> = self
+            .prepared
+            .nexts
+            .iter()
+            .map(resolve_outputs)
+            .collect::<Result<_, _>>()?;
+        let mut constraints = Vec::with_capacity(handles.len());
         for (vin, (builder, handle)) in self.builders.iter().zip(&handles).enumerate() {
             if handle.status() != InstanceStatus::Funded
                 || prevouts[vin] != self.prepared.prevouts[vin]
@@ -115,19 +132,18 @@ impl WalletSpend {
                     "a prepared contract input is no longer funded as expected",
                 ));
             }
-            let next = self.prepared.nexts[vin].clone();
-            let outputs = resolve_outputs(&next)?;
-            validate_output_constraints(prevouts[vin].value, &outputs, &funded, vin)?;
-            validate_ctv_commitment(&next, &funded, vin)?;
-            observed.push(ObservedInput {
-                handle: handle.clone(),
+            let next = &self.prepared.nexts[vin];
+            let outputs = &resolved[vin];
+            validate_output_constraints(prevouts[vin].value, outputs, &funded, vin)?;
+            validate_ctv_commitment(next, &funded, vin)?;
+            constraints.push(InputConstraints {
                 vin,
                 value: prevouts[vin].value,
-                clause_name: builder.clause_name.to_owned(),
-                witness_args: builder.witness_args.clone(),
-                next,
                 outputs,
-                already_spent: false,
+                join: match next {
+                    NextOutputs::Join { index } => Some(*index),
+                    _ => None,
+                },
             });
             let inst = builder.instance.borrow();
             let clause = inst
@@ -145,9 +161,9 @@ impl WalletSpend {
             }
         }
         // Only the contract inputs contribute to these CCV checks.
-        validate_batch_constraints(&observed, &funded)?;
+        validate_batch_constraints(&constraints, &funded)?;
         for (vin, builder) in self.builders.iter().enumerate() {
-            let witness = manager.input_witness(builder, &funded, vin, &prevouts)?;
+            let witness = input_witness(builder, &funded, vin, &prevouts)?;
             // The signer receives a default sighash. Do not accept a different
             // sighash suffix or silently exceed the weight advertised to wallets.
             if 164 + witness.size() as u64 != self.input_weights[vin] {
@@ -240,7 +256,7 @@ impl ContractManager {
         &self,
         builders: Vec<SpendBuilder>,
     ) -> Result<WalletSpend, ManagerError> {
-        let prepared = self.prepare(&builders)?;
+        let prepared = prepare(&builders)?;
         let mut input_weights = Vec::with_capacity(builders.len());
         for builder in &builders {
             let inst = builder.instance.borrow();

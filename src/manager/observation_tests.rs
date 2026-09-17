@@ -1,8 +1,16 @@
 //! Adversarial tests of the declared model, not consensus-script execution.
 
+use super::signing::input_witness;
 use super::*;
+use crate::contracts::NextOutputs;
+use crate::contracts::{
+    ClauseOutput, ClauseOutputAmountBehaviour, ErasedContract, InstanceStatus, OutputIndex,
+};
 use crate::contracts::{ClauseTree, PaymentOutput, RawArgs, StandardClause, StandardP2TR};
+use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut};
+use bitcoincore_rpc::Client;
 use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc};
 
 fn manager() -> ContractManager {
     ContractManager::new(
@@ -67,9 +75,8 @@ fn transaction(handles: &[&InstanceHandle], output: Vec<TxOut>) -> Transaction {
     };
     let prevouts: Vec<_> = handles.iter().map(|h| h.prevout().unwrap()).collect();
     for (vin, handle) in handles.iter().enumerate() {
-        tx.input[vin].witness = manager()
-            .input_witness(&handle.spend_clause("spend", vec![]), &tx, vin, &prevouts)
-            .unwrap();
+        tx.input[vin].witness =
+            input_witness(&handle.spend_clause("spend", vec![]), &tx, vin, &prevouts).unwrap();
     }
     tx
 }
