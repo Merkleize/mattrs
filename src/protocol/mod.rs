@@ -156,6 +156,25 @@ impl<O> Action<O> {
         }
     }
 
+    /// [`wait_or_send`](Action::wait_or_send) with the deadline read from the
+    /// fallback's own clause: the delay it declares with `timelock`. Prefer
+    /// this whenever the clause declares one, so the role cannot repeat (and
+    /// drift from) a number the contract already states. Errors if the clause
+    /// declares no timelock.
+    pub fn wait_or(builder: SpendBuilder) -> Result<Self, ProtocolError> {
+        Ok(Self::wait_or_send(clause_delay(&builder)?, builder))
+    }
+
+    /// [`wait_or`](Action::wait_or) for a terminal fallback: broadcast the
+    /// spend and resolve with `outcome`.
+    pub fn wait_or_final(builder: SpendBuilder, outcome: O) -> Result<Self, ProtocolError> {
+        Ok(Self::wait_or_send_final(
+            clause_delay(&builder)?,
+            builder,
+            outcome,
+        ))
+    }
+
     /// [`wait_or_send`](Action::wait_or_send) for a terminal fallback:
     /// broadcast the spend and resolve with `outcome`.
     pub fn wait_or_send_final(blocks: u32, builder: SpendBuilder, outcome: O) -> Self {
@@ -164,6 +183,17 @@ impl<O> Action<O> {
             on_timeout: TimeoutAction::SendFinal(builder.sequence(blocks), outcome),
         }
     }
+}
+
+/// The CSV delay a timeout fallback's clause declares.
+fn clause_delay(builder: &SpendBuilder) -> Result<u32, ProtocolError> {
+    builder.csv_blocks().ok_or_else(|| {
+        ProtocolError::Other(
+            "the fallback's clause declares no `timelock`; give the deadline explicitly \
+             with `wait_or_send`"
+                .to_string(),
+        )
+    })
 }
 
 /// How the protocol token got to the state a handler runs at.

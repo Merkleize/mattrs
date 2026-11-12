@@ -30,6 +30,16 @@ impl SpendBuilder {
         Rc::ptr_eq(&self.instance, &handle.instance)
     }
 
+    /// The CSV delay (in blocks) the spent clause declares with `timelock`,
+    /// if any: the delay its input's `nSequence` is seeded with.
+    pub fn csv_blocks(&self) -> Option<u32> {
+        self.instance
+            .borrow()
+            .contract()
+            .get_clause(self.clause_name)
+            .and_then(|clause| clause.csv_blocks())
+    }
+
     fn exec_with_child_count(
         self,
         manager: &mut ContractManager,

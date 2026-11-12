@@ -424,3 +424,38 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+/// `Action::wait_or` reads its deadline from the fallback's own clause.
+#[test]
+fn timeout_deadline_comes_from_the_clause_timelock() {
+    let unvaulting = Unvaulting::new(mattrs_unvaulting_params()).unwrap();
+    let state = support::vault::UnvaultingState { ctv_hash: [1; 32] };
+    let handle: support::vault::UnvaultingHandle = fund_fake(
+        unvaulting.as_erased(),
+        state,
+        Amount::from_sat(AMOUNT),
+        SEED,
+    )
+    .try_into()
+    .unwrap();
+
+    // `withdraw` declares `timelock |p| p.spend_delay`.
+    assert_eq!(handle.withdraw().csv_blocks(), Some(SPEND_DELAY));
+    match Action::<()>::wait_or(handle.withdraw()).unwrap() {
+        Action::WaitWithTimeout { blocks, .. } => assert_eq!(blocks, SPEND_DELAY),
+        _ => panic!("a timeout action"),
+    }
+
+    // `recover` declares none, so there is no deadline to read.
+    assert_eq!(handle.recover(0).csv_blocks(), None);
+    assert!(Action::<()>::wait_or(handle.recover(0)).is_err());
+}
+
+fn mattrs_unvaulting_params() -> support::vault::UnvaultingParams {
+    let p = params();
+    support::vault::UnvaultingParams {
+        alternate_pk: p.alternate_pk,
+        spend_delay: p.spend_delay,
+        recover_pk: p.recover_pk,
+    }
+}

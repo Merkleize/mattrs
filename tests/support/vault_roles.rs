@@ -94,7 +94,6 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             }))
         })
         .on::<Unvaulting, _>(|d: &mut OwnerData, h: UnvaultingHandle, _cx| {
-            let p = h.params();
             let state = h.state();
             // Looked up, not consumed: two planned branches may commit to the
             // *same* template (equal outputs ⇒ equal CTV hash), and each must
@@ -104,13 +103,12 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             })?;
             let amount = h.handle().prevout().value;
             // Nobody should spend this branch before us; the CSV delay is what
-            // gates the withdrawal, so it rides the timeout fallback (which
-            // also sets the withdrawal's sequence to the same delay).
-            Ok(Action::wait_or_send_final(
-                p.spend_delay,
+            // gates the withdrawal, so it rides the timeout fallback, whose
+            // deadline is the delay the `withdraw` clause itself declares.
+            Action::wait_or_final(
                 h.withdraw().outputs(outputs),
                 VaultOutcome::Withdrawn { amount },
-            ))
+            )
         })
         .on_settled::<Vault, _>(settled_vault)
         .on_settled::<Unvaulting, _>(settled_unvaulting)
