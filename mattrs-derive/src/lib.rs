@@ -11,8 +11,10 @@ mod contract;
 ///
 /// A single `contract! { .. }` block generates the per-clause `*Args` structs, the
 /// clause objects and `ClauseTree`, a `Name` contract struct (with `new`, `fund`,
-/// `as_erased`), and a typed `NameHandle` whose per-clause methods return a
-/// [`SpendBuilder`](../mattrs/manager/struct.SpendBuilder.html). It expands to the
+/// `track`, `output`, `as_erased`), a typed `NameHandle` whose per-clause methods
+/// return a [`SpendBuilder`](../mattrs/manager/struct.SpendBuilder.html), and the
+/// `NameClause` / `NameSpend` enums a handle's `spent_clause()` / `spent()`
+/// decode a recorded spend into. It expands to the
 /// ordinary `StandardClause` / `ClauseTree` / `StandardP2TR` primitives.
 ///
 /// ```ignore

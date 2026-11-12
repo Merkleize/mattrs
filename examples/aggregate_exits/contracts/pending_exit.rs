@@ -217,11 +217,7 @@ impl PendingExit {
         let ingrid_pk = w.xonly()?;
         Ok(vec![
             ClauseOutput::pay_key(0, ingrid_pk),
-            ClauseOutput::at(1)
-                .to(Unwind::new(p.clone())?.as_erased())
-                .with_state(&UnwindState { root: r_prime })
-                .preserve_amount()
-                .build(),
+            Unwind::new(p.clone())?.output(1, UnwindState { root: r_prime }),
         ])
     }
 
@@ -294,11 +290,7 @@ impl PendingExit {
         };
         w.expect_end()?;
         Ok(vec![
-            ClauseOutput::at(0)
-                .to(ExitBisect1::new(BisectRangeParams::entry(p))?.as_erased())
-                .with_state(&b1_state)
-                .preserve_amount()
-                .build(),
+            ExitBisect1::new(BisectRangeParams::entry(p))?.output(0, b1_state),
         ])
     }
 
@@ -383,11 +375,7 @@ impl PendingExit {
             },
         };
         Ok(vec![
-            ClauseOutput::at(0)
-                .to(DelegationChallenge::new(p.clone())?.as_erased())
-                .with_state(&dc_state)
-                .preserve_amount()
-                .build(),
+            DelegationChallenge::new(p.clone())?.output(0, dc_state),
         ])
     }
 }

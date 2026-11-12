@@ -19,7 +19,7 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::argtypes::IntType;
 use mattrs::ccv::CcvIndex;
-use mattrs::contracts::{ArgSpec, ClauseOutput};
+use mattrs::contracts::ArgSpec;
 use mattrs::{ContractState, Signature, contract};
 
 // Re-exported so tests can import the whole game through this module; each test
@@ -142,11 +142,7 @@ contract! {
             }
             script G256S0::choose_script;
             next(p, a) {
-                Ok(vec![ClauseOutput::at_same_index()
-                    .to(G256S1::new(p.clone())?.as_erased())
-                    .with_state(&G256S1State { x: a.x })
-                    .preserve_amount()
-                    .build()])
+                Ok(vec![G256S1::new(p.clone())?.output(CcvIndex::CURRENT, G256S1State { x: a.x })])
             }
         }
 
@@ -182,15 +178,11 @@ contract! {
             }
             script G256S1::reveal_script;
             next(p, a) {
-                Ok(vec![ClauseOutput::at_same_index()
-                    .to(G256S2::new(p.clone())?.as_erased())
-                    .with_state(&G256S2State {
+                Ok(vec![G256S2::new(p.clone())?.output(CcvIndex::CURRENT, G256S2State {
                         t_a: a.t_a,
                         y: a.y,
                         x: a.x,
-                    })
-                    .preserve_amount()
-                    .build()])
+                    })])
             }
         }
 

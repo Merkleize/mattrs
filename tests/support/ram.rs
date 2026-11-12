@@ -14,7 +14,7 @@
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
-use mattrs::contracts::{ClauseError, ClauseOutput};
+use mattrs::contracts::ClauseError;
 use mattrs::{ContractState, contract};
 
 use mattrs::merkle::{WitProof, floor_lg};
@@ -70,11 +70,7 @@ contract! {
                     return Err(ClauseError::Other("leaf index out of range".to_string()));
                 }
                 leaves[index] = a.new_value;
-                Ok(vec![ClauseOutput::at_same_index()
-                    .to(Ram::new(p.clone())?.as_erased())
-                    .with_state(&RamState { leaves })
-                    .preserve_amount()
-                    .build()])
+                Ok(vec![Ram::new(p.clone())?.output(CcvIndex::CURRENT, RamState { leaves })])
             }
         }
 

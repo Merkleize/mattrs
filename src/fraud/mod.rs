@@ -458,11 +458,7 @@ contract! {
                 Ok(Bisect1::alice_reveal_script(p.alice_pk, bisect2.taptree_root()))
             };
             next(p, a) {
-                Ok(vec![ClauseOutput::at_same_index()
-                    .to(Bisect2::new(p.clone(), ctx.clone())?.as_erased())
-                    .with_state(&Bisect2State::from(a))
-                    .preserve_amount()
-                    .build()])
+                Ok(vec![Bisect2::new(p.clone(), ctx.clone())?.output(CcvIndex::CURRENT, Bisect2State::from(a))])
             }
         }
 
@@ -505,17 +501,16 @@ impl Bisect1 {
         trace_alice: [u8; 32],
         trace_bob: [u8; 32],
     ) -> ClauseOutput {
-        ClauseOutput::at_same_index()
-            .to(self.as_erased())
-            .with_state(&Bisect1State {
+        self.output(
+            CcvIndex::CURRENT,
+            Bisect1State {
                 h_start,
                 h_end_a: h_end_alice,
                 h_end_b: h_end_bob,
                 trace_a: trace_alice,
                 trace_b: trace_bob,
-            })
-            .preserve_amount()
-            .build()
+            },
+        )
     }
 
     // witness: <alice_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b>

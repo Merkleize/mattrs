@@ -56,8 +56,8 @@ from the contract rather than from a parallel field.
 ## Defining a contract
 
 A single `contract! { .. }` block generates the per-clause `*Args` structs, the
-clause objects and taptree, a contract struct (`new` / `fund` / `address` /
-`taptree_root` / `as_erased`), and a typed handle with **one spend method per
+clause objects and taptree, a contract struct (`new` / `fund` / `track` /
+`output` / `address` / `taptree_root` / `as_erased`), and a typed handle with **one spend method per
 clause**. Params are any ordinary `Debug + Clone` struct (nothing to derive, any
 field types); state is a struct deriving `ContractState`; the tapscripts stay as
 reviewable functions the DSL references.
@@ -87,6 +87,24 @@ contract! {
         // ... more clauses ...
         tree [trigger, [trigger_and_revault, recover]];
     }
+}
+```
+
+Besides the per-clause spend methods, each contract gets a small typed surface:
+
+```rust
+let vault = Vault::new(params)?;
+let funded  = vault.fund(&mut manager, amount)?;       // create and track
+let tracked = vault.track(&mut manager, outpoint)?;    // track an existing UTXO
+let output  = unvaulting.output(0, UnvaultingState { ctv_hash });  // in a `next` body
+
+// What a recorded spend revealed, decoded: no clause-name strings, no manual
+// witness decoding.
+match tracked.spent() {
+    Some(VaultSpend::Trigger(args)) => println!("unvaulting to {:?}", args.ctv_hash),
+    Some(VaultSpend::Recover(_)) => println!("recovered"),
+    Some(VaultSpend::TriggerAndRevault(args)) => println!("revault at {}", args.revault_out_i),
+    None => println!("unspent"),
 }
 ```
 
@@ -207,8 +225,9 @@ state. A wrong payment, sequence, or revealed state hash fails locally.
 Construction supports single-input CTV transactions with version 2 and locktime
 0; `compute_ctv_hash_for_tx` also hashes general transactions for observation.
 
-A clause output goes either to a contract — `ClauseOutput::at(index).to(contract)`,
-tracked as a child — or to an exact script — `ClauseOutput::at(index).pay(script_pubkey)`,
+A clause output goes either to a contract — `child.output(index, state)` (or
+`child.output(index)` for a stateless one), generated per contract so the state
+type is checked at compile time, and tracked as a child — or to an exact script — `ClauseOutput::at(index).pay(script_pubkey)`,
 constrained the same way but not tracked. One clause may return both, e.g. a
 payout next to the continuing contract (`ClauseOutput::pay_key` and
 `ClauseOutput::burn` are shorthands for bare-key and unspendable payouts). A

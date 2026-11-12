@@ -200,18 +200,15 @@ fn settlement_outputs(
     winner: DisputeWinner,
 ) -> Result<Vec<ClauseOutput>, ClauseError> {
     let continuation = match winner {
-        DisputeWinner::Ingrid => ClauseOutput::at(2)
-            .to(PendingExit::new(pool.clone())?.as_erased())
-            .with_state(&ctx.resume_state)
-            .preserve_amount()
-            .build(),
-        DisputeWinner::Challenger => ClauseOutput::at(2)
-            .to(Unwind::new(pool.clone())?.as_erased())
-            .with_state(&UnwindState {
+        DisputeWinner::Ingrid => {
+            PendingExit::new(pool.clone())?.output(2, ctx.resume_state.clone())
+        }
+        DisputeWinner::Challenger => Unwind::new(pool.clone())?.output(
+            2,
+            UnwindState {
                 root: ctx.resume_state.r,
-            })
-            .preserve_amount()
-            .build(),
+            },
+        ),
     };
     let winner_pk = match winner {
         DisputeWinner::Ingrid => xonly(&ctx.resume_state.ingrid_pk)?,
@@ -404,11 +401,7 @@ impl ExitBisect1 {
         };
         w.expect_end()?;
         Ok(vec![
-            ClauseOutput::at_same_index()
-                .to(ExitBisect2::new(p.clone())?.as_erased())
-                .with_state(&next)
-                .preserve_amount()
-                .build(),
+            ExitBisect2::new(p.clone())?.output(CcvIndex::CURRENT, next),
         ])
     }
 

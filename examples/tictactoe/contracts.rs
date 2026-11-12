@@ -328,11 +328,7 @@ impl TicTacToe {
             ));
         }
         Ok(vec![
-            ClauseOutput::at_same_index()
-                .to(TicTacToe::new(p.clone())?.as_erased())
-                .with_state(&state.after_move(cell, mark))
-                .preserve_amount()
-                .build(),
+            TicTacToe::new(p.clone())?.output(CcvIndex::CURRENT, state.after_move(cell, mark)),
         ])
     }
 

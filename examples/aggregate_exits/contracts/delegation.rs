@@ -169,11 +169,7 @@ impl DelegationChallenge {
         Ok(vec![
             ClauseOutput::pay_key(0, ingrid_pk),
             ClauseOutput::burn(1),
-            ClauseOutput::at(2)
-                .to(PendingExit::new(p.clone())?.as_erased())
-                .with_state(&state.ctx.resume_state)
-                .preserve_amount()
-                .build(),
+            PendingExit::new(p.clone())?.output(2, state.ctx.resume_state.clone()),
         ])
     }
 
@@ -226,13 +222,12 @@ impl DelegationChallenge {
         Ok(vec![
             ClauseOutput::pay_key(0, challenger_pk),
             ClauseOutput::burn(1),
-            ClauseOutput::at(2)
-                .to(Unwind::new(p.clone())?.as_erased())
-                .with_state(&UnwindState {
+            Unwind::new(p.clone())?.output(
+                2,
+                UnwindState {
                     root: state.ctx.resume_state.r,
-                })
-                .preserve_amount()
-                .build(),
+                },
+            ),
         ])
     }
 }

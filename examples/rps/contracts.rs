@@ -11,7 +11,7 @@
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
-use mattrs::contracts::{ClauseOutput, CtvTemplate};
+use mattrs::contracts::CtvTemplate;
 use mattrs::{ContractState, Signature, contract, script_utils::commit_int};
 
 use mattrs::script_helpers::{check_input_contract, check_output_contract, key_path_p2tr};
@@ -71,11 +71,7 @@ contract! {
             next(p, a) {
                 let s1 = RpsGameS1::new(p.clone())?;
                 let state = RpsGameS1State { commitment: move_commitment(a.m_b) };
-                Ok(vec![ClauseOutput::at(0)
-                    .to(s1.as_erased())
-                    .with_state(&state)
-                    .preserve_amount()
-                    .build()])
+                Ok(vec![s1.output(0, state)])
             }
         }
 

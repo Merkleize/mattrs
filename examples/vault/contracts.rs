@@ -138,13 +138,7 @@ impl Vault {
         let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
         let state = UnvaultingState { ctv_hash };
 
-        Ok(vec![
-            ClauseOutput::at(out_i)
-                .to(unvaulting.as_erased())
-                .with_state(&state)
-                .preserve_amount()
-                .build(),
-        ])
+        Ok(vec![unvaulting.output(out_i, state)])
     }
 
     pub fn trigger_and_revault_outputs(
@@ -158,15 +152,8 @@ impl Vault {
         let state = UnvaultingState { ctv_hash };
 
         Ok(vec![
-            ClauseOutput::at(revault_out_i)
-                .to(Vault::new(params)?.as_erased())
-                .deduct_amount()
-                .build(),
-            ClauseOutput::at(out_i)
-                .to(unvaulting.as_erased())
-                .with_state(&state)
-                .preserve_amount()
-                .build(),
+            Vault::new(params)?.output(revault_out_i).deduct_amount(),
+            unvaulting.output(out_i, state),
         ])
     }
 

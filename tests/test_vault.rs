@@ -379,10 +379,9 @@ fn test_observe_spend_decodes_clause_and_children() {
     // spending transaction it did not build: clause identified from the
     // tapscript, witness args recorded (and typed-decodable), and the child
     // instance materialized with its logical state. No node involved.
-    use mattrs::contracts::ClauseArgs;
     use mattrs::signer::HotSigner;
     use support::testkit::{alice_xpriv, fund_fake, offline_client};
-    use support::vault::VaultTriggerArgs;
+    use support::vault::{VaultClause, VaultSpend};
 
     let params = VaultParams {
         alternate_pk: None,
@@ -410,12 +409,17 @@ fn test_observe_spend_decodes_clause_and_children() {
     let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
     let observed = fund_fake(vault.as_erased(), (), 100_000, 7);
 
+    assert!(actor_handle.spent().is_none());
     let children = observer.observe_spend(&observed, &tx).unwrap();
 
     // The spend is decoded: clause, typed args, and status.
     assert_eq!(observed.status(), InstanceStatus::Spent);
     assert_eq!(observed.clause_name().as_deref(), Some("trigger"));
-    let args = VaultTriggerArgs::decode_from_witness(&observed.spending_args().unwrap()).unwrap();
+    let typed: support::vault::VaultHandle = observed.clone().try_into().unwrap();
+    let Some(VaultSpend::Trigger(args)) = typed.spent() else {
+        panic!("the recorded spend decodes to a typed trigger");
+    };
+    assert_eq!(typed.spent().unwrap().clause(), VaultClause::Trigger);
     assert_eq!(args.ctv_hash, ctv_hash);
     assert_eq!(args.out_i, 0);
     assert!(!args.sig.is_empty());

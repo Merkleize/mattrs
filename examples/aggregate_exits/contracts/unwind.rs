@@ -165,11 +165,7 @@ impl Unwind {
 
         Ok(vec![
             ClauseOutput::pay_key(0, pk),
-            ClauseOutput::at(1)
-                .to(Unwind::new(p.clone())?.as_erased())
-                .with_state(&UnwindState { root: new_root })
-                .preserve_amount()
-                .build(),
+            Unwind::new(p.clone())?.output(1, UnwindState { root: new_root }),
         ])
     }
 
@@ -277,13 +273,7 @@ impl Unwind {
             trace_i,
             x,
         };
-        Ok(vec![
-            ClauseOutput::at(0)
-                .to(PendingExit::new(p.clone())?.as_erased())
-                .with_state(&state)
-                .preserve_amount()
-                .build(),
-        ])
+        Ok(vec![PendingExit::new(p.clone())?.output(0, state)])
     }
 }
 

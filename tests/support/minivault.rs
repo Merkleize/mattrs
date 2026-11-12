@@ -34,7 +34,6 @@
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::{CcvIndex, CcvMode};
-use mattrs::contracts::ClauseOutput;
 use mattrs::{
     ContractState, Signature, clause_tree, contract, internal_key_or_nums, optional_key_script,
 };
@@ -151,13 +150,9 @@ contract! {
             script MiniVault::trigger_script;
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
-                Ok(vec![ClauseOutput::at(CcvIndex::try_from(a.out_i)?)
-                    .to(unvaulting.as_erased())
-                    .with_state(&MiniUnvaultingState {
+                Ok(vec![unvaulting.output(CcvIndex::try_from(a.out_i)?, MiniUnvaultingState {
                         withdrawal_pk: a.withdrawal_pk,
-                    })
-                    .preserve_amount()
-                    .build()])
+                    })])
             }
         }
 
@@ -174,17 +169,10 @@ contract! {
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
                 Ok(vec![
-                    ClauseOutput::at(CcvIndex::try_from(a.revault_out_i)?)
-                        .to(MiniVault::new(p.clone())?.as_erased())
-                        .deduct_amount()
-                        .build(),
-                    ClauseOutput::at(CcvIndex::try_from(a.out_i)?)
-                        .to(unvaulting.as_erased())
-                        .with_state(&MiniUnvaultingState {
+                    MiniVault::new(p.clone())?.output(CcvIndex::try_from(a.revault_out_i)?).deduct_amount(),
+                    unvaulting.output(CcvIndex::try_from(a.out_i)?, MiniUnvaultingState {
                             withdrawal_pk: a.withdrawal_pk,
-                        })
-                        .preserve_amount()
-                        .build(),
+                        }),
                 ])
             }
         }
