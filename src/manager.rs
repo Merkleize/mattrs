@@ -100,7 +100,7 @@ impl ContractManager {
     /// return handles to the child instances created — one per merged output index.
     ///
     /// Mirrors pymatt's multi-input `get_spend_tx`: within each input the
-    /// `DeductOutput`s must precede its `PreserveOutput`s, and a `PreserveOutput` at
+    /// deduct outputs must precede its preserve outputs, and a preserve output at
     /// a shared index accumulates each contributing input's remaining amount (so N
     /// vaults triggering to the same next contract merge into one output). CTV
     /// template clauses are single-input only and are rejected here.

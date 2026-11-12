@@ -22,25 +22,17 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, ClauseOutput, PaymentOutput};
 use mattrs::{
-    ContractState, Signature, contract, contracts::CCV_FLAG_CHECK_INPUT,
-    contracts::CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, internal_key_or_nums, optional_key_script,
+    ContractState, Signature,
+    ccv::{CcvIndex, CcvMode},
+    contract, internal_key_or_nums, optional_key_script,
 };
 
 define_pushable!();
 
-fn output_index(value: i64, name: &str) -> Result<u32, ClauseError> {
-    u32::try_from(value)
-        .map_err(|_| ClauseError::Other(format!("{name} must be between 0 and u32::MAX")))
-}
-
 fn recovery_output(index: i64, key: XOnlyPublicKey) -> Result<PaymentOutput, ClauseError> {
     // CCV with empty data and taptree pays the output key without a tweak.
     let script = mattrs::script_helpers::opaque_p2tr(key);
-    Ok(if index == -1 {
-        PaymentOutput::at_same_index(script)
-    } else {
-        PaymentOutput::at(output_index(index, "out_i")?, script)
-    })
+    Ok(PaymentOutput::at(CcvIndex::try_from(index)?, script))
 }
 
 // ============================================================================
@@ -90,7 +82,7 @@ contract! {
             next(p, a) {
                 Vault::new(p.clone())?.trigger_outputs(
                     a.ctv_hash,
-                    output_index(a.out_i, "out_i")?,
+                    CcvIndex::try_from(a.out_i)?,
                 )
             }
         }
@@ -108,8 +100,8 @@ contract! {
             next(p, a) {
                 Vault::new(p.clone())?.trigger_and_revault_outputs(
                     a.ctv_hash,
-                    output_index(a.out_i, "out_i")?,
-                    output_index(a.revault_out_i, "revault_out_i")?,
+                    CcvIndex::try_from(a.out_i)?,
+                    CcvIndex::try_from(a.revault_out_i)?,
                 )
             }
         }
@@ -140,7 +132,7 @@ impl Vault {
     pub fn trigger_outputs(
         &self,
         ctv_hash: [u8; 32],
-        out_i: u32,
+        out_i: impl Into<CcvIndex>,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let params = self.params();
         let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
@@ -158,8 +150,8 @@ impl Vault {
     pub fn trigger_and_revault_outputs(
         &self,
         ctv_hash: [u8; 32],
-        out_i: u32,
-        revault_out_i: u32,
+        out_i: impl Into<CcvIndex>,
+        revault_out_i: impl Into<CcvIndex>,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let params = self.params();
         let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
@@ -202,7 +194,7 @@ impl Vault {
             0 OP_SWAP
             -1
             -1
-            { CCV_FLAG_DEDUCT_OUTPUT_AMOUNT }
+            { CcvMode::DeductAmount.as_i32() }
             CHECKCONTRACTVERIFY
             { optional_key_script(params.alternate_pk) }
             { unvaulting_taptree_root }
@@ -272,7 +264,7 @@ impl Unvaulting {
             -1
             { optional_key_script(params.alternate_pk) }
             -1
-            { CCV_FLAG_CHECK_INPUT }
+            { CcvMode::CheckInput.as_i32() }
             CHECKCONTRACTVERIFY
             CHECKTEMPLATEVERIFY
         }

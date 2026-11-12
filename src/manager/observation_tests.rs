@@ -2,9 +2,7 @@
 
 use super::signing::input_witness;
 use super::*;
-use crate::contracts::{
-    ClauseOutput, ClauseOutputAmountBehaviour, ErasedContract, InstanceStatus, OutputIndex,
-};
+use crate::contracts::{AmountMode, CcvIndex, ClauseOutput, ErasedContract, InstanceStatus};
 use crate::contracts::{ClauseTree, PaymentOutput, RawArgs, StandardClause, StandardP2TR};
 use crate::contracts::{NextOutputs, StateCommitment};
 use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut};
@@ -115,15 +113,11 @@ fn combined_preserve_is_not_two_independent_lower_bounds() {
 
 #[test]
 fn cross_input_deduct_conflicts_are_rejected_in_either_order() {
-    use ClauseOutputAmountBehaviour::{DeductOutput, PreserveOutput};
-    for modes in [
-        [DeductOutput, DeductOutput],
-        [DeductOutput, PreserveOutput],
-        [PreserveOutput, DeductOutput],
-    ] {
+    use AmountMode::{Deduct, Preserve};
+    for modes in [[Deduct, Deduct], [Deduct, Preserve], [Preserve, Deduct]] {
         let payment = |amount| {
             NextOutputs::Payments(vec![PaymentOutput {
-                index: OutputIndex::Explicit(0),
+                index: CcvIndex::from(0u16),
                 script_pubkey: script(),
                 amount,
             }])

@@ -10,7 +10,7 @@ use bitcoin::{
 };
 
 use mattrs::{
-    contracts::{ClauseError, InstanceStatus, OutputIndex},
+    contracts::{CcvIndex, ClauseError, InstanceStatus},
     ctv::create_ctv_template,
     manager::{ContractManager, ManagerError},
     signer::HotSigner,
@@ -98,7 +98,7 @@ fn test_vault_trigger_outputs() {
     assert_eq!(outputs.len(), 1, "Trigger should create 1 output");
     assert_eq!(
         outputs[0].index,
-        OutputIndex::Explicit(0),
+        CcvIndex::from(0u16),
         "Output index should be 0"
     );
     assert!(
@@ -108,7 +108,7 @@ fn test_vault_trigger_outputs() {
 }
 
 #[test]
-fn test_vault_rejects_negative_output_indices() {
+fn test_vault_output_indices_follow_ccv_semantics() {
     use support::testkit::{fund_fake, offline_client, try_handle};
     use support::vault::VaultHandle;
 
@@ -122,12 +122,17 @@ fn test_vault_rejects_negative_output_indices() {
     let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 9));
     let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
-    let err = handle.trigger([0; 32], -1).build_tx(&manager).unwrap_err();
+    let err = handle.trigger([0; 32], -2).build_tx(&manager).unwrap_err();
     assert!(matches!(
         err,
         ManagerError::ClauseError(ClauseError::Other(message))
-            if message.contains("out_i")
+            if message.contains("CCV index -2")
     ));
+
+    // `-1` is CCV's "same index as this input", exactly as the script reads it.
+    // The clause accepts it; the spend only lacks its (unprovided) signer.
+    let err = handle.trigger([0; 32], -1).build_tx(&manager).unwrap_err();
+    assert!(matches!(err, ManagerError::MissingSigner(_)));
 }
 
 #[test]
@@ -151,12 +156,12 @@ fn test_vault_trigger_and_revault_outputs() {
     );
     assert_eq!(
         outputs[0].index,
-        OutputIndex::Explicit(1),
+        CcvIndex::from(1u16),
         "Revault output index should be 1"
     );
     assert_eq!(
         outputs[1].index,
-        OutputIndex::Explicit(0),
+        CcvIndex::from(0u16),
         "Unvaulting output index should be 0"
     );
     assert!(

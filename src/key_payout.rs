@@ -109,13 +109,13 @@ impl ClauseOutput {
     /// A deduct-amount payout to `pk` at output `index` (the spender supplies
     /// the amount via
     /// [`SpendBuilder::output_amount`](crate::manager::SpendBuilder::output_amount)).
-    pub fn pay_key(index: u32, pk: XOnlyPublicKey) -> ClauseOutput {
+    pub fn pay_key(index: impl Into<crate::ccv::CcvIndex>, pk: XOnlyPublicKey) -> ClauseOutput {
         let contract: Arc<dyn ErasedContract> = Arc::new(KeyPayout::new(pk));
         ClauseOutput::at(index).to(contract).deduct_amount().build()
     }
 
     /// A deduct-amount, provably unspendable (NUMS-key) output at `index`.
-    pub fn burn(index: u32) -> ClauseOutput {
+    pub fn burn(index: impl Into<crate::ccv::CcvIndex>) -> ClauseOutput {
         let contract: Arc<dyn ErasedContract> = Arc::new(KeyPayout::burn());
         ClauseOutput::at(index).to(contract).deduct_amount().build()
     }

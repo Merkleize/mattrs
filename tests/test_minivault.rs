@@ -128,7 +128,7 @@ fn test_minivault_trigger_commits_unvaulting_state() {
 }
 
 #[test]
-fn test_minivault_rejects_negative_output_indices() {
+fn test_minivault_rejects_invalid_output_indices() {
     let params = make_params(true, false);
     let handle = try_handle::<MiniVaultHandle>(fund_fake(
         MiniVault::new(params).unwrap().as_erased(),
@@ -139,13 +139,14 @@ fn test_minivault_rejects_negative_output_indices() {
     let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     let err = handle
-        .trigger_and_revault(withdrawal_pk(), 0, -1)
+        .trigger_and_revault(withdrawal_pk(), 0, -2)
         .build_tx(&manager)
         .unwrap_err();
+    // `-1` is CCV's "same index as this input"; anything below is undefined.
     assert!(matches!(
         err,
         ManagerError::ClauseError(ClauseError::Other(message))
-            if message.contains("revault_out_i")
+            if message.contains("CCV index -2")
     ));
 }
 

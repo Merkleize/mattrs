@@ -268,8 +268,13 @@ generate or validate the clause's host-side `next` metadata.
 The shared `check_input_contract`, `check_output_contract`, and bisection
 `state_output_script` helpers also take `CcvIndex`. For intentionally
 unchecked operands, use `StackScript::ccv_raw` with `RawCcvSource`, or raw
-`script!` assembly. The existing `CCV_FLAG_*` integer
-constants remain available for raw scripts; do not combine them as flags.
+`script!` assembly (interpolate `CcvMode::DeductAmount.as_i32()` and friends;
+modes are alternatives, never flags to combine).
+
+Host-side `next` metadata uses the same vocabulary: an output's index is a
+`CcvIndex` (`ClauseOutput::at(0)`, or `CcvIndex::try_from(a.out_i)?` for a
+witness-supplied script number, where `-1` means the input's own index) and
+its amount rule is an `AmountMode`.
 
 ### Observing a whole batch
 

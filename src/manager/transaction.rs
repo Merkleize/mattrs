@@ -5,9 +5,7 @@ use super::validation::{
     validate_output_constraints,
 };
 use super::{ManagerError, SpendBuilder};
-use crate::contracts::{
-    ClauseOutputAmountBehaviour, InstanceStatus, NextOutputs, check_state_type,
-};
+use crate::contracts::{AmountMode, InstanceStatus, NextOutputs, check_state_type};
 use bitcoin::{Amount, Sequence, Transaction, TxIn, TxOut};
 use std::collections::BTreeMap;
 
@@ -285,7 +283,7 @@ fn derive_tx_outputs(
                 )));
             }
             match clause_output.amount {
-                ClauseOutputAmountBehaviour::PreserveOutput => {
+                AmountMode::Preserve => {
                     if preserve_used {
                         return Err(ManagerError::TransactionBuildError(
                             "multiple PreserveOutput outputs in one input (its remaining \
@@ -303,7 +301,7 @@ fn derive_tx_outputs(
                     entry.value += remaining;
                     preserve_used = true;
                 }
-                ClauseOutputAmountBehaviour::DeductOutput => {
+                AmountMode::Deduct => {
                     if preserve_used {
                         return Err(ManagerError::TransactionBuildError(
                             "DeductOutput must be declared before PreserveOutput".to_string(),
@@ -321,7 +319,7 @@ fn derive_tx_outputs(
                         .checked_sub(amount)
                         .ok_or(ManagerError::DeductExceedsInput)?;
                 }
-                ClauseOutputAmountBehaviour::IgnoreOutput => {
+                AmountMode::Ignore => {
                     if semantics.insert(idx, Semantics::Ignore).is_some() {
                         return Err(ManagerError::MixedOutputSemantics { index: idx });
                     }

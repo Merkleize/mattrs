@@ -15,12 +15,12 @@ pub enum ManagerError {
     AlreadySpent(OutPoint),
     /// The named clause does not exist on the contract being spent.
     ClauseNotFound(String),
-    /// A `DeductOutput` at this index needs an amount, supplied via
+    /// A deduct output at this index needs an amount, supplied via
     /// [`SpendBuilder::output_amount`](super::SpendBuilder::output_amount).
     MissingDeductAmount {
         index: u32,
     },
-    /// An `IgnoreOutput` needs an explicit amount; silently using zero would
+    /// An ignore-amount output needs an explicit amount; silently using zero would
     /// donate the input value to fees.
     MissingIgnoredAmount {
         index: u32,
@@ -52,14 +52,14 @@ pub enum ManagerError {
     ConflictingOutputAmount {
         index: u32,
     },
-    /// An output index receives both `PreserveOutput` and `DeductOutput`
+    /// An output index receives both preserve and deduct
     /// contributions (from the same or different inputs); the two amount
     /// semantics cannot hold for one output.
     MixedOutputSemantics {
         index: u32,
     },
     /// An amount was supplied via [`SpendBuilder::output_amount`](super::SpendBuilder::output_amount) for an output
-    /// index that no `DeductOutput` uses.
+    /// index that no deduct output uses.
     UnusedOutputAmount {
         index: u32,
     },
@@ -141,12 +141,12 @@ impl std::fmt::Display for ManagerError {
             ManagerError::ClauseNotFound(name) => write!(f, "Clause '{}' not found", name),
             ManagerError::MissingDeductAmount { index } => write!(
                 f,
-                "DeductOutput at index {} needs an amount (SpendBuilder::output_amount)",
+                "Deduct output at index {} needs an amount (SpendBuilder::output_amount)",
                 index
             ),
             ManagerError::MissingIgnoredAmount { index } => write!(
                 f,
-                "IgnoreOutput at index {} needs an explicit amount \
+                "Ignore-amount output at index {} needs an explicit amount \
                  (SpendBuilder::output_amount)",
                 index
             ),
@@ -191,7 +191,7 @@ impl std::fmt::Display for ManagerError {
             }
             ManagerError::MixedOutputSemantics { index } => write!(
                 f,
-                "Output index {} mixes PreserveOutput and DeductOutput contributions",
+                "Output index {} mixes preserve and deduct contributions",
                 index
             ),
             ManagerError::UnusedOutputAmount { index } => write!(

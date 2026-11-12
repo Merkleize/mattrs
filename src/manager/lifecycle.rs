@@ -37,7 +37,7 @@ impl ContractManager {
 
     /// Materialize (and register) the child instances a spent parent's clause
     /// outputs define, linking them to the parent. `vin` is the parent's input
-    /// index within `spending_tx` (which resolves [`OutputIndex::Same`](crate::contracts::OutputIndex::Same)). A child
+    /// index within `spending_tx` (which resolves [`CcvIndex::CURRENT`](crate::contracts::CcvIndex::CURRENT)). A child
     /// already materialized at the same outpoint — e.g. a batch output merged
     /// across inputs — is reused, not duplicated.
     pub(super) fn materialize_outputs(

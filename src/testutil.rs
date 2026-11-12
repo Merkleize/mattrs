@@ -65,7 +65,7 @@ pub fn fund_fake(
 /// `parents` with [`ContractManager::observe_batch`], materializing the
 /// (deduplicated) children — the offline counterpart of
 /// [`ContractManager::spend_batch`]: no broadcast, no RPC. Children merged
-/// across inputs (a shared `PreserveOutput` index) are returned once, and the
+/// across inputs (a shared preserve index) are returned once, and the
 /// order of `parents` does not matter. Every input must have a parent context;
 /// constraints are checked together before any parent is changed, and joins
 /// are linked in the same call.

@@ -1094,7 +1094,7 @@ fn batch_accounting_reports_a_missing_output_instead_of_panicking() {
     use super::validation::{
         InputConstraints, OutputIdentity, ResolvedOutput, validate_batch_constraints,
     };
-    use crate::contracts::{ClauseOutputAmountBehaviour, OutputIndex};
+    use crate::contracts::{AmountMode, CcvIndex};
 
     let script = ScriptBuf::from(vec![0x51u8]);
     let tx = Transaction {
@@ -1107,12 +1107,9 @@ fn batch_accounting_reports_a_missing_output_instead_of_panicking() {
         }],
     };
     // Both amount modes read the output's value; index 3 does not exist.
-    for amount in [
-        ClauseOutputAmountBehaviour::PreserveOutput,
-        ClauseOutputAmountBehaviour::DeductOutput,
-    ] {
+    for amount in [AmountMode::Preserve, AmountMode::Deduct] {
         let outputs = [ResolvedOutput {
-            index: OutputIndex::Explicit(3),
+            index: CcvIndex::from(3u16),
             script_pubkey: script.clone(),
             amount,
             identity: OutputIdentity::Payment(script.clone()),

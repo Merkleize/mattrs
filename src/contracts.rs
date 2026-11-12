@@ -29,6 +29,8 @@
 
 use std::{cell::RefCell, fmt, fmt::Debug, marker::PhantomData, rc::Rc, sync::Arc};
 
+pub use crate::ccv::{AmountMode, CcvIndex};
+
 use bitcoin::{
     OutPoint, ScriptBuf, Sequence, TapTweakHash, Transaction, TxOut, Txid, XOnlyPublicKey,
     hashes::{Hash, sha256},
@@ -95,6 +97,12 @@ impl std::error::Error for ClauseError {}
 impl From<WitnessError> for ClauseError {
     fn from(e: WitnessError) -> Self {
         ClauseError::Witness(e)
+    }
+}
+
+impl From<crate::ccv::InvalidCcvIndex> for ClauseError {
+    fn from(e: crate::ccv::InvalidCcvIndex) -> Self {
+        ClauseError::Other(e.to_string())
     }
 }
 
@@ -237,18 +245,6 @@ pub fn __call_builder_with_ctx<P, C, T, R: IntoContractResult<T>>(
 
 /// Opcode for CHECKTEMPLATEVERIFY
 pub const OP_CHECKTEMPLATEVERIFY: u8 = 0xb3;
-
-/// Raw CCV mode: check the input. Modes are alternatives, not combinable flags.
-/// Prefer [`crate::ccv::CcvMode`] when assembling typed scripts.
-pub const CCV_FLAG_CHECK_INPUT: i32 = crate::ccv::CcvMode::CheckInput.as_i32();
-
-/// Raw CCV mode: ignore output amount. Modes are alternatives, not bit flags.
-/// Prefer [`crate::ccv::CcvMode`].
-pub const CCV_FLAG_IGNORE_OUTPUT_AMOUNT: i32 = crate::ccv::CcvMode::IgnoreAmount.as_i32();
-
-/// Raw CCV mode: deduct output amount. Modes are alternatives, not bit flags.
-/// Prefer [`crate::ccv::CcvMode`].
-pub const CCV_FLAG_DEDUCT_OUTPUT_AMOUNT: i32 = crate::ccv::CcvMode::DeductAmount.as_i32();
 
 // ============================================================================
 // Core Traits
@@ -899,36 +895,6 @@ impl WitnessEncodable for () {
 // Clause Output Types
 // ============================================================================
 
-/// Defines the semantic of a clause with respect to an output's amount.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClauseOutputAmountBehaviour {
-    /// The output should be at least as large as the input.
-    PreserveOutput,
-    /// The output amount is not checked.
-    IgnoreOutput,
-    /// The output amount is subtracted from the input.
-    DeductOutput,
-}
-
-/// Which transaction output a clause output refers to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutputIndex {
-    /// The output index equals the spending input's index.
-    Same,
-    /// An explicit output index.
-    Explicit(u32),
-}
-
-impl OutputIndex {
-    /// The concrete output index, given the index of the spending input.
-    pub fn resolve(&self, vin: usize) -> u32 {
-        match self {
-            OutputIndex::Same => vin as u32,
-            OutputIndex::Explicit(n) => *n,
-        }
-    }
-}
-
 /// Represents a specific output defined by a contract clause.
 ///
 /// The next contract carries its own params (see [`ErasedContract::params_any`]),
@@ -937,14 +903,14 @@ impl OutputIndex {
 #[derive(Debug, Clone)]
 pub struct ClauseOutput {
     /// Which transaction output this refers to.
-    pub index: OutputIndex,
+    pub index: CcvIndex,
     /// The contract of this output.
     pub next_contract: Arc<dyn ErasedContract>,
     /// The next instance's logical state (`()` for a stateless contract); its
     /// commitment, used for addressing, derives from it (see [`ErasedState`]).
     pub next_state: Box<dyn ErasedState>,
     /// Determines the semantic of the output amount.
-    pub next_amount: ClauseOutputAmountBehaviour,
+    pub next_amount: AmountMode,
 }
 
 impl ClauseOutput {
@@ -958,13 +924,13 @@ impl ClauseOutput {
     ///     .preserve_amount()
     ///     .build();
     /// ```
-    pub fn at(index: u32) -> ClauseOutputTo {
-        ClauseOutputTo(OutputIndex::Explicit(index))
+    pub fn at(index: impl Into<CcvIndex>) -> ClauseOutputTo {
+        ClauseOutputTo(index.into())
     }
 
     /// Start building a clause output whose index matches the spending input.
     pub fn at_same_index() -> ClauseOutputTo {
-        ClauseOutputTo(OutputIndex::Same)
+        ClauseOutputTo(CcvIndex::CURRENT)
     }
 
     /// Declare no output constraints in the host-side model (and no children).
@@ -987,7 +953,7 @@ impl ClauseOutput {
 /// First stage of the [`ClauseOutput`] builder: the output's contract must be set
 /// (with [`to`](Self::to)) before anything else, so a finished builder can never
 /// lack one.
-pub struct ClauseOutputTo(OutputIndex);
+pub struct ClauseOutputTo(CcvIndex);
 
 impl ClauseOutputTo {
     /// Set the next contract for this output.
@@ -996,17 +962,17 @@ impl ClauseOutputTo {
             index: self.0,
             next_contract: contract,
             next_state: Box::new(()),
-            next_amount: ClauseOutputAmountBehaviour::PreserveOutput,
+            next_amount: AmountMode::Preserve,
         }
     }
 }
 
 /// Builder for [`ClauseOutput`] with a fluent API.
 pub struct ClauseOutputBuilder {
-    index: OutputIndex,
+    index: CcvIndex,
     next_contract: Arc<dyn ErasedContract>,
     next_state: Box<dyn ErasedState>,
-    next_amount: ClauseOutputAmountBehaviour,
+    next_amount: AmountMode,
 }
 
 impl ClauseOutputBuilder {
@@ -1019,19 +985,19 @@ impl ClauseOutputBuilder {
 
     /// Set amount behaviour to preserve output (default).
     pub fn preserve_amount(mut self) -> Self {
-        self.next_amount = ClauseOutputAmountBehaviour::PreserveOutput;
+        self.next_amount = AmountMode::Preserve;
         self
     }
 
     /// Set amount behaviour to ignore output.
     pub fn ignore_amount(mut self) -> Self {
-        self.next_amount = ClauseOutputAmountBehaviour::IgnoreOutput;
+        self.next_amount = AmountMode::Ignore;
         self
     }
 
     /// Set amount behaviour to deduct from input.
     pub fn deduct_amount(mut self) -> Self {
-        self.next_amount = ClauseOutputAmountBehaviour::DeductOutput;
+        self.next_amount = AmountMode::Deduct;
         self
     }
 
@@ -1061,41 +1027,41 @@ impl ClauseOutputBuilder {
 #[derive(Debug, Clone)]
 pub struct PaymentOutput {
     /// Which transaction output is constrained.
-    pub index: OutputIndex,
+    pub index: CcvIndex,
     /// The exact destination script, including any required key tweaks.
     pub script_pubkey: ScriptBuf,
     /// How this output relates to the spending input's residual amount.
-    pub amount: ClauseOutputAmountBehaviour,
+    pub amount: AmountMode,
 }
 
 impl PaymentOutput {
     /// Preserve the residual input value at this output index and script.
-    pub fn at(index: u32, script_pubkey: ScriptBuf) -> Self {
+    pub fn at(index: impl Into<CcvIndex>, script_pubkey: ScriptBuf) -> Self {
         Self {
-            index: OutputIndex::Explicit(index),
+            index: index.into(),
             script_pubkey,
-            amount: ClauseOutputAmountBehaviour::PreserveOutput,
+            amount: AmountMode::Preserve,
         }
     }
 
     /// Preserve the residual input value at the spending input's index.
     pub fn at_same_index(script_pubkey: ScriptBuf) -> Self {
         Self {
-            index: OutputIndex::Same,
+            index: CcvIndex::CURRENT,
             script_pubkey,
-            amount: ClauseOutputAmountBehaviour::PreserveOutput,
+            amount: AmountMode::Preserve,
         }
     }
 
     /// Deduct this output's amount from the input's residual value.
     pub fn deduct_amount(mut self) -> Self {
-        self.amount = ClauseOutputAmountBehaviour::DeductOutput;
+        self.amount = AmountMode::Deduct;
         self
     }
 
     /// Impose no amount constraint. This does not protect the input's value.
     pub fn ignore_amount(mut self) -> Self {
-        self.amount = ClauseOutputAmountBehaviour::IgnoreOutput;
+        self.amount = AmountMode::Ignore;
         self
     }
 }

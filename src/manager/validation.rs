@@ -1,8 +1,7 @@
 //! RPC-free witness, template, output-identity, and CCV amount validation.
 use super::ManagerError;
 use crate::contracts::{
-    ClauseOutput, ClauseOutputAmountBehaviour, ContractInstance, ErasedClause, NextOutputs,
-    OutputIndex,
+    AmountMode, CcvIndex, ClauseOutput, ContractInstance, ErasedClause, NextOutputs,
 };
 use bitcoin::{Amount, OutPoint, Transaction};
 use std::collections::BTreeMap;
@@ -41,9 +40,9 @@ pub(super) enum OutputIdentity {
 /// Shared representation for amount accounting; only contract outputs are
 /// materialized as children. Keep payments out of the instance registry.
 pub(super) struct ResolvedOutput {
-    pub(super) index: OutputIndex,
+    pub(super) index: CcvIndex,
     pub(super) script_pubkey: bitcoin::ScriptBuf,
-    pub(super) amount: ClauseOutputAmountBehaviour,
+    pub(super) amount: AmountMode,
     pub(super) identity: OutputIdentity,
 }
 pub(super) fn resolve_outputs(next: &NextOutputs) -> Result<Vec<ResolvedOutput>, ManagerError> {
@@ -180,7 +179,7 @@ pub(super) fn validate_batch_constraints(
                 .entry(index)
                 .or_insert_with(|| output.identity.clone());
             match output.amount {
-                ClauseOutputAmountBehaviour::PreserveOutput => {
+                AmountMode::Preserve => {
                     if deducted.contains(&index) {
                         return Err(ManagerError::MixedOutputSemantics { index });
                     }
@@ -190,7 +189,7 @@ pub(super) fn validate_batch_constraints(
                         .ok_or(ManagerError::AmountOverflow)?;
                     residual = Amount::ZERO;
                 }
-                ClauseOutputAmountBehaviour::DeductOutput => {
+                AmountMode::Deduct => {
                     if minimum.contains_key(&index) || !deducted.insert(index) {
                         return Err(ManagerError::MixedOutputSemantics { index });
                     }
@@ -198,7 +197,7 @@ pub(super) fn validate_batch_constraints(
                         .checked_sub(output_value(tx, index)?)
                         .ok_or(ManagerError::DeductExceedsInput)?;
                 }
-                ClauseOutputAmountBehaviour::IgnoreOutput => {}
+                AmountMode::Ignore => {}
             }
         }
     }
@@ -255,7 +254,7 @@ pub(super) fn validate_output_constraints(
 ) -> Result<(), ManagerError> {
     let mut remaining = input_value;
     let mut preserve_used = false;
-    let mut seen: BTreeMap<u32, ClauseOutputAmountBehaviour> = BTreeMap::new();
+    let mut seen: BTreeMap<u32, AmountMode> = BTreeMap::new();
     for output in outputs {
         let index = output.index.resolve(vin);
         let payment = matches!(output.identity, OutputIdentity::Payment(_));
@@ -278,11 +277,11 @@ pub(super) fn validate_output_constraints(
             });
         }
         match output.amount {
-            ClauseOutputAmountBehaviour::PreserveOutput => {
+            AmountMode::Preserve => {
                 if preserve_used
                     || seen
                         .get(&index)
-                        .is_some_and(|kind| *kind != ClauseOutputAmountBehaviour::PreserveOutput)
+                        .is_some_and(|kind| *kind != AmountMode::Preserve)
                 {
                     return Err(ManagerError::MixedOutputSemantics { index });
                 }
@@ -293,26 +292,23 @@ pub(super) fn validate_output_constraints(
                         actual: actual.value,
                     });
                 }
-                seen.insert(index, ClauseOutputAmountBehaviour::PreserveOutput);
+                seen.insert(index, AmountMode::Preserve);
                 remaining = Amount::ZERO;
                 preserve_used = true;
             }
-            ClauseOutputAmountBehaviour::DeductOutput => {
+            AmountMode::Deduct => {
                 if preserve_used || seen.contains_key(&index) {
                     return Err(ManagerError::MixedOutputSemantics { index });
                 }
                 remaining = remaining
                     .checked_sub(actual.value)
                     .ok_or(ManagerError::DeductExceedsInput)?;
-                seen.insert(index, ClauseOutputAmountBehaviour::DeductOutput);
+                seen.insert(index, AmountMode::Deduct);
             }
-            ClauseOutputAmountBehaviour::IgnoreOutput => {
+            AmountMode::Ignore => {
                 // This mode intentionally imposes no amount relationship. Its
                 // presence still participates in duplicate/mixed-mode checks.
-                if seen
-                    .insert(index, ClauseOutputAmountBehaviour::IgnoreOutput)
-                    .is_some()
-                {
+                if seen.insert(index, AmountMode::Ignore).is_some() {
                     return Err(ManagerError::MixedOutputSemantics { index });
                 }
             }

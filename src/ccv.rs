@@ -6,6 +6,7 @@
 //! [`StackScript::ccv_raw`](crate::stack::StackScript::ccv_raw) for the explicit
 //! low-level escape hatch.
 
+use crate::contracts::{WitnessEncodable, WitnessError};
 use bitcoin::{XOnlyPublicKey, script::PushBytes};
 
 /// The four defined CCV modes. These are alternatives, **not bit flags**.
@@ -38,6 +39,29 @@ impl CcvMode {
     /// The minimally encoded script-number operand's value.
     pub const fn as_i32(self) -> i32 {
         self as i32
+    }
+}
+
+/// How a clause's checked output relates to its input's residual amount: the
+/// three output modes of [`CcvMode`], without the input-checking one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmountMode {
+    /// The output receives the input's residual amount ([`CcvMode::Preserve`]).
+    Preserve,
+    /// The output's amount is not constrained ([`CcvMode::IgnoreAmount`]).
+    Ignore,
+    /// The output's amount is subtracted from the input's residual
+    /// ([`CcvMode::DeductAmount`]).
+    Deduct,
+}
+
+impl From<AmountMode> for CcvMode {
+    fn from(mode: AmountMode) -> Self {
+        match mode {
+            AmountMode::Preserve => CcvMode::Preserve,
+            AmountMode::Ignore => CcvMode::IgnoreAmount,
+            AmountMode::Deduct => CcvMode::DeductAmount,
+        }
     }
 }
 
@@ -97,6 +121,42 @@ impl CcvIndex {
     /// The minimally encoded script-number operand's value.
     pub const fn as_i64(self) -> i64 {
         self.0 as i64
+    }
+
+    /// Whether this is [`CURRENT`](Self::CURRENT).
+    pub const fn is_current(self) -> bool {
+        self.0 == -1
+    }
+
+    /// The concrete index this selects when the executing input is `vin`.
+    pub fn resolve(self, vin: usize) -> u32 {
+        if self.is_current() {
+            vin as u32
+        } else {
+            self.0 as u32
+        }
+    }
+}
+
+impl From<u16> for CcvIndex {
+    fn from(index: u16) -> Self {
+        Self(i32::from(index))
+    }
+}
+
+/// A clause argument may be an index: it is the script number CCV consumes
+/// (`-1` for the current input's index).
+impl WitnessEncodable for CcvIndex {
+    const ELEMENTS: Option<usize> = Some(1);
+
+    fn encode_to_witness(&self) -> Vec<Vec<u8>> {
+        self.as_i64().encode_to_witness()
+    }
+
+    fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
+        let (value, consumed) = i64::decode_from_witness(witness)?;
+        let index = Self::try_from(value).map_err(|e| WitnessError::InvalidValue(e.to_string()))?;
+        Ok((index, consumed))
     }
 }
 
@@ -193,7 +253,7 @@ mod tests {
 
     #[test]
     fn indices_validate_script_number_boundaries() {
-        assert_eq!(CcvIndex::try_from(-1), Ok(CcvIndex::CURRENT));
+        assert_eq!(CcvIndex::try_from(-1i64), Ok(CcvIndex::CURRENT));
         assert_eq!(CcvIndex::CURRENT.as_i64(), -1);
         for number in [0, 1, 127, 128, i32::MAX as u32] {
             let index = CcvIndex::at(number).unwrap();
