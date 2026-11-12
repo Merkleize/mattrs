@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::{Amount, Network, ScriptBuf, TxOut, XOnlyPublicKey};
 use mattrs::contracts::{
-    ClauseError, ClauseTree, ContractError, ContractState, ErasedContract, ErasedState, RawArgs,
-    StandardAugmentedP2TR, StandardClause, StateCodec, StateCommitment,
+    ClauseError, ClauseTree, ContractError, ContractState, ErasedContract, RawArgs, StandardClause,
+    StandardP2TR, StateCodec, StateCommitment,
 };
 use mattrs::manager::ContractManager;
 use mattrs::testutil::{fund_fake, offline_client};
@@ -31,8 +31,8 @@ struct MerkleState {
     rest: Vec<[u8; 32]>,
 }
 
-fn contract<S: ContractState + 'static>() -> StandardAugmentedP2TR<(), S> {
-    StandardAugmentedP2TR::new(
+fn contract<S: ContractState + 'static>() -> StandardP2TR<(), S> {
+    StandardP2TR::<_, _>::new(
         "CommitmentTest",
         mattrs::nums_key(),
         &(),
@@ -81,11 +81,11 @@ fn explicit_commitments_do_not_depend_on_byte_length() {
         assert_eq!(RawState::decode(&raw.encode()).unwrap().bytes, bytes);
         assert_eq!(HashedState::decode(&hashed.encode()).unwrap().bytes, bytes);
         assert_eq!(
-            raw_contract.compute_internal_key(&raw).unwrap(),
+            raw_contract.internal_key(&raw).unwrap(),
             reference_key(&bytes)
         );
         assert_eq!(
-            hashed_contract.compute_internal_key(&hashed).unwrap(),
+            hashed_contract.internal_key(&hashed).unwrap(),
             reference_key(&digest)
         );
         assert_ne!(
@@ -97,39 +97,35 @@ fn explicit_commitments_do_not_depend_on_byte_length() {
         let erased: &dyn ErasedContract = &raw_contract;
         assert_eq!(
             raw_contract.script_pubkey(&raw).unwrap(),
-            erased.script_pubkey(Some(&commitment)).unwrap()
+            erased.script_pubkey(&commitment).unwrap()
         );
         assert_eq!(
-            erased
-                .control_block_internal_key(Some(&commitment))
-                .unwrap(),
+            erased.control_block_internal_key(&commitment).unwrap(),
             reference_key(&bytes)
         );
     }
 }
 
 #[test]
-fn empty_data_is_distinct_from_missing_state_and_sha256_of_empty() {
+fn empty_data_omits_the_tweak_and_is_not_sha256_of_empty() {
     let contract = contract::<RawState>();
     let erased: &dyn ErasedContract = &contract;
-    let empty = StateCommitment::identity(Vec::new());
+    let empty = StateCommitment::empty();
+    assert!(empty.is_empty());
     assert_eq!(
-        erased.control_block_internal_key(Some(&empty)).unwrap(),
+        erased.control_block_internal_key(&empty).unwrap(),
         mattrs::nums_key()
     );
-    assert!(matches!(
-        erased.script_pubkey(None),
-        Err(ContractError::MissingState)
-    ));
-    assert!(matches!(
-        erased.control_block_internal_key(None),
-        Err(ContractError::MissingState)
-    ));
+    // A stateless contract is the same contract with the unit state: its
+    // commitment is the empty one, so it addresses identically.
+    assert_eq!(().commitment(), empty);
+    assert_eq!(
+        self::contract::<()>().script_pubkey(&()).unwrap(),
+        erased.script_pubkey(&empty).unwrap()
+    );
     assert_ne!(
-        erased.script_pubkey(Some(&empty)).unwrap(),
-        erased
-            .script_pubkey(Some(&StateCommitment::sha256(&[])))
-            .unwrap()
+        erased.script_pubkey(&empty).unwrap(),
+        erased.script_pubkey(&StateCommitment::sha256(&[])).unwrap()
     );
 }
 
@@ -150,7 +146,7 @@ fn merkle_commitments_keep_expanded_state_without_a_codec() {
     assert_eq!(state.commitment().as_bytes(), root);
     let handle = fund_fake(
         Arc::new(contract::<MerkleState>()),
-        Some(Box::new(state)),
+        state,
         Amount::from_sat(1_000),
         0,
     );
@@ -166,7 +162,7 @@ fn commitments_never_recover_a_different_logical_state_type() {
     };
     let handle = fund_fake(
         Arc::new(contract::<RawState>()),
-        Some(Box::new(state.clone())),
+        state.clone(),
         Amount::from_sat(1_000),
         0,
     );
@@ -176,7 +172,7 @@ fn commitments_never_recover_a_different_logical_state_type() {
     let contract = contract::<HashedState>();
     let clause = contract.clauses().first().unwrap();
     assert!(matches!(
-        clause.next_outputs_from_witness(&[], &[], Some(&state)),
+        clause.next_outputs_from_witness(contract.params_any(), &[], &state),
         Err(ClauseError::Contract(ContractError::WrongStateType))
     ));
 }
@@ -200,8 +196,8 @@ fn commitments_are_independent_of_optional_serialization() {
     }
     let contract = Arc::new(contract::<NoCodecAccess>());
     let state = NoCodecAccess;
-    assert_eq!(state.committed_bytes(), [7; 32]);
-    let handle = fund_fake(contract, Some(Box::new(state)), Amount::from_sat(1_000), 0);
+    assert_eq!(state.commitment().as_bytes(), [7; 32]);
+    let handle = fund_fake(contract, state, Amount::from_sat(1_000), 0);
     assert!(handle.state::<NoCodecAccess>().is_some());
     let mut manager = ContractManager::new(offline_client(), Network::Regtest);
     let tx = handle
@@ -222,7 +218,7 @@ fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error:
     use mattrs::ccv::CcvIndex;
     use mattrs::contracts::ArgSpec;
     define_pushable!();
-    let contract = Arc::new(StandardAugmentedP2TR::<(), RawState>::new(
+    let contract = Arc::new(StandardP2TR::<(), RawState>::new(
         "RawData",
         mattrs::nums_key(),
         &(),
@@ -246,9 +242,9 @@ fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error:
         let bytes = vec![0x42; len];
         let handle = manager.fund_instance(
             contract.clone(),
-            Some(Box::new(RawState {
+            RawState {
                 bytes: bytes.clone(),
-            })),
+            },
             Amount::from_sat(10_000),
         )?;
         manager.mine_blocks(1)?;

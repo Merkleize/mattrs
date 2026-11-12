@@ -47,7 +47,7 @@ fn params() -> VaultParams {
 fn fake_vault(seed: u8) -> mattrs::manager::InstanceHandle {
     fund_fake(
         Vault::new(params()).unwrap().as_erased(),
-        None,
+        (),
         Amount::from_sat(AMOUNT),
         seed,
     )

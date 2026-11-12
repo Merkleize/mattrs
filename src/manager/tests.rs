@@ -1,6 +1,8 @@
 //! Manager behavior and integration boundaries, tested without a Bitcoin node.
 use super::{chain::poll_until, validation::parse_script_path_witness};
-use crate::contracts::{ContractError, ErasedContract, InstanceStatus, NextOutputs};
+use crate::contracts::{
+    ContractError, ErasedContract, InstanceStatus, NextOutputs, StateCommitment,
+};
 use crate::signer::Signer;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
@@ -104,6 +106,16 @@ fn signed_spend_with_constraint(
     child: bool,
     constraint: Option<NextOutputs>,
 ) -> (InstanceHandle, SpendBuilder, Rc<std::cell::Cell<usize>>) {
+    signed_spend_seeded(child, constraint, 1)
+}
+
+/// The signed-spend fixture funded at the outpoint keyed by `seed`, so two of
+/// them can share a transaction.
+fn signed_spend_seeded(
+    child: bool,
+    constraint: Option<NextOutputs>,
+    seed: u8,
+) -> (InstanceHandle, SpendBuilder, Rc<std::cell::Cell<usize>>) {
     let calls = Rc::new(std::cell::Cell::new(0));
     let signer = CountingSigner {
         calls: calls.clone(),
@@ -127,12 +139,12 @@ fn signed_spend_with_constraint(
             .into_script(),
         vec![crate::contracts::ArgSpec {
             name: "sig".into(),
-            arg_type: Arc::new(crate::argtypes::SignerType::new(pk.serialize())),
+            arg_type: Arc::new(crate::argtypes::SignerType::new(pk)),
         }],
         Some(Arc::new(move |_, _, _| Ok(next.clone()))),
     );
     let c = Arc::new(
-        StandardP2TR::new(
+        StandardP2TR::<_>::new(
             "Signed",
             crate::nums_key(),
             &(),
@@ -140,7 +152,7 @@ fn signed_spend_with_constraint(
         )
         .unwrap(),
     );
-    let h = fund_fake(c, None, sat(10_000), 1);
+    let h = fund_fake(c, (), sat(10_000), seed);
     let mut builder = h.spend_clause("spend", vec![vec![]]).sign(signer);
     if !child {
         builder = builder.outputs(vec![TxOut {
@@ -268,15 +280,15 @@ fn payments_cannot_conflict_with_contract_tracking_or_join_targets() {
     let dest = test_contract(90, None);
     let payment = PaymentOutput::at(0, spk_of(&dest));
     let paid = test_contract(1, Some(Arc::new(move |_, _, _| Ok(payment.clone().into()))));
-    let h1 = fund_fake(paid, None, sat(10_000), 1);
+    let h1 = fund_fake(paid, (), sat(10_000), 1);
     let tracked = contract_yielding(2, vec![ClauseOutput::at(0).to(dest).build()]);
-    let h2 = fund_fake(tracked, None, sat(10_000), 2);
+    let h2 = fund_fake(tracked, (), sat(10_000), 2);
     assert!(matches!(
         offline_manager().build_batch_tx(&[spend(&h1), spend(&h2)]),
         Err(ManagerError::ConflictingOutputContract { index: 0 })
     ));
     let joining = test_contract(3, Some(Arc::new(|_, _, _| Ok(NextOutputs::join(0)))));
-    let h3 = fund_fake(joining, None, sat(10_000), 3);
+    let h3 = fund_fake(joining, (), sat(10_000), 3);
     assert!(matches!(
         offline_manager().build_batch_tx(&[spend(&h1), spend(&h3)]),
         Err(ManagerError::JoinWithoutTarget { index: 0 })
@@ -289,9 +301,9 @@ fn a_payment_can_share_a_transaction_but_not_tracking_with_a_contract() {
     let dest = test_contract(90, None);
     let payment = PaymentOutput::at(1, spk_of(&dest));
     let paid = test_contract(1, Some(Arc::new(move |_, _, _| Ok(payment.clone().into()))));
-    let h1 = fund_fake(paid, None, sat(10_000), 1);
+    let h1 = fund_fake(paid, (), sat(10_000), 1);
     let tracked = contract_yielding(2, vec![ClauseOutput::at(0).to(dest).build()]);
-    let h2 = fund_fake(tracked, None, sat(20_000), 2);
+    let h2 = fund_fake(tracked, (), sat(20_000), 2);
     let mut manager = offline_manager();
     let tx = manager.build_batch_tx(&[spend(&h1), spend(&h2)]).unwrap();
     assert_eq!(
@@ -304,7 +316,7 @@ fn a_payment_can_share_a_transaction_but_not_tracking_with_a_contract() {
     assert!(manager.observe_spend(&h1, &tx).unwrap().is_empty());
     assert_eq!(manager.observe_spend(&h2, &tx).unwrap().len(), 1);
     assert!(h1.outputs().is_empty());
-    assert_eq!(h2.outputs()[0].outpoint().unwrap().vout, 0);
+    assert_eq!(h2.outputs()[0].outpoint().vout, 0);
 }
 
 fn sat(n: u64) -> Amount {
@@ -338,7 +350,7 @@ fn test_contract_with_identity<I: 'static>(
         next_outputs_fn,
     );
     Arc::new(
-        StandardP2TR::new_with_identity::<I>(
+        StandardP2TR::<_>::new_with_identity::<I>(
             "Test",
             crate::nums_key(),
             &(),
@@ -352,7 +364,7 @@ fn test_contract_with_identity<I: 'static>(
 fn contract_yielding(tag: i64, outputs: Vec<ClauseOutput>) -> Arc<dyn ErasedContract> {
     test_contract(
         tag,
-        Some(Arc::new(move |_: &(), _: &RawArgs, _: Option<&()>| {
+        Some(Arc::new(move |_: &(), _: &RawArgs, _: &()| {
             Ok(NextOutputs::Contracts(outputs.clone()))
         })),
     )
@@ -362,7 +374,7 @@ fn contract_yielding(tag: i64, outputs: Vec<ClauseOutput>) -> Arc<dyn ErasedCont
 fn contract_with_template(tag: i64, template: CtvTemplate) -> Arc<dyn ErasedContract> {
     test_contract(
         tag,
-        Some(Arc::new(move |_: &(), _: &RawArgs, _: Option<&()>| {
+        Some(Arc::new(move |_: &(), _: &RawArgs, _: &()| {
             Ok(NextOutputs::Template(template.clone()))
         })),
     )
@@ -374,7 +386,7 @@ fn spend(handle: &InstanceHandle) -> SpendBuilder {
 }
 
 fn spk_of(contract: &Arc<dyn ErasedContract>) -> ScriptBuf {
-    contract.script_pubkey(None).unwrap()
+    contract.script_pubkey(&StateCommitment::empty()).unwrap()
 }
 
 // ------------------------------------------------------------------
@@ -409,8 +421,8 @@ fn merges_preserves_and_deducts_across_inputs() {
                 .build(),
         ],
     );
-    let h1 = fund_fake(c1, None, sat(100_000), 1);
-    let h2 = fund_fake(c2, None, sat(60_000), 2);
+    let h1 = fund_fake(c1, (), sat(100_000), 1);
+    let h2 = fund_fake(c2, (), sat(60_000), 2);
 
     let tx = offline_manager()
         .build_batch_tx(&[spend(&h1).output_amount(1, sat(30_000)), spend(&h2)])
@@ -439,12 +451,12 @@ fn join_contributes_to_another_inputs_output() {
     );
     let joining = test_contract(
         2,
-        Some(Arc::new(|_: &(), _: &RawArgs, _: Option<&()>| {
+        Some(Arc::new(|_: &(), _: &RawArgs, _: &()| {
             Ok(NextOutputs::join(0))
         })),
     );
-    let hd = fund_fake(defining, None, sat(100_000), 1);
-    let hj = fund_fake(joining, None, sat(60_000), 2);
+    let hd = fund_fake(defining, (), sat(100_000), 1);
+    let hj = fund_fake(joining, (), sat(60_000), 2);
 
     // Both orders: the join is resolved after all defining inputs.
     for builders in [[spend(&hd), spend(&hj)], [spend(&hj), spend(&hd)]] {
@@ -459,11 +471,11 @@ fn join_contributes_to_another_inputs_output() {
 fn join_without_target_errors() {
     let joining = test_contract(
         1,
-        Some(Arc::new(|_: &(), _: &RawArgs, _: Option<&()>| {
+        Some(Arc::new(|_: &(), _: &RawArgs, _: &()| {
             Ok(NextOutputs::join(0))
         })),
     );
-    let h = fund_fake(joining, None, sat(60_000), 1);
+    let h = fund_fake(joining, (), sat(60_000), 1);
     let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(err, ManagerError::JoinWithoutTarget { index: 0 }));
 }
@@ -477,12 +489,12 @@ fn join_into_a_deduct_output_errors() {
     );
     let joining = test_contract(
         2,
-        Some(Arc::new(|_: &(), _: &RawArgs, _: Option<&()>| {
+        Some(Arc::new(|_: &(), _: &RawArgs, _: &()| {
             Ok(NextOutputs::join(0))
         })),
     );
-    let hd = fund_fake(deducting, None, sat(100_000), 1);
-    let hj = fund_fake(joining, None, sat(60_000), 2);
+    let hd = fund_fake(deducting, (), sat(100_000), 1);
+    let hj = fund_fake(joining, (), sat(60_000), 2);
     let err = offline_manager()
         .build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hj)])
         .unwrap_err();
@@ -502,13 +514,13 @@ fn join_fixture() -> (InstanceHandle, InstanceHandle) {
     );
     let joining = test_contract(
         2,
-        Some(Arc::new(|_: &(), _: &RawArgs, _: Option<&()>| {
+        Some(Arc::new(|_: &(), _: &RawArgs, _: &()| {
             Ok(NextOutputs::join(0))
         })),
     );
     (
-        fund_fake(defining, None, sat(100_000), 1),
-        fund_fake(joining, None, sat(60_000), 2),
+        fund_fake(defining, (), sat(100_000), 1),
+        fund_fake(joining, (), sat(60_000), 2),
     )
 }
 
@@ -557,7 +569,7 @@ fn second_preserve_in_one_input_errors() {
             ClauseOutput::at(1).to(dest_b).preserve_amount().build(),
         ],
     );
-    let h = fund_fake(c, None, sat(100_000), 1);
+    let h = fund_fake(c, (), sat(100_000), 1);
 
     let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(
@@ -582,8 +594,8 @@ fn mixing_preserve_and_deduct_at_same_index_errors() {
         2,
         vec![ClauseOutput::at(0).to(dest.clone()).deduct_amount().build()],
     );
-    let hp = fund_fake(preserving, None, sat(100_000), 1);
-    let hd = fund_fake(deducting, None, sat(50_000), 2);
+    let hp = fund_fake(preserving, (), sat(100_000), 1);
+    let hd = fund_fake(deducting, (), sat(50_000), 2);
 
     // Preserve first, deduct second — and the other way around.
     let err = offline_manager()
@@ -620,8 +632,8 @@ fn merged_output_requires_one_contract_identity() {
         2,
         vec![ClauseOutput::at(0).to(second).preserve_amount().build()],
     );
-    let h1 = fund_fake(c1, None, sat(50_000), 1);
-    let h2 = fund_fake(c2, None, sat(50_000), 2);
+    let h1 = fund_fake(c1, (), sat(50_000), 1);
+    let h2 = fund_fake(c2, (), sat(50_000), 2);
 
     let err = offline_manager()
         .build_batch_tx(&[spend(&h1), spend(&h2)])
@@ -644,7 +656,7 @@ fn observation_validates_child_outputs_before_marking_spent() {
                 .build(),
         ],
     );
-    let handle = fund_fake(parent, None, sat(50_000), 1);
+    let handle = fund_fake(parent, (), sat(50_000), 1);
     let mut manager = offline_manager();
     let valid = spend(&handle).build_tx(&manager).unwrap();
 
@@ -665,23 +677,32 @@ fn observation_validates_child_outputs_before_marking_spent() {
 
 #[test]
 fn child_state_must_match_the_destination_contract() {
+    // The destination is stateless (state type `()`); handing it any other
+    // state type must fail before a transaction is built.
+    #[derive(Debug, Clone)]
+    struct Stray;
+    impl crate::contracts::ContractState for Stray {
+        fn commitment(&self) -> crate::contracts::StateCommitment {
+            crate::contracts::StateCommitment::identity([7u8; 32])
+        }
+    }
     let stateless = test_contract(90, None);
     let parent = contract_yielding(
         1,
         vec![
             ClauseOutput::at(0)
                 .to(stateless)
-                .with_state(&())
+                .with_state(&Stray)
                 .preserve_amount()
                 .build(),
         ],
     );
-    let handle = fund_fake(parent, None, sat(50_000), 1);
+    let handle = fund_fake(parent, (), sat(50_000), 1);
 
     let err = spend(&handle).build_tx(&offline_manager()).unwrap_err();
     assert!(matches!(
         err,
-        ManagerError::ContractError(ContractError::UnexpectedState)
+        ManagerError::ContractError(ContractError::WrongStateType)
     ));
 }
 
@@ -692,7 +713,7 @@ fn unused_output_amount_errors() {
         1,
         vec![ClauseOutput::at(0).to(dest).preserve_amount().build()],
     );
-    let h = fund_fake(c, None, sat(100_000), 1);
+    let h = fund_fake(c, (), sat(100_000), 1);
 
     let err = offline_manager()
         .build_batch_tx(&[spend(&h).output_amount(1, sat(10_000))])
@@ -707,7 +728,7 @@ fn missing_deduct_amount_errors() {
         1,
         vec![ClauseOutput::at(0).to(dest).deduct_amount().build()],
     );
-    let h = fund_fake(c, None, sat(100_000), 1);
+    let h = fund_fake(c, (), sat(100_000), 1);
 
     let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(
@@ -723,7 +744,7 @@ fn ignore_output_requires_an_explicit_amount() {
         1,
         vec![ClauseOutput::at(0).to(dest).ignore_amount().build()],
     );
-    let h = fund_fake(c, None, sat(100_000), 1);
+    let h = fund_fake(c, (), sat(100_000), 1);
 
     let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(
@@ -744,7 +765,7 @@ fn deduct_exceeding_input_errors() {
         1,
         vec![ClauseOutput::at(0).to(dest).deduct_amount().build()],
     );
-    let h = fund_fake(c, None, sat(50_000), 1);
+    let h = fund_fake(c, (), sat(50_000), 1);
 
     let err = offline_manager()
         .build_batch_tx(&[spend(&h).output_amount(0, sat(60_000))])
@@ -760,7 +781,7 @@ fn conflicting_output_amounts_error() {
             tag,
             vec![ClauseOutput::at(0).to(dest.clone()).deduct_amount().build()],
         );
-        fund_fake(c, None, sat(100_000), seed)
+        fund_fake(c, (), sat(100_000), seed)
     };
     let h1 = deducting(1, 1);
     let h2 = deducting(2, 2);
@@ -784,7 +805,7 @@ fn non_contiguous_outputs_error() {
         1,
         vec![ClauseOutput::at(1).to(dest).preserve_amount().build()],
     );
-    let h = fund_fake(c, None, sat(100_000), 1);
+    let h = fund_fake(c, (), sat(100_000), 1);
 
     let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(
@@ -796,7 +817,7 @@ fn non_contiguous_outputs_error() {
 #[test]
 fn terminal_clause_without_explicit_outputs_errors() {
     let c = test_contract(1, None);
-    let h = fund_fake(c, None, sat(100_000), 1);
+    let h = fund_fake(c, (), sat(100_000), 1);
 
     let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(err, ManagerError::NoOutputs));
@@ -815,7 +836,7 @@ fn empty_outputs_are_rejected_even_for_childless_spends() {
     ] {
         let explicit = !matches!(next, NextOutputs::Template(_));
         let c = test_contract(1, Some(Arc::new(move |_, _, _| Ok(next.clone()))));
-        let h = fund_fake(c, None, sat(10_000), 1);
+        let h = fund_fake(c, (), sat(10_000), 1);
         let builder = spend(&h);
         let builder = if explicit {
             builder.outputs(vec![])
@@ -845,7 +866,7 @@ fn template_fixes_outputs_and_sequence() {
     let dest = test_contract(90, None);
     let template = template_to(&dest, sat(50_000), 5);
     let c = contract_with_template(1, template.clone());
-    let h = fund_fake(c, None, sat(50_000), 1);
+    let h = fund_fake(c, (), sat(50_000), 1);
     let manager = offline_manager();
 
     let tx = spend(&h).build_tx(&manager).unwrap();
@@ -874,8 +895,8 @@ fn template_in_batch_errors() {
                 .build(),
         ],
     );
-    let h1 = fund_fake(templated, None, sat(50_000), 1);
-    let h2 = fund_fake(preserving, None, sat(60_000), 2);
+    let h1 = fund_fake(templated, (), sat(50_000), 1);
+    let h2 = fund_fake(preserving, (), sat(60_000), 2);
 
     let err = offline_manager()
         .build_batch_tx(&[spend(&h1), spend(&h2)])
@@ -896,7 +917,7 @@ fn explicit_outputs_in_batch_error() {
                     .build(),
             ],
         );
-        fund_fake(c, None, sat(100_000), seed)
+        fund_fake(c, (), sat(100_000), seed)
     };
     let h1 = preserving(1, 1);
     let h2 = preserving(2, 2);
@@ -915,7 +936,7 @@ fn explicit_outputs_in_batch_error() {
 fn explicit_outputs_cannot_override_a_template() {
     let dest = test_contract(90, None);
     let c = contract_with_template(1, template_to(&dest, sat(50_000), 0));
-    let h = fund_fake(c, None, sat(50_000), 1);
+    let h = fund_fake(c, (), sat(50_000), 1);
 
     let err = offline_manager()
         .build_batch_tx(&[spend(&h).outputs(vec![TxOut {
@@ -938,7 +959,7 @@ fn explicit_outputs_cannot_override_contract_outputs() {
                 .build(),
         ],
     );
-    let h = fund_fake(c, None, sat(50_000), 1);
+    let h = fund_fake(c, (), sat(50_000), 1);
 
     let err = offline_manager()
         .build_batch_tx(&[spend(&h).outputs(vec![TxOut {
@@ -953,7 +974,7 @@ fn explicit_outputs_cannot_override_contract_outputs() {
 fn observation_rejects_a_ctv_template_mismatch() {
     let dest = test_contract(90, None);
     let c = contract_with_template(1, template_to(&dest, sat(50_000), 5));
-    let h = fund_fake(c, None, sat(50_000), 1);
+    let h = fund_fake(c, (), sat(50_000), 1);
     let mut manager = offline_manager();
     let tx = spend(&h).build_tx(&manager).unwrap();
     let mut wrong_amount = tx.clone();
@@ -974,7 +995,7 @@ fn observation_rejects_a_ctv_template_mismatch() {
 #[test]
 fn raw_witness_layout_is_checked_when_no_signer_exists() {
     let c = test_contract(1, None);
-    let h = fund_fake(c, None, sat(50_000), 1);
+    let h = fund_fake(c, (), sat(50_000), 1);
     let err = h
         .spend_clause("spend", vec![vec![1]])
         .outputs(vec![TxOut {
@@ -993,7 +1014,7 @@ fn duplicate_instance_in_batch_errors() {
         1,
         vec![ClauseOutput::at(0).to(dest).preserve_amount().build()],
     );
-    let h = fund_fake(c, None, sat(100_000), 1);
+    let h = fund_fake(c, (), sat(100_000), 1);
 
     let err = offline_manager()
         .build_batch_tx(&[spend(&h), spend(&h)])
@@ -1066,4 +1087,46 @@ fn poll_until_returns_hit_or_times_out() {
     })
     .unwrap_err();
     assert!(matches!(err, ManagerError::Other(_)));
+}
+
+#[test]
+fn batch_accounting_reports_a_missing_output_instead_of_panicking() {
+    use super::validation::{
+        InputConstraints, OutputIdentity, ResolvedOutput, validate_batch_constraints,
+    };
+    use crate::contracts::{ClauseOutputAmountBehaviour, OutputIndex};
+
+    let script = ScriptBuf::from(vec![0x51u8]);
+    let tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![TxOut {
+            script_pubkey: script.clone(),
+            value: Amount::from_sat(1_000),
+        }],
+    };
+    // Both amount modes read the output's value; index 3 does not exist.
+    for amount in [
+        ClauseOutputAmountBehaviour::PreserveOutput,
+        ClauseOutputAmountBehaviour::DeductOutput,
+    ] {
+        let outputs = [ResolvedOutput {
+            index: OutputIndex::Explicit(3),
+            script_pubkey: script.clone(),
+            amount,
+            identity: OutputIdentity::Payment(script.clone()),
+        }];
+        let inputs = [InputConstraints {
+            vin: 0,
+            value: Amount::from_sat(1_000),
+            outputs: &outputs,
+            join: None,
+        }];
+        let err = validate_batch_constraints(&inputs, &tx).unwrap_err();
+        assert!(
+            matches!(err, ManagerError::MissingContractOutput(outpoint) if outpoint.vout == 3),
+            "{err}"
+        );
+    }
 }

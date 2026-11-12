@@ -3,14 +3,14 @@
 mod support;
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut};
+use mattrs::contract;
 use mattrs::contracts::{
     ClauseTree, ContractError, CtvTemplate, RawArgs, StandardClause, StandardP2TR,
 };
-use mattrs::{ContractParams, contract};
 use support::testkit::{alice_pk, bob_pk, offline_manager};
 use support::vault::{Unvaulting, UnvaultingParams, Vault, VaultParams};
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 struct DelayParams {
     blocks: u32,
 }
@@ -36,7 +36,9 @@ contract! {
             Ok(())
         };
         clause spend {
-            script |_, _| panic!("validation must run before script construction");
+            script |_, _| -> ScriptBuf {
+                panic!("validation must run before script construction")
+            };
         }
         tree [spend];
     }
@@ -90,7 +92,7 @@ fn low_level_clause_metadata_is_validated_too() {
     )
     .with_csv_blocks(65_536);
     assert!(matches!(
-        StandardP2TR::new(
+        StandardP2TR::<_>::new(
             "Invalid",
             mattrs::nums_key(),
             &(),
@@ -105,7 +107,7 @@ fn explicit_sequence_may_lengthen_but_not_bypass_the_delay() {
     let manager = offline_manager();
     let handle: TimedHandle = mattrs::testutil::fund_fake(
         Timed::new(DelayParams { blocks: 10 }).unwrap().as_erased(),
-        None,
+        (),
         Amount::from_sat(10_000),
         1,
     )
@@ -162,7 +164,7 @@ fn ctv_sequence_cannot_bypass_declared_csv() {
     }
     let h: ConflictingTemplateHandle = mattrs::testutil::fund_fake(
         ConflictingTemplate::new(()).unwrap().as_erased(),
-        None,
+        (),
         Amount::from_sat(10_000),
         1,
     )

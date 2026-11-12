@@ -23,7 +23,6 @@
 
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
-use mattrs::ContractParams;
 use mattrs::contract;
 use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
@@ -46,7 +45,7 @@ define_pushable!();
 
 /// A bisection stage over step range `[i, j]` (inclusive; the range size is a
 /// power of two by protocol invariant).
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct BisectRangeParams {
     pub pool: PoolParams,
     pub i: i64,
@@ -82,7 +81,7 @@ impl BisectRangeParams {
 }
 
 /// The single disputed step `k`, re-run on-chain.
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct LeafStepParams {
     pub pool: PoolParams,
     pub k: i64,
@@ -354,7 +353,9 @@ impl ExitBisect1 {
         specs
     }
 
-    fn ingrid_reveal_script(p: &BisectRangeParams) -> ScriptBuf {
+    fn ingrid_reveal_script(
+        p: &BisectRangeParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
         let mut s = StackScript::from_specs(&Self::ingrid_reveal_specs());
 
         s.merkle_of(&with_carry(&B1_ITEMS), "state");
@@ -372,9 +373,7 @@ impl ExitBisect1 {
         s.expect_equal("t", "trace_i");
 
         s.merkle_of(&with_carry(&B2_ITEMS), "b2_state");
-        let b2_root = ExitBisect2::new(p.clone())
-            .expect("ExitBisect2 contract definition is valid")
-            .taptree_root();
+        let b2_root = ExitBisect2::new(p.clone())?.taptree_root();
         s.ccv(
             CcvData::Item("b2_state"),
             CcvIndex::CURRENT,
@@ -382,17 +381,14 @@ impl ExitBisect1 {
             CcvTaptree::Const(b2_root),
             CcvMode::Preserve,
         );
-        s.into_script()
+        Ok(s.into_script())
     }
 
     fn ingrid_reveal_outputs(
         p: &BisectRangeParams,
         witness: &[Vec<u8>],
-        state: Option<&ExitBisect1State>,
+        state: &ExitBisect1State,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("ingrid_reveal needs the bisection state".to_string())
-        })?;
         let mut w = WitnessReader::new(witness);
         w.skip(6)?; // the six state leaves; `state` already carries them decoded
         let next = ExitBisect2State {
@@ -442,10 +438,8 @@ impl ExitBisect1 {
     fn forfait_outputs(
         p: &BisectRangeParams,
         _witness: &[Vec<u8>],
-        state: Option<&ExitBisect1State>,
+        state: &ExitBisect1State,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state
-            .ok_or_else(|| ClauseError::Other("forfait needs the bisection state".to_string()))?;
         settlement_outputs(&p.pool, &state.ctx, DisputeWinner::Challenger)
     }
 }
@@ -453,7 +447,6 @@ impl ExitBisect1 {
 impl ExitBisect1Handle {
     fn bisect_state(&self) -> ExitBisect1State {
         self.state()
-            .expect("ExitBisect1 instances carry their state")
     }
 
     /// Ingrid reveals her midpoint/half-traces for this range, from her
@@ -536,7 +529,10 @@ impl ExitBisect2 {
         specs
     }
 
-    fn reveal_script(p: &BisectRangeParams, side: Side) -> ScriptBuf {
+    fn reveal_script(
+        p: &BisectRangeParams,
+        side: Side,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
         let mut s = StackScript::from_specs(&Self::reveal_specs());
 
         s.merkle_of(&with_carry(&B2_ITEMS), "state");
@@ -586,10 +582,10 @@ impl ExitBisect2 {
             CcvData::Item("child_state"),
             CcvIndex::CURRENT,
             CcvKey::Nums,
-            CcvTaptree::Const(Self::child_root(p, side)),
+            CcvTaptree::Const(Self::child_root(p, side)?),
             CcvMode::Preserve,
         );
-        s.into_script()
+        Ok(s.into_script())
     }
 
     fn child_range(p: &BisectRangeParams, side: Side) -> (i64, i64) {
@@ -600,35 +596,33 @@ impl ExitBisect2 {
         }
     }
 
-    fn child_root(p: &BisectRangeParams, side: Side) -> [u8; 32] {
+    fn child_root(
+        p: &BisectRangeParams,
+        side: Side,
+    ) -> Result<[u8; 32], mattrs::contracts::ContractError> {
         let (i, j) = Self::child_range(p, side);
-        if p.children_are_leaves() {
+        Ok(if p.children_are_leaves() {
             ExitLeaf::new(LeafStepParams {
                 pool: p.pool.clone(),
                 k: i,
-            })
-            .expect("ExitLeaf contract definition is valid")
+            })?
             .taptree_root()
         } else {
             ExitBisect1::new(BisectRangeParams {
                 pool: p.pool.clone(),
                 i,
                 j,
-            })
-            .expect("ExitBisect1 contract definition is valid")
+            })?
             .taptree_root()
-        }
+        })
     }
 
     fn reveal_outputs(
         p: &BisectRangeParams,
         witness: &[Vec<u8>],
-        state: Option<&ExitBisect2State>,
+        state: &ExitBisect2State,
         side: Side,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("challenger reveal needs the bisection state".to_string())
-        })?;
         let mut w = WitnessReader::new(witness);
         w.skip(9)?; // the nine state leaves; `state` already carries them decoded
         let h_mid_c = w.bytes32()?;
@@ -712,10 +706,8 @@ impl ExitBisect2 {
     fn forfait_outputs(
         p: &BisectRangeParams,
         _witness: &[Vec<u8>],
-        state: Option<&ExitBisect2State>,
+        state: &ExitBisect2State,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state
-            .ok_or_else(|| ClauseError::Other("forfait needs the bisection state".to_string()))?;
         settlement_outputs(&p.pool, &state.ctx, DisputeWinner::Ingrid)
     }
 }
@@ -723,7 +715,6 @@ impl ExitBisect2 {
 impl ExitBisect2Handle {
     fn bisect_state(&self) -> ExitBisect2State {
         self.state()
-            .expect("ExitBisect2 instances carry their state")
     }
 
     /// The challenger reveals their midpoint/half-traces from their claimed
@@ -937,12 +928,9 @@ impl ExitLeaf {
 
     fn case_outputs(
         p: &LeafStepParams,
-        state: Option<&ExitLeafState>,
+        state: &ExitLeafState,
         winner: DisputeWinner,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("leaf settlement needs the dispute state".to_string())
-        })?;
         settlement_outputs(&p.pool, &state.ctx, winner)
     }
 }
@@ -975,7 +963,7 @@ impl ExitLeafHandle {
     ) -> SpendBuilder {
         let p = self.params();
         let k = p.k as usize;
-        let state: ExitLeafState = self.state().expect("ExitLeaf instances carry their state");
+        let state: ExitLeafState = self.state();
 
         let working = pool_at_step(pool, &claim.bits, k);
         let case = if !claim.bits[k] {

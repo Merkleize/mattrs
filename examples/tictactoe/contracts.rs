@@ -36,9 +36,9 @@ use mattrs::contracts::{
     ClauseError, ClauseOutput, ContractState, CtvTemplate, StateCodec, StateCommitment,
     WitnessError,
 };
-use mattrs::manager::{MissingStateError, SpendBuilder};
+use mattrs::manager::SpendBuilder;
 use mattrs::script_helpers::{check_input_contract, concat, dup, key_path_p2tr, older};
-use mattrs::{ContractParams, Signature, contract};
+use mattrs::{Signature, contract};
 
 define_pushable!();
 
@@ -93,7 +93,7 @@ pub fn board_full(board: &[u8; 9]) -> bool {
     board.iter().all(|&c| c != EMPTY)
 }
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct TttParams {
     pub alice_pk: XOnlyPublicKey,
     pub bob_pk: XOnlyPublicKey,
@@ -301,14 +301,13 @@ impl TicTacToe {
     /// expanded state and re-emit the contract with the updated board.
     fn next_after_move(
         p: &TttParams,
-        s: Option<&TttState>,
+        s: &TttState,
         prefix: &[u8],
         suffix: &[u8],
         turn: u8,
         mark: u8,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state =
-            s.ok_or_else(|| ClauseError::Other("a move needs the board state".to_string()))?;
+        let state = s;
         let cell = prefix.len();
         if cell >= 9 || suffix.len() != 8 - cell {
             return Err(ClauseError::Other(
@@ -576,32 +575,32 @@ impl TicTacToe {
 /// instance's typed state, so callers pass only what is genuinely new.
 impl TicTacToeHandle {
     /// The current player's move at `cell` (which must be empty).
-    pub fn make_move(&self, cell: usize) -> Result<SpendBuilder, MissingStateError> {
-        let s = self.state_req()?;
+    pub fn make_move(&self, cell: usize) -> SpendBuilder {
+        let s = self.state();
         let (prefix, suffix) = s.prefix_suffix(cell);
-        Ok(if s.turn == TURN_ALICE {
+        if s.turn == TURN_ALICE {
             self.move_alice(prefix, suffix)
         } else {
             self.move_bob(prefix, suffix)
-        })
+        }
     }
 
     /// The pot to the holder of a line of `mark` (the timeout claims need no
     /// wrapper: their board argument is `#[from_state]`-filled, so the
     /// generated `timeout_*_idle()` methods already take nothing).
-    pub fn claim_win(&self, mark: u8) -> Result<SpendBuilder, MissingStateError> {
-        let s = self.state_req()?;
+    pub fn claim_win(&self, mark: u8) -> SpendBuilder {
+        let s = self.state();
         let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = s.board.map(|b| [b]);
-        Ok(if mark == MARK_ALICE {
+        if mark == MARK_ALICE {
             self.alice_wins([s.turn], c0, c1, c2, c3, c4, c5, c6, c7, c8)
         } else {
             self.bob_wins([s.turn], c0, c1, c2, c3, c4, c5, c6, c7, c8)
-        })
+        }
     }
 
-    pub fn claim_tie(&self) -> Result<SpendBuilder, MissingStateError> {
-        let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = self.state_req()?.board.map(|b| [b]);
-        Ok(self.tie(c0, c1, c2, c3, c4, c5, c6, c7, c8))
+    pub fn claim_tie(&self) -> SpendBuilder {
+        let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = self.state().board.map(|b| [b]);
+        self.tie(c0, c1, c2, c3, c4, c5, c6, c7, c8)
     }
 }
 
@@ -680,14 +679,12 @@ pub mod roles {
         Role::new()
             .on::<TicTacToe, _>(move |d: &mut PlayerData, h: TicTacToeHandle, _cx| {
                 let params = h.params();
-                let s = h.state().ok_or_else(|| {
-                    ProtocolError::Other("the game state is unavailable".to_string())
-                })?;
+                let s = h.state();
 
                 // My line is on the board: claim the pot.
                 if has_line(&s.board, my_mark) {
                     return Ok(Action::SendFinal(
-                        h.claim_win(my_mark)?,
+                        h.claim_win(my_mark),
                         TttOutcome {
                             result: my_win,
                             by_timeout: false,
@@ -703,7 +700,7 @@ pub mod roles {
                     }
                     if board_full(&s.board) {
                         return Ok(Action::SendFinal(
-                            h.claim_tie()?,
+                            h.claim_tie(),
                             TttOutcome {
                                 result: TttResult::Tie,
                                 by_timeout: false,
@@ -718,16 +715,16 @@ pub mod roles {
                         )));
                     }
                     return Ok(Action::Send(
-                        h.make_move(cell)?.sign(HotSigner::new(d.xpriv)),
+                        h.make_move(cell).sign(HotSigner::new(d.xpriv)),
                     ));
                 }
 
                 // The opponent's turn: watch the UTXO, and claim the forfait
                 // if they idle past the timeout.
                 let builder = if alice {
-                    h.timeout_bob_idle()?
+                    h.timeout_bob_idle()
                 } else {
-                    h.timeout_alice_idle()?
+                    h.timeout_alice_idle()
                 };
                 Ok(Action::wait_or_send_final(
                     params.timeout_blocks,
@@ -743,9 +740,7 @@ pub mod roles {
                 let clause = h.spent_clause().ok_or_else(|| {
                     ProtocolError::Other("the game instance is not settled".to_string())
                 })?;
-                let s = h.state().ok_or_else(|| {
-                    ProtocolError::Other("the game state is unavailable".to_string())
-                })?;
+                let s = h.state();
 
                 // Classify the counterparty's terminal claim, checking it
                 // against the board we know.

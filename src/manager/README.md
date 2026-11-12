@@ -1,8 +1,7 @@
 # Manager architecture
 
-`mattrs::manager` remains the public entry point. Its types are re-exported from
-private modules, so existing imports, contract macros, examples, and protocol
-runners do not need to change. `ContractManager` owns the RPC client, instance
+`mattrs::manager` is the public entry point; its types are re-exported from
+private modules. `ContractManager` owns the RPC client, instance
 registry, network, and optional inspector projection; its facade composes the
 following components.
 
@@ -45,7 +44,7 @@ Network acceptance and local state cannot be a distributed atomic transaction:
 an RPC error can be ambiguous after node acceptance. The manager leaves local
 state unchanged on RPC errors; callers can reconcile through chain observation.
 
-The former `record_batch` path is gone. Execution and strict observation now use
+Execution and strict observation use
 the same child deduplication, input-index resolution, join linking, and final
 witness recording. `observe_spend` deliberately retains partial-input semantics:
 it cannot establish aggregate accounting without the other inputs and may retry

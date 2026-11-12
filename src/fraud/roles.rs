@@ -22,7 +22,7 @@ use std::rc::Rc;
 use bitcoin::bip32::Xpriv;
 use bitcoin::{ScriptBuf, TxOut};
 
-use crate::manager::{InstanceHandle, ManagerError, SpendBuilder};
+use crate::manager::{InstanceHandle, SpendBuilder};
 use crate::protocol::{Action, ProtocolError, Role, StepCtx};
 use crate::signer::HotSigner;
 
@@ -147,7 +147,7 @@ pub fn alice_role() -> Role<FraudPartyData, FraudOutcome> {
             .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
                 let reveal = d.reveal_args(&h.params())?;
                 let builder = h
-                    .alice_reveal(reveal.h_mid, reveal.trace_left, reveal.trace_right)?
+                    .alice_reveal(reveal.h_mid, reveal.trace_left, reveal.trace_right)
                     .sign(HotSigner::new(d.xpriv));
                 Ok(Action::Send(builder))
             })
@@ -158,7 +158,7 @@ pub fn alice_role() -> Role<FraudPartyData, FraudOutcome> {
             .on::<Leaf, _>(|d, h: LeafHandle, cx| {
                 let step = leaf_step(cx)?;
                 if d.honest_at(step) {
-                    let builder = h.alice_reveal(d.xs[step as usize].clone())?;
+                    let builder = h.alice_reveal(d.xs[step as usize].clone());
                     Ok(win_leaf(d, builder, h.handle(), FraudWinner::Alice, step)?)
                 } else {
                     // Our claim cannot survive this step; the counterparty's
@@ -181,23 +181,21 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
             })
             .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
                 let p = h.params();
-                let state = h.state().ok_or_else(|| {
-                    ProtocolError::Other("a Bisect2 instance carries its revealed state".into())
-                })?;
+                let state = h.state();
                 let reveal = d.reveal_args(&p)?;
                 // Recurse into the left half when the midstates differ, the right
                 // when they agree (the same comparison the scripts enforce).
                 let builder = if state.h_mid_a != reveal.h_mid {
-                    h.bob_reveal_left(reveal.h_mid, reveal.trace_left, reveal.trace_right)?
+                    h.bob_reveal_left(reveal.h_mid, reveal.trace_left, reveal.trace_right)
                 } else {
-                    h.bob_reveal_right(reveal.h_mid, reveal.trace_left, reveal.trace_right)?
+                    h.bob_reveal_right(reveal.h_mid, reveal.trace_left, reveal.trace_right)
                 };
                 Ok(Action::Send(builder.sign(HotSigner::new(d.xpriv))))
             })
             .on::<Leaf, _>(|d, h: LeafHandle, cx| {
                 let step = leaf_step(cx)?;
                 if d.honest_at(step) {
-                    let builder = h.bob_reveal(d.xs[step as usize].clone())?;
+                    let builder = h.bob_reveal(d.xs[step as usize].clone());
                     Ok(win_leaf(d, builder, h.handle(), FraudWinner::Bob, step)?)
                 } else {
                     Ok(Action::Wait)
@@ -246,12 +244,11 @@ fn leaf_step(cx: &StepCtx<'_>) -> Result<i64, ProtocolError> {
 /// payout script (zero fee, as everywhere in this crate's regtest flows).
 /// Shared by any protocol whose terminal spends sweep the UTXO (the game256
 /// roles use it too).
-pub fn pot(handle: &InstanceHandle, payout: &ScriptBuf) -> Result<Vec<TxOut>, ProtocolError> {
-    let prevout = handle.prevout().ok_or(ManagerError::NotFunded)?;
-    Ok(vec![TxOut {
+pub fn pot(handle: &InstanceHandle, payout: &ScriptBuf) -> Vec<TxOut> {
+    vec![TxOut {
         script_pubkey: payout.clone(),
-        value: prevout.value,
-    }])
+        value: handle.amount(),
+    }]
 }
 
 /// Wait for the counterparty's reveal; if it stalls past the timeout, collect
@@ -264,7 +261,7 @@ fn wait_or_forfait(
     p: &BisectParams,
 ) -> Result<Action<FraudOutcome>, ProtocolError> {
     let builder = forfait
-        .outputs(pot(handle, &d.payout)?)
+        .outputs(pot(handle, &d.payout))
         .sign(HotSigner::new(d.xpriv));
     let outcome = FraudOutcome {
         winner,
@@ -288,7 +285,7 @@ fn win_leaf(
     step: i64,
 ) -> Result<Action<FraudOutcome>, ProtocolError> {
     let builder = builder
-        .outputs(pot(handle, &d.payout)?)
+        .outputs(pot(handle, &d.payout))
         .sign(HotSigner::new(d.xpriv));
     let outcome = FraudOutcome {
         winner,

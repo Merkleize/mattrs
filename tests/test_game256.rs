@@ -119,7 +119,7 @@ fn addr<S: ContractState + 'static>(
     contract: Arc<dyn ErasedContract>,
     state: &S,
 ) -> bitcoin::ScriptBuf {
-    contract.script_pubkey(Some(&state.commitment())).unwrap()
+    contract.script_pubkey(&state.commitment()).unwrap()
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn test_game256_state_transitions() {
     // 1. G256S0.choose(x) -> G256S1 committed to x.
     let s0 = try_handle::<G256S0Handle>(fund_fake(
         G256S0::new(p.clone()).unwrap().as_erased(),
-        None,
+        (),
         100_000,
         1,
     ));
@@ -153,11 +153,11 @@ fn test_game256_state_transitions() {
     // 2. G256S2.start_challenge -> Bisect_1(0,7) with sha256-committed endpoints.
     let s2 = try_handle::<G256S2Handle>(fund_fake(
         G256S2::new(p.clone()).unwrap().as_erased(),
-        Some(Box::new(G256S2State {
+        G256S2State {
             t_a: [7; 32],
             y: 10,
             x: 5,
-        })),
+        },
         100_000,
         2,
     ));
@@ -184,7 +184,7 @@ fn test_game256_state_transitions() {
     // 3. Bisect_2(0,7).bob_reveal_left -> a *sub-Bisect_1(0,3)* (children not leaves).
     let b2 = try_handle::<Bisect2Handle>(fund_fake(
         bisect2(bp(0, 7)).as_erased(),
-        Some(Box::new(Bisect2State {
+        Bisect2State {
             h_start: [1; 32],
             h_end_a: [2; 32],
             h_end_b: [3; 32],
@@ -193,7 +193,7 @@ fn test_game256_state_transitions() {
             h_mid_a: [6; 32],
             trace_left_a: [7; 32],
             trace_right_a: [8; 32],
-        })),
+        },
         100_000,
         3,
     ));
@@ -201,7 +201,6 @@ fn test_game256_state_transitions() {
     // supplies his midstate and sub-traces.
     let tx = b2
         .bob_reveal_left([9; 32], [10; 32], [11; 32])
-        .unwrap()
         .sign(HotSigner::new(bob_xpriv()))
         .build_tx(&manager)
         .unwrap();
@@ -222,7 +221,7 @@ fn test_game256_state_transitions() {
     // 4. Bisect_2(0,1).bob_reveal_left -> a *Leaf* (children ARE leaves).
     let b2_leaf = try_handle::<Bisect2Handle>(fund_fake(
         bisect2(bp(0, 1)).as_erased(),
-        Some(Box::new(Bisect2State {
+        Bisect2State {
             h_start: [1; 32],
             h_end_a: [2; 32],
             h_end_b: [3; 32],
@@ -231,13 +230,12 @@ fn test_game256_state_transitions() {
             h_mid_a: [6; 32],
             trace_left_a: [7; 32],
             trace_right_a: [8; 32],
-        })),
+        },
         100_000,
         4,
     ));
     let tx = b2_leaf
         .bob_reveal_left([9; 32], [10; 32], [11; 32])
-        .unwrap()
         .sign(HotSigner::new(bob_xpriv()))
         .build_tx(&manager)
         .unwrap();
@@ -256,7 +254,7 @@ fn test_game256_state_transitions() {
     // 5. G256S1.reveal -> G256S2 (state passthrough of t_a/y/x).
     let s1 = try_handle::<G256S1Handle>(fund_fake(
         G256S1::new(p.clone()).unwrap().as_erased(),
-        Some(Box::new(G256S1State { x: 5 })),
+        G256S1State { x: 5 },
         100_000,
         5,
     ));
@@ -280,19 +278,18 @@ fn test_game256_state_transitions() {
     // 6. Bisect_1.alice_reveal -> Bisect_2 (same range), state passthrough.
     let b1 = try_handle::<Bisect1Handle>(fund_fake(
         bisect1(bp(0, 7)).as_erased(),
-        Some(Box::new(Bisect1State {
+        Bisect1State {
             h_start: [1; 32],
             h_end_a: [2; 32],
             h_end_b: [3; 32],
             trace_a: [4; 32],
             trace_b: [5; 32],
-        })),
+        },
         100_000,
         6,
     ));
     let tx = b1
         .alice_reveal([6; 32], [7; 32], [8; 32])
-        .unwrap()
         .sign(HotSigner::new(alice_xpriv()))
         .build_tx(&manager)
         .unwrap();

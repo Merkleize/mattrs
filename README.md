@@ -50,20 +50,20 @@ script + typed args + a function computing the next outputs). A
 
 Because they are all derived from the same tree, a contract's address can never
 drift from the witness that spends it. Contracts are also *self-describing*: each
-carries its encoded params, so child instances recover their params from the
-contract rather than from a parallel field.
+carries its params as a typed value, so child instances recover their params
+from the contract rather than from a parallel field.
 
 ## Defining a contract
 
 A single `contract! { .. }` block generates the per-clause `*Args` structs, the
 clause objects and taptree, a contract struct (`new` / `fund` / `address` /
 `taptree_root` / `as_erased`), and a typed handle with **one spend method per
-clause**. Params/state stay ordinary derived structs; the tapscripts stay as
-reviewable functions the DSL references. The derives are self-contained — a
-contract file imports only the traits it actually names.
+clause**. Params are any ordinary `Debug + Clone` struct (nothing to derive, any
+field types); state is a struct deriving `ContractState`; the tapscripts stay as
+reviewable functions the DSL references.
 
 ```rust
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 struct VaultParams { /* ... */ }
 
 contract! {
@@ -78,7 +78,8 @@ contract! {
                 ctv_hash: [u8; 32],
                 out_i: i64,
             }
-            script Vault::trigger_script;          // fn(&VaultParams) -> ScriptBuf
+            // fn(&VaultParams) -> ScriptBuf, or Result<ScriptBuf, ContractError>
+            script Vault::trigger_script;
             // The body yields Result<T, ClauseError> where T is anything
             // Into<NextOutputs>: Vec<ClauseOutput>, CtvTemplate, or NextOutputs.
             next(p, a) { /* ... */ }
@@ -121,19 +122,20 @@ For manual implementations, use `StateCommitment::identity(bytes)` for raw data
 or an existing hash/root, and `StateCommitment::sha256(preimage)` to explicitly
 hash a preimage. No length-dependent hashing takes place during addressing.
 Empty commitment bytes omit the data tweak; they are not SHA256 of empty data.
-Type-erased `script_pubkey` and `control_block_internal_key` now accept
-`Option<&StateCommitment>`; pass `Some(&state.commitment())`, not `state.encode()`.
+Type-erased `script_pubkey` and `control_block_internal_key` take a
+`&StateCommitment`; pass `&state.commitment()`, not `state.encode()`.
 
-Migration: add `#[commit(identity)]` to existing 32-byte single-field states;
-use an explicit SHA256 commitment for states that previously relied on implicit
-hashing of non-32-byte serialization. Move manual serialization methods to
-`StateCodec`. Existing example commitments and addresses are preserved (including
-tic-tac-toe's explicit hash of its 10-byte serialization). For variable-length
-legacy states, choose the strategy to match the script: neither strategy
-reproduces the old length-dependent rule for every possible length.
-An augmented contract using unit state `()` now has an empty commitment (no data
-tweak); reproducing its old implicit SHA256-of-empty tweak requires a custom
-state with that explicit hash. Ordinary stateless contracts are unchanged.
+Every contract has a state type. A stateless contract is one whose state is the
+unit type `()`, whose commitment is empty; a `state <Type>;` section names a
+real one. An instance therefore always holds a state of its contract's type
+(checked when the instance is created), so a typed handle's `state()` returns
+it directly and a clause's `next(p, a, s)` receives `s: &State`.
+
+Choose the strategy to match what the script does: a 32-byte value the script
+re-reveals verbatim is `identity`; a value the script hashes first is `sha256`
+(tic-tac-toe commits the hash of its 10-byte serialization this way). An
+augmented contract with unit state `()` has an empty commitment, hence no data
+tweak.
 
 ## Spending: a clause is a typed method call
 
@@ -150,7 +152,7 @@ let unvaulting: UnvaultingHandle = vault
 
 // withdraw: terminal CTV spend with explicit outputs
 unvaulting
-    .withdraw()?
+    .withdraw()
     .outputs(withdraw_outputs)
     .exec_none(&mut manager)?;
 ```
@@ -168,6 +170,19 @@ The validator returns `Result<(), ContractError>` and receives `&params`
 (and `&ctx` if declared), like script builders. Use it for constraints shared
 with child contracts so invalid configuration returns an error at the entry
 constructor. The `timelock` section validates its own block delay automatically.
+
+Every builder section (`script`, `timelock`, `args raw`, `internal_key`, and a
+computed `tree`) may return either its value or `Result<_, ContractError>`. A
+script that embeds a child contract's taptree root therefore propagates the
+child's construction error with `?` instead of panicking:
+
+```rust
+fn trigger_script(p: &VaultParams) -> Result<ScriptBuf, ContractError> {
+    let unvaulting = Unvaulting::new(Self::unvaulting_params(p))?;
+    Ok(script! { /* ... */ { unvaulting.taptree_root().to_vec() } /* ... */ })
+}
+```
+
 For hand-written scripts, `BlockDelay::new(blocks)?.script()` supplies a checked
 block delay; `older(u32)` remains the low-level helper for raw sequence operands.
 
@@ -188,7 +203,7 @@ even for a terminal withdrawal:
 
 Both forms create no children and use the same commitment check when observing
 a spend. The vault's `Unvaulting::withdraw` demonstrates a hash committed in
-state. A wrong payment, sequence, or revealed state hash now fails locally.
+state. A wrong payment, sequence, or revealed state hash fails locally.
 Construction supports single-input CTV transactions with version 2 and locktime
 0; `compute_ctv_hash_for_tx` also hashes general transactions for observation.
 
@@ -199,7 +214,7 @@ use the same accounting rules as tracked contract outputs, including requiring
 `.output_amount(index, amount)` when building them. The metadata must match the
 clause's script checks.
 
-The vault's two recovery clauses now declare these payments, so
+The vault's two recovery clauses declare these payments, so
 `vault.recover(0).exec_none(&mut manager)?` derives the recovery output without
 the caller repeating its script or amount. Explicit `.outputs(...)` still works
 for single-input payment spends, but the supplied outputs must satisfy the
@@ -243,18 +258,17 @@ not bit flags. `CcvMode::try_from(n)?` rejects undefined modes, which would
 otherwise bypass input validation under
 [BIP-443](https://github.com/bitcoin/bips/blob/master/bip-0443.mediawiki).
 
-Migration from the old `Source` arguments: use `CcvData::Empty`, `CcvKey::Nums`,
-and `CcvTaptree::None` for their respective empty operands. The key sentinel is
-`CcvKey::CurrentInternalKey`: it reuses the current **internal** key, not the
-untweaked naked key. Constant keys use `XOnlyPublicKey`; constant data may be
+`CcvData::Empty`, `CcvKey::Nums`, and `CcvTaptree::None` are the respective
+empty operands. The key sentinel is `CcvKey::CurrentInternalKey`: it reuses the
+current **internal** key, not the untweaked naked key. Constant keys use `XOnlyPublicKey`; constant data may be
 32 bytes (`Const`) or arbitrary pushed bytes (`Bytes`), passed without hashing.
 Named stack items still require script-side validation. These types do not
 generate or validate the clause's host-side `next` metadata.
 
 The shared `check_input_contract`, `check_output_contract`, and bisection
-`state_output_script` helpers now also take `CcvIndex`. For intentionally
-unchecked operands, use `StackScript::ccv_raw` with `RawCcvSource` (the former
-untyped `Source`), or raw `script!` assembly. The existing `CCV_FLAG_*` integer
+`state_output_script` helpers also take `CcvIndex`. For intentionally
+unchecked operands, use `StackScript::ccv_raw` with `RawCcvSource`, or raw
+`script!` assembly. The existing `CCV_FLAG_*` integer
 constants remain available for raw scripts; do not combine them as flags.
 
 ### Observing a whole batch
@@ -344,12 +358,8 @@ let compute2x = Computer {
     func:    script! { OP_DUP OP_ADD }, // one step: y = 2x
     specs:   vec![ArgSpec { name: "x".into(), arg_type: Arc::new(IntType) }],
 };
-let leaf_factory: LeafFactory = Arc::new(move |_i| {
-    Leaf::new(
-        LeafParams { alice_pk, bob_pk },
-        compute2x.clone(),
-    ).expect("the leaf definition is valid")
-});
+let leaf_factory: LeafFactory =
+    Arc::new(move |_i| Leaf::new(LeafParams { alice_pk, bob_pk }, compute2x.clone()));
 let params = BisectParams::new(alice_pk, bob_pk, 0, 7)?;
 let context = BisectCtx::new(leaf_factory, /* forfait_timeout = */ 10)?;
 let challenge = Bisect1::new(params, context)?;
@@ -360,7 +370,8 @@ let challenge = Bisect1::new(params, context)?;
 ## Ported examples
 
 The examples from the Python reference framework (`pymatt`) are ported under
-`tests/support/`, with pinned taptrees and spend-path tests. Tests assert
+`examples/` (vault, rps) and `tests/support/` (ram, game256, minivault), with
+pinned taptrees and spend-path tests. Tests assert
 **byte-for-byte** compatibility where the Rust contract retains pymatt's exact
 script layout:
 
@@ -460,7 +471,7 @@ cargo run -p mattrs-inspector       # or: nc localhost 34443
   both use the same validated delay (1 through 65,535 blocks). Sequence
   overrides are checked against the declared delay before signing.
 - **Typed handles** — spends return `Children` (`.typed::<H>(i)?` / `.one()`),
-  and a handle's `params()` / `state_req()` read the typed values directly.
+  and a handle's `params()` / `state()` read the typed values directly.
 - **Expanded state** — an instance can carry logical state richer than its on-chain
   commitment (e.g. RAM's cells vs their Merkle root), recovered by `next_outputs`.
 - **Chain observation** — follow a covenant driven by someone else:

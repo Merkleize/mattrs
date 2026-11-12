@@ -39,7 +39,7 @@ contract! {
 
         // witness: <pk> <bal> (<h_l> <d_l>) x depth <root>
         clause withdraw_direct {
-            args raw |p| Unwind::withdraw_direct_specs(p);
+            args raw Unwind::withdraw_direct_specs;
             script Unwind::withdraw_direct_script;
             next(p, a) {
                 Unwind::withdraw_direct_outputs(p, &a.0)
@@ -48,7 +48,7 @@ contract! {
 
         // witness: <unwind_taptree> <root> <r_prime> <bit_u> x N <ingrid_pk> <trace_i> <x>
         clause start_exit {
-            args raw |p| Unwind::start_exit_specs(p);
+            args raw Unwind::start_exit_specs;
             script Unwind::start_exit_script;
             next(p, a) {
                 Unwind::start_exit_outputs(p, &a.0)
@@ -183,7 +183,9 @@ impl Unwind {
     }
 
     // Public so the tests can assert on the generated script (bit guards).
-    pub fn start_exit_script(p: &PoolParams) -> ScriptBuf {
+    pub fn start_exit_script(
+        p: &PoolParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
         let n = p.padded_size();
         let mut s = StackScript::from_specs(&Self::start_exit_specs(p));
 
@@ -242,14 +244,10 @@ impl Unwind {
             CcvData::Item("pe_state"),
             CcvIndex::at(0).expect("valid output index"),
             CcvKey::Nums,
-            CcvTaptree::Const(
-                PendingExit::new(p.clone())
-                    .expect("PendingExit contract definition is valid")
-                    .taptree_root(),
-            ),
+            CcvTaptree::Const(PendingExit::new(p.clone())?.taptree_root()),
             CcvMode::Preserve,
         );
-        s.into_script()
+        Ok(s.into_script())
     }
 
     fn start_exit_outputs(

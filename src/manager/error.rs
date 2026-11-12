@@ -10,8 +10,9 @@ pub enum ManagerError {
     ContractError(ContractError),
     InvalidInstance(String),
     OutputNotFound,
-    /// The instance being spent is not funded (or lacks its funding data).
-    NotFunded,
+    /// The instance at this outpoint was already spent, so it cannot be spent
+    /// (or awaited) again.
+    AlreadySpent(OutPoint),
     /// The named clause does not exist on the contract being spent.
     ClauseNotFound(String),
     /// A `DeductOutput` at this index needs an amount, supplied via
@@ -81,7 +82,8 @@ pub enum ManagerError {
     IncompleteObservation {
         missing: Vec<OutPoint>,
     },
-    /// The combined preserve/join contributions exceed the output's amount.
+    /// An output holds less than the preserve/join contributions it must carry
+    /// (one input's residual, or several inputs' combined).
     InsufficientOutputAmount {
         index: u32,
         required: Amount,
@@ -133,7 +135,9 @@ impl std::fmt::Display for ManagerError {
             ManagerError::ContractError(e) => write!(f, "Contract error: {}", e),
             ManagerError::InvalidInstance(msg) => write!(f, "Invalid instance: {}", msg),
             ManagerError::OutputNotFound => write!(f, "Output not found on blockchain"),
-            ManagerError::NotFunded => write!(f, "Instance is not funded"),
+            ManagerError::AlreadySpent(outpoint) => {
+                write!(f, "The instance at {outpoint} was already spent")
+            }
             ManagerError::ClauseNotFound(name) => write!(f, "Clause '{}' not found", name),
             ManagerError::MissingDeductAmount { index } => write!(
                 f,
@@ -303,29 +307,3 @@ impl std::fmt::Display for WrongContractType {
 }
 
 impl std::error::Error for WrongContractType {}
-
-/// A spend's state-bound witness fields could not be derived because the
-/// instance carries no (or a differently-typed) logical state.
-///
-/// Returned by typed-handle methods that fill part of their clause's witness
-/// from the instance's expanded state (e.g. the `contract!` DSL's
-/// `#[from_state]` args) — which the framework materializes on every executed
-/// or observed transition — so this only occurs on instances that were
-/// constructed by hand without their state.
-#[derive(Debug, Clone)]
-pub struct MissingStateError {
-    /// The contract whose state was needed.
-    pub contract: &'static str,
-}
-
-impl std::fmt::Display for MissingStateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "the {} instance carries no logical state to derive the spend from",
-            self.contract
-        )
-    }
-}
-
-impl std::error::Error for MissingStateError {}

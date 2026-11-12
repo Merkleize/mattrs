@@ -3,10 +3,10 @@
 mod support;
 
 use bitcoin::{Amount, ScriptBuf, TxOut};
+use mattrs::contract;
 use mattrs::contracts::{InstanceStatus, NextOutputs, PaymentOutput};
 use mattrs::manager::{InstanceHandle, ManagerError};
 use mattrs::script_helpers::opaque_p2tr;
-use mattrs::{ContractParams, contract};
 use support::testkit::{alice_pk, bob_pk, offline_manager};
 use support::vault::{
     Unvaulting, UnvaultingHandle, UnvaultingParams, UnvaultingState, Vault, VaultHandle,
@@ -27,7 +27,7 @@ fn vault(tag: u8) -> VaultHandle {
         })
         .unwrap()
         .as_erased(),
-        None,
+        (),
         sat(10_000),
         tag,
     )
@@ -44,7 +44,7 @@ fn unvaulting(tag: u8) -> UnvaultingHandle {
         })
         .unwrap()
         .as_erased(),
-        Some(Box::new(UnvaultingState { ctv_hash: [42; 32] })),
+        UnvaultingState { ctv_hash: [42; 32] },
         sat(20_000),
         tag,
     )
@@ -66,7 +66,7 @@ fn recovery_derives_the_untweaked_payment_and_has_no_children() {
             tx.output,
             vec![TxOut {
                 script_pubkey: opaque_p2tr(bob_pk()),
-                value: handle.prevout().unwrap().value,
+                value: handle.prevout().value,
             }]
         );
         assert!(manager.observe_spend(handle, &tx).unwrap().is_empty());
@@ -172,7 +172,7 @@ fn batched_recoveries_aggregate_without_creating_children() {
     }
 }
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 struct SplitParams {
     ignore: bool,
 }
@@ -200,7 +200,7 @@ fn split(ignore: bool) -> InstanceHandle {
         SplitPayments::new(SplitParams { ignore })
             .unwrap()
             .as_erased(),
-        None,
+        (),
         sat(10_000),
         1,
     )

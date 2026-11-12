@@ -3,12 +3,9 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::manager::{ContractManager, InstanceHandle, ManagerError};
+use crate::manager::{ContractManager, InstanceHandle, ManagerError, POLL_INTERVAL};
 
 use super::{Action, ChainView, ContractKey, ProtocolError, Role, StepCtx, TimeoutAction};
-
-/// How often [`Runner::run`] polls while waiting on the counterparty.
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// What one [`Runner::step`] achieved.
 #[derive(Debug)]
@@ -233,12 +230,13 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                     if let Some(window) = window
                         && last_progress.elapsed() >= window
                     {
-                        let outpoint = self
+                        let waited_on = self
                             .tokens
                             .first()
-                            .and_then(|t| t.current.outpoint())
-                            .ok_or(ManagerError::NotFunded)?;
-                        return Err(ManagerError::SpendNotFound(outpoint).into());
+                            .expect("a waiting runner has a live token");
+                        return Err(
+                            ManagerError::SpendNotFound(waited_on.current.outpoint()).into()
+                        );
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
@@ -348,7 +346,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         parent: Option<InstanceHandle>,
         timeout: Option<Timeout<O>>,
     ) -> Result<TokenStep<O>, ProtocolError> {
-        let outpoint = current.outpoint().ok_or(ManagerError::NotFunded)?;
+        let outpoint = current.outpoint();
 
         if let Some(tx) = self.chain.find_spending_tx(outpoint)? {
             let children = self.manager.observe_spend(&current, &tx)?;

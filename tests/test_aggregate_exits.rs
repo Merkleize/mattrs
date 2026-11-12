@@ -39,9 +39,9 @@ fn claimed_pool(
     let ingrid_pk = xonly(&ingrid_xpriv());
     let unwind: UnwindHandle = try_handle(fund_fake(
         Unwind::new(params()).unwrap().as_erased(),
-        Some(Box::new(UnwindState {
+        UnwindState {
             root: pool().root(),
-        })),
+        },
         POOL_TOTAL,
         1,
     ));
@@ -52,7 +52,7 @@ fn claimed_pool(
         })
         .unwrap()
         .as_erased(),
-        None,
+        (),
         BOND as u64,
         2,
     ));
@@ -84,7 +84,7 @@ fn challenger_bond(challenger: &Xpriv, seed: u8) -> ExitBondHandle {
         })
         .unwrap()
         .as_erased(),
-        None,
+        (),
         BOND as u64,
         seed,
     ))
@@ -143,7 +143,7 @@ fn known_amount_gap_allows_an_account_to_over_withdraw() {
     let pool = pool();
     let unwind: UnwindHandle = try_handle(fund_fake(
         Unwind::new(params()).unwrap().as_erased(),
-        Some(Box::new(UnwindState { root: pool.root() })),
+        UnwindState { root: pool.root() },
         POOL_TOTAL,
         1,
     ));
@@ -261,7 +261,7 @@ fn start_exit_canonicalizes_the_published_bits() {
     for n_users in [2u32, 6, 9] {
         let mut p = params();
         p.n_users = n_users;
-        let script = Unwind::start_exit_script(&p);
+        let script = Unwind::start_exit_script(&p).unwrap();
         let guards = script
             .instructions()
             .filter(
@@ -282,7 +282,7 @@ fn direct_withdrawal_builds_and_chains() {
     let pool = pool();
     let unwind: UnwindHandle = try_handle(fund_fake(
         Unwind::new(params()).unwrap().as_erased(),
-        Some(Box::new(UnwindState { root: pool.root() })),
+        UnwindState { root: pool.root() },
         POOL_TOTAL,
         1,
     ));
@@ -309,7 +309,7 @@ fn direct_withdrawal_builds_and_chains() {
     let mut after = pool.clone();
     after.zero(2);
     let next: UnwindHandle = try_handle(children[1].clone());
-    assert_eq!(next.state().unwrap().root, after.root());
+    assert_eq!(next.state().root, after.root());
 
     let (tx2, _) = apply(
         &mut manager,
@@ -335,7 +335,7 @@ fn claim_merges_pool_and_bond() {
     let mut manager = offline_manager();
     let claim = compute_claim(&pool(), &exit_bits());
     let (pending, claim_state) = claimed_pool(&mut manager, &claim);
-    assert_eq!(pending.state().unwrap(), claim_state);
+    assert_eq!(pending.state(), claim_state);
 }
 
 // ============================================================================
@@ -367,7 +367,7 @@ fn happy_path_finalizes_after_challenge_period() {
     // The pool continues with the remaining users' 11_000 sats at R'.
     assert_eq!(tx.output[1].value, Amount::from_sat(11_000));
     let continued: UnwindHandle = try_handle(children[1].clone());
-    assert_eq!(continued.state().unwrap().root, claim.r_prime);
+    assert_eq!(continued.state().root, claim.r_prime);
 
     // Remaining user 3 can still exit directly from the continued pool.
     let mut after = pool();
@@ -463,7 +463,7 @@ fn fraudulent_claim_loses_the_bisection() {
     assert_eq!(tx.output[1].script_pubkey, opaque_p2tr(mattrs::nums_key()));
     assert_eq!(tx.output[2].value, Amount::from_sat(POOL_TOTAL));
     let reverted: UnwindHandle = try_handle(children[2].clone());
-    assert_eq!(reverted.state().unwrap().root, pool.root());
+    assert_eq!(reverted.state().root, pool.root());
 }
 
 #[test]
@@ -516,7 +516,7 @@ fn false_challenge_loses_and_the_claim_resumes() {
         Amount::from_sat(POOL_TOTAL + BOND as u64)
     );
     let resumed: PendingExitHandle = try_handle(children[2].clone());
-    assert_eq!(resumed.state().unwrap(), claim_state);
+    assert_eq!(resumed.state(), claim_state);
 
     // ...and can then finalize normally.
     let (tx, _) = apply(
@@ -565,7 +565,7 @@ fn stalled_turns_forfait_both_ways() {
     assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(xonly(&challenger)));
     assert_eq!(tx.output[2].value, Amount::from_sat(POOL_TOTAL));
     let reverted: UnwindHandle = try_handle(children[2].clone());
-    assert_eq!(reverted.state().unwrap().root, pool.root());
+    assert_eq!(reverted.state().root, pool.root());
 
     // The mirror image: the challenger stalls after Ingrid's reveal.
     let mut manager = offline_manager();
@@ -600,7 +600,7 @@ fn stalled_turns_forfait_both_ways() {
         opaque_p2tr(xonly(&ingrid_xpriv()))
     );
     let resumed: PendingExitHandle = try_handle(children[2].clone());
-    assert_eq!(resumed.state().unwrap(), claim_state);
+    assert_eq!(resumed.state(), claim_state);
 }
 
 #[test]
@@ -646,7 +646,7 @@ fn delegation_challenge_defended() {
         Amount::from_sat(POOL_TOTAL + BOND as u64)
     );
     let resumed: PendingExitHandle = try_handle(children[2].clone());
-    assert_eq!(resumed.state().unwrap(), claim_state);
+    assert_eq!(resumed.state(), claim_state);
 }
 
 #[test]
@@ -686,7 +686,7 @@ fn unanswerable_delegation_challenge_reverts_the_claim() {
     assert_eq!(tx.output[0].script_pubkey, opaque_p2tr(xonly(&challenger)));
     assert_eq!(tx.output[2].value, Amount::from_sat(POOL_TOTAL));
     let reverted: UnwindHandle = try_handle(children[2].clone());
-    assert_eq!(reverted.state().unwrap().root, pool.root());
+    assert_eq!(reverted.state().root, pool.root());
 }
 
 #[test]
@@ -792,7 +792,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
     let mut after = pool.clone();
     after.zero(2);
     let unwind: UnwindHandle = try_handle(children[1].clone());
-    assert_eq!(unwind.state().unwrap().root, after.root());
+    assert_eq!(unwind.state().root, after.root());
 
     // Ingrid claims the aggregate of users 1 and 4 with her bond.
     let mut bits = vec![false; 8];
@@ -816,7 +816,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
         .exec(&mut manager)?;
     report_spend(&mut report, "AggregateExits", "finalize", pending.handle());
     let continued: UnwindHandle = try_handle(children[1].clone());
-    assert_eq!(continued.state().unwrap().root, claim.r_prime);
+    assert_eq!(continued.state().root, claim.r_prime);
 
     report.finalize("reports/report_aggregate_exits_happy.md")?;
     Ok(())
@@ -885,7 +885,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         leaf.handle(),
     );
     let reverted: UnwindHandle = try_handle(children[2].clone());
-    assert_eq!(reverted.state().unwrap().root, pool.root());
+    assert_eq!(reverted.state().root, pool.root());
 
     report.finalize("reports/report_aggregate_exits_fraud.md")?;
     Ok(())
@@ -933,7 +933,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         dc.handle(),
     );
     let resumed: PendingExitHandle = try_handle(children[2].clone());
-    assert_eq!(resumed.state().unwrap(), claim_state);
+    assert_eq!(resumed.state(), claim_state);
 
     // The resumed claim finalizes after a fresh challenge period.
     manager.mine_blocks(params().challenge_period as u64)?;

@@ -68,7 +68,12 @@ impl StackScript {
     pub fn from_specs(specs: &[ArgSpec]) -> Self {
         let mut stack = Vec::new();
         for spec in specs {
-            let count = spec.arg_type.witness_elements();
+            let count = spec.arg_type.witness_elements().unwrap_or_else(|| {
+                panic!(
+                    "argument `{}` has a value-dependent witness layout",
+                    spec.name
+                )
+            });
             assert!(
                 count > 0,
                 "argument `{}` has an empty witness layout",
@@ -372,7 +377,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(specs[1].arg_type.witness_elements(), 3);
+        assert_eq!(specs[1].arg_type.witness_elements(), Some(3));
         let stack = StackScript::from_specs(&specs);
         assert_eq!(stack.depth("prefix"), 4);
         assert_eq!(stack.depth("proof"), 1);

@@ -2,7 +2,7 @@
 
 use bitcoin::{ScriptBuf, Sequence};
 
-use crate::contracts::{ContractError, ParamEncodable, WitnessError};
+use crate::contracts::ContractError;
 
 /// A non-zero CSV delay in blocks, without sequence flags or reserved bits.
 ///
@@ -10,12 +10,11 @@ use crate::contracts::{ContractError, ParamEncodable, WitnessError};
 /// `u32` values as block counts can truncate the delay, select time-based locks,
 /// or disable CSV entirely. Validate configuration before building scripts.
 ///
-/// Can be stored in derived contract parameters. Its parameter encoding is the
-/// same four-byte value as a `u32`; decoding also checks the duration.
+/// Store it in a contract's params to carry an already-validated delay:
 ///
 /// ```
-/// use mattrs::{BlockDelay, ContractParams};
-/// #[derive(Debug, Clone, ContractParams)]
+/// use mattrs::BlockDelay;
+/// #[derive(Debug, Clone)]
 /// struct Params { delay: BlockDelay }
 /// let params = Params { delay: BlockDelay::new(10)? };
 /// assert_eq!(params.delay.sequence().to_consensus_u32(), 10);
@@ -56,36 +55,9 @@ impl BlockDelay {
     }
 }
 
-impl ParamEncodable for BlockDelay {
-    fn encode_param(&self) -> Vec<Vec<u8>> {
-        self.blocks().encode_param()
-    }
-
-    fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        let (blocks, consumed) = u32::decode_param(elements)?;
-        let delay = Self::new(blocks).map_err(|e| WitnessError::InvalidValue(e.to_string()))?;
-        Ok((delay, consumed))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parameter_decoding_preserves_the_validated_type() {
-        for blocks in [1u32, 10, 65_535] {
-            let encoded = BlockDelay::new(blocks).unwrap().encode_param();
-            assert_eq!(encoded, blocks.encode_param());
-            assert_eq!(
-                BlockDelay::decode_param(&encoded).unwrap(),
-                (BlockDelay::new(blocks).unwrap(), 1)
-            );
-        }
-        for blocks in [0u32, 65_536, 1 << 31] {
-            assert!(BlockDelay::decode_param(&blocks.encode_param()).is_err());
-        }
-    }
 
     #[test]
     fn rejects_values_that_are_not_block_durations() {

@@ -11,7 +11,7 @@ use super::{
 };
 use crate::contracts::{InstanceStatus, NextOutputs};
 use bitcoin::hashes::{Hash, hash160};
-use bitcoin::{Amount, OutPoint, Transaction, TxIn, TxOut, XOnlyPublicKey};
+use bitcoin::{Amount, OutPoint, Transaction, TxIn, TxOut};
 use std::collections::BTreeMap;
 
 /// Prevout context for a non-contract input, to be authenticated by the caller.
@@ -151,12 +151,10 @@ impl WalletSpend {
                 .get_clause(builder.clause_name)
                 .ok_or_else(|| ManagerError::ClauseNotFound(builder.clause_name.into()))?;
             for spec in clause.arg_specs() {
-                if let Some(key) = spec.arg_type.signer_pubkey() {
-                    let key =
-                        XOnlyPublicKey::from_slice(&key).map_err(|e| invalid(&e.to_string()))?;
-                    if !builder.signers.contains_key(&key) {
-                        return Err(ManagerError::MissingSigner(key));
-                    }
+                if let Some(key) = spec.arg_type.signer_pubkey()
+                    && !builder.signers.contains_key(&key)
+                {
+                    return Err(ManagerError::MissingSigner(key));
                 }
             }
         }
@@ -283,7 +281,7 @@ impl ContractManager {
             }
             let key = inst
                 .contract()
-                .control_block_internal_key(inst.state_commitment().as_ref())?;
+                .control_block_internal_key(&inst.state_commitment())?;
             let control = inst
                 .contract()
                 .taptree()
@@ -334,7 +332,7 @@ impl ContractManager {
         for input in &tx.input {
             if !handles
                 .iter()
-                .any(|h| h.outpoint() == Some(input.previous_output))
+                .any(|h| h.outpoint() == input.previous_output)
             {
                 external.push(ExternalInput {
                     outpoint: input.previous_output,
@@ -372,11 +370,8 @@ fn external_contexts(
     }
     let mut contexts = BTreeMap::new();
     for handle in handles {
-        let outpoint = handle.outpoint().ok_or(ManagerError::NotFunded)?;
-        if !inputs.contains_key(&outpoint)
-            || contexts
-                .insert(outpoint, handle.prevout().ok_or(ManagerError::NotFunded)?)
-                .is_some()
+        let outpoint = handle.outpoint();
+        if !inputs.contains_key(&outpoint) || contexts.insert(outpoint, handle.prevout()).is_some()
         {
             return Err(invalid("duplicate or unrelated contract input context"));
         }

@@ -51,12 +51,12 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
     let s0 = G256S0::new(params.clone())?.fund(&mut alice_manager, Amount::from_sat(AMOUNT))?;
     let alice_entry = s0.handle().clone();
-    let outpoint = alice_entry.outpoint().expect("just funded");
+    let outpoint = alice_entry.outpoint();
 
     // ...and Bob, given the outpoint out-of-band, verifies and tracks it.
     let mut bob_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let bob_entry = bob_manager.track_instance(G256S0::new(params)?.as_erased(), None, outpoint)?;
+    let bob_entry = bob_manager.track_instance(G256S0::new(params)?.as_erased(), (), outpoint)?;
 
     // The parties: Alice will cheat at step 5, Bob doubles honestly.
     let alice_data = AliceGameData {

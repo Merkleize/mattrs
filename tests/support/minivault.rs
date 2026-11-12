@@ -37,8 +37,7 @@ use mattrs::contracts::{
     CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
 };
 use mattrs::{
-    ContractParams, ContractState, Signature, clause_tree, contract, internal_key_or_nums,
-    optional_key_script,
+    ContractState, Signature, clause_tree, contract, internal_key_or_nums, optional_key_script,
 };
 
 define_pushable!();
@@ -52,7 +51,7 @@ fn output_index(value: i64, name: &str) -> Result<u32, ClauseError> {
 // MiniUnvaulting — fixed clause set, so the contract! DSL applies
 // ============================================================================
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct MiniUnvaultingParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
@@ -132,7 +131,7 @@ impl MiniUnvaulting {
 // MiniVault — runtime-shaped clause set, via the DSL's dynamic `tree |p| {..}`
 // ============================================================================
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct MiniVaultParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
@@ -228,25 +227,25 @@ impl MiniVault {
         }
     }
 
-    fn trigger_script(params: &MiniVaultParams) -> ScriptBuf {
-        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))
-            .expect("MiniUnvaulting contract definition is valid")
-            .taptree_root();
-        script! {
+    fn trigger_script(
+        params: &MiniVaultParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))?.taptree_root();
+        Ok(script! {
             { optional_key_script(params.alternate_pk) }
             { unvaulting_root }
             0
             CHECKCONTRACTVERIFY
             { params.unvault_pk }
             CHECKSIG
-        }
+        })
     }
 
-    fn trigger_and_revault_script(params: &MiniVaultParams) -> ScriptBuf {
-        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))
-            .expect("MiniUnvaulting contract definition is valid")
-            .taptree_root();
-        script! {
+    fn trigger_and_revault_script(
+        params: &MiniVaultParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))?.taptree_root();
+        Ok(script! {
             0 OP_SWAP
             -1
             -1
@@ -258,7 +257,7 @@ impl MiniVault {
             CHECKCONTRACTVERIFY
             { params.unvault_pk }
             CHECKSIG
-        }
+        })
     }
 
     fn recover_script(params: &MiniVaultParams) -> ScriptBuf {

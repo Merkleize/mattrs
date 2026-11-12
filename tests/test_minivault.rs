@@ -99,7 +99,7 @@ fn test_minivault_trigger_commits_unvaulting_state() {
 
     let handle = try_handle::<MiniVaultHandle>(fund_fake(
         MiniVault::new(params.clone()).unwrap().as_erased(),
-        None,
+        (),
         100_000,
         0,
     ));
@@ -119,7 +119,7 @@ fn test_minivault_trigger_commits_unvaulting_state() {
     .unwrap();
     let expected = unvaulting
         .as_erased()
-        .script_pubkey(Some(&mattrs::StateCommitment::identity(wpk.to_vec())))
+        .script_pubkey(&mattrs::StateCommitment::identity(wpk.to_vec()))
         .unwrap();
 
     assert_eq!(tx.output.len(), 1);
@@ -132,7 +132,7 @@ fn test_minivault_rejects_negative_output_indices() {
     let params = make_params(true, false);
     let handle = try_handle::<MiniVaultHandle>(fund_fake(
         MiniVault::new(params).unwrap().as_erased(),
-        None,
+        (),
         100_000,
         8,
     ));
@@ -229,7 +229,7 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
         .try_into()?;
     report_spend(&mut report, "MiniVault", "trigger", vault.handle());
 
-    let state = unvaulting.state().expect("MiniUnvaulting state");
+    let state = unvaulting.state();
     assert_eq!(state.withdrawal_pk, wpk);
 
     unvaulting
@@ -343,11 +343,11 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
         .find(|c| c.contract_name() == "MiniVault")
         .expect("revaulted vault child");
     let merged = Amount::from_sat(3 * 100_000 - 30_000);
-    assert_eq!(unvaulting_child.prevout().unwrap().value, merged);
-    assert_eq!(revault_child.prevout().unwrap().value, revault_amount);
+    assert_eq!(unvaulting_child.prevout().value, merged);
+    assert_eq!(revault_child.prevout().value, revault_amount);
 
     let unvaulting: MiniUnvaultingHandle = unvaulting_child.clone().try_into()?;
-    assert_eq!(unvaulting.state().expect("state").withdrawal_pk, wpk);
+    assert_eq!(unvaulting.state().withdrawal_pk, wpk);
 
     manager.mine_blocks(SPEND_DELAY as u64)?;
     unvaulting

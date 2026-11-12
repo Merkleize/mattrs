@@ -1,7 +1,7 @@
 //! RPC-free signing: all prevouts must be resolved before invoking signers.
 use super::validation::validate_clause_witness;
 use super::{ManagerError, SpendBuilder, transaction::PreparedBatch};
-use bitcoin::{Transaction, TxOut, XOnlyPublicKey};
+use bitcoin::{Transaction, TxOut};
 
 pub(super) fn sign_prepared(
     builders: &[SpendBuilder],
@@ -71,13 +71,7 @@ pub(super) fn input_witness(
                 .consume(&witness_stack[offset..])
                 .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
 
-            if let Some(pubkey) = spec.arg_type.signer_pubkey() {
-                let xonly = XOnlyPublicKey::from_slice(&pubkey).map_err(|e| {
-                    ManagerError::TransactionBuildError(format!(
-                        "Invalid signer pubkey for argument '{}': {}",
-                        spec.name, e
-                    ))
-                })?;
+            if let Some(xonly) = spec.arg_type.signer_pubkey() {
                 if let Some(signer) = signers.get(&xonly) {
                     witness_stack[offset] = signer
                         .sign(&sighash)
@@ -99,7 +93,7 @@ pub(super) fn input_witness(
     // Append the leaf script and control block (state-tweaked key for augmented).
     let internal_key = inst
         .contract()
-        .control_block_internal_key(inst.state_commitment().as_ref())?;
+        .control_block_internal_key(&inst.state_commitment())?;
     let control_block = inst
         .contract()
         .taptree()

@@ -14,7 +14,8 @@
 //!
 //! # Defining a contract
 //!
-//! - Declare params/state structs and derive [`macro@ContractParams`] /
+//! - Declare a params struct (any `Debug + Clone + Send + Sync` type) and,
+//!   for a stateful contract, a state struct deriving
 //!   [`macro@ContractState`] (re-exported here from `mattrs-derive`).
 //! - Write one [`macro@contract`]`! { .. }` block: it generates the per-clause
 //!   `*Args` structs, the clause tree, the contract struct (`new`/`fund`/
@@ -49,8 +50,8 @@ extern crate self as mattrs;
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
-/// Derive macros, re-exported so users can `use mattrs::{ContractParams, ..}`.
-pub use mattrs_derive::{ClauseArgs, ContractParams, ContractState};
+/// Derive macros, re-exported so users can `use mattrs::{ContractState, ..}`.
+pub use mattrs_derive::{ClauseArgs, ContractState};
 
 /// The `contract!` DSL macro, re-exported so users can `use mattrs::contract`.
 pub use mattrs_derive::contract;

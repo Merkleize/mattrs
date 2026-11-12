@@ -1,17 +1,18 @@
 //! Stable public handles and typed child access; no RPC or transaction planning.
 use super::{ManagerError, SpendBuilder, WrongContractType};
 use crate::contracts::{ContractInstance, ContractState, InstanceStatus};
-use bitcoin::{OutPoint, Sequence, Transaction, TxOut, Txid};
+use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxOut, Txid};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
     rc::Rc,
+    sync::Arc,
 };
 
 /// A handle to a contract instance.
 ///
-/// Cheap to clone (it is an `Rc` inside). Unlike the old design it does not borrow
-/// the manager, so callers can hold handles across spends and chain naturally. The
+/// Cheap to clone (it is an `Rc` inside). It does not borrow the manager, so
+/// callers can hold handles across spends and chain naturally. The
 /// `contract!` macro wraps this in a typed per-contract handle whose methods return
 /// a [`SpendBuilder`]; drop down to [`InstanceHandle::spend_clause`] for advanced use.
 #[derive(Clone)]
@@ -46,14 +47,19 @@ impl InstanceHandle {
         self.instance.borrow().status()
     }
 
-    /// Get the outpoint (if funded).
-    pub fn outpoint(&self) -> Option<OutPoint> {
+    /// The outpoint identifying this instance on-chain.
+    pub fn outpoint(&self) -> OutPoint {
         self.instance.borrow().outpoint()
     }
 
-    /// The UTXO this instance controls (its funding output), once funded.
-    pub fn prevout(&self) -> Option<TxOut> {
-        self.instance.borrow().prevout()
+    /// The UTXO this instance controls (its funding output).
+    pub fn prevout(&self) -> TxOut {
+        self.instance.borrow().prevout().clone()
+    }
+
+    /// The amount this instance's UTXO holds.
+    pub fn amount(&self) -> Amount {
+        self.instance.borrow().amount()
     }
 
     /// The `TypeId` of the underlying contract (for typed-handle conversions).
@@ -67,29 +73,15 @@ impl InstanceHandle {
         self.instance.borrow().contract().contract_name()
     }
 
-    /// The contract's encoded parameters (contracts are self-describing).
-    /// Decode them with the contract's typed params struct
-    /// ([`ContractParams::decode`](crate::contracts::ContractParams::decode));
-    /// the `contract!`-generated handles expose this as a typed `params()`.
-    pub fn params_bytes(&self) -> Vec<u8> {
-        self.instance.borrow().contract().params_bytes().to_vec()
-    }
-
-    /// The instance's typed params `P`: read back by downcast when the contract
-    /// carries them (every contract built from a typed `P` does — see
-    /// [`ErasedContract::params_any`](crate::contracts::ErasedContract::params_any)),
-    /// else decoded from the encoded bytes. `None` only if `P` is the wrong
-    /// type *and* the bytes don't decode as a `P`.
+    /// The instance's typed params `P`, when `P` is the type the contract was
+    /// built from; `None` for any other type.
     pub fn params<P: crate::contracts::ContractParams + 'static>(&self) -> Option<P> {
-        let inst = self.instance.borrow();
-        if let Some(typed) = inst
+        self.instance
+            .borrow()
             .contract()
             .params_any()
-            .and_then(|any| any.downcast_ref::<P>())
-        {
-            return Some(typed.clone());
-        }
-        P::decode(inst.contract().params_bytes()).ok()
+            .downcast_ref::<P>()
+            .cloned()
     }
 
     /// The name of the clause that spent this instance (None until spent).
@@ -97,13 +89,13 @@ impl InstanceHandle {
         self.instance.borrow().clause_name().map(str::to_string)
     }
 
-    /// The transaction that funded this instance (None until funded).
-    pub fn funding_tx(&self) -> Option<Transaction> {
-        self.instance.borrow().funding_tx().cloned()
+    /// The transaction that funded this instance.
+    pub fn funding_tx(&self) -> Arc<Transaction> {
+        self.instance.borrow().funding_tx().clone()
     }
 
     /// The transaction that spent this instance (None until spent).
-    pub fn spending_tx(&self) -> Option<Transaction> {
+    pub fn spending_tx(&self) -> Option<Arc<Transaction>> {
         self.instance.borrow().spending_tx().cloned()
     }
 
@@ -132,8 +124,7 @@ impl InstanceHandle {
     /// Commitments are never decoded or reinterpreted as another state type.
     pub fn state<S: ContractState + 'static>(&self) -> Option<S> {
         let inst = self.instance.borrow();
-        let erased = inst.state()?;
-        erased.as_any().downcast_ref::<S>().cloned()
+        inst.state().as_any().downcast_ref::<S>().cloned()
     }
 
     /// Get the child instances created from spending this instance.

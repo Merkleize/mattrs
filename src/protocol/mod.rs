@@ -35,9 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::contracts::WitnessError;
-use crate::manager::{
-    InstanceHandle, ManagerError, MissingStateError, SpendBuilder, WrongContractType,
-};
+use crate::manager::{InstanceHandle, ManagerError, SpendBuilder, WrongContractType};
 
 pub use chain::{ChainView, LocalChain, RpcChain};
 pub use runner::{Progress, Runner, RunnerState};
@@ -189,8 +187,6 @@ pub enum ProtocolError {
     Witness(WitnessError),
     /// A handler ran against an instance of the wrong contract type.
     WrongContract(WrongContractType),
-    /// A typed spend needed instance state that is not there.
-    MissingState(MissingStateError),
     /// The token reached a contract this role neither handles nor ignores.
     NoHandler {
         /// The name of the unhandled contract.
@@ -213,7 +209,6 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::Manager(e) => write!(f, "manager error: {}", e),
             ProtocolError::Witness(e) => write!(f, "witness error: {}", e),
             ProtocolError::WrongContract(e) => write!(f, "{}", e),
-            ProtocolError::MissingState(e) => write!(f, "{}", e),
             ProtocolError::NoHandler { contract } => {
                 write!(f, "the role has no handler for contract `{}`", contract)
             }
@@ -241,12 +236,6 @@ impl From<WitnessError> for ProtocolError {
 impl From<WrongContractType> for ProtocolError {
     fn from(e: WrongContractType) -> Self {
         ProtocolError::WrongContract(e)
-    }
-}
-
-impl From<MissingStateError> for ProtocolError {
-    fn from(e: MissingStateError) -> Self {
-        ProtocolError::MissingState(e)
     }
 }
 
@@ -489,9 +478,9 @@ mod tests {
     use super::*;
     use crate::testutil::fund_fake;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, Txid};
-    use mattrs_derive::{ContractParams, contract};
+    use mattrs_derive::contract;
 
-    #[derive(Debug, Clone, ContractParams)]
+    #[derive(Debug, Clone)]
     pub struct PairParams {
         pub tag: i64,
     }
@@ -582,13 +571,22 @@ mod tests {
     fn typed_handles_use_nominal_identity() {
         let a = fund_fake(
             KeyA::new(PairParams { tag: 42 }).unwrap().as_erased(),
-            None,
+            (),
             Amount::from_sat(1000),
             1,
         );
         assert_eq!(ContractKey::of_handle(&a), KeyA::kind());
         let typed: KeyAHandle = a.clone().try_into().expect("same contract");
         assert_eq!(typed.params().tag, 42);
+        // Params are read back by type, never by reinterpreting their bytes: a
+        // different struct with the very same layout is not this contract's.
+        #[derive(Debug, Clone)]
+        struct TwinParams {
+            #[allow(dead_code)]
+            tag: i64,
+        }
+        assert!(a.params::<PairParams>().is_some());
+        assert!(a.params::<TwinParams>().is_none());
         // A different contract with the same erased primitive must not convert.
         assert!(KeyBHandle::try_from(a).is_err());
 
@@ -596,7 +594,7 @@ mod tests {
             first::SameName::new(PairParams { tag: 7 })
                 .unwrap()
                 .as_erased(),
-            None,
+            (),
             Amount::from_sat(1000),
             2,
         );
@@ -629,7 +627,7 @@ mod tests {
 
         let b = fund_fake(
             KeyB::new(PairParams { tag: 0 }).unwrap().as_erased(),
-            None,
+            (),
             Amount::from_sat(1000),
             2,
         );

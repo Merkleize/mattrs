@@ -69,26 +69,28 @@ fn late_registry_conflict_is_rejected_before_broadcast() {
     let child = test_contract(90, None);
     let first = fund_fake(
         contract_yielding(1, vec![ClauseOutput::at(0).to(child.clone()).build()]),
-        None,
+        (),
         sat(10_000),
         1,
     );
     let second = fund_fake(
         contract_yielding(2, vec![ClauseOutput::at(1).to(child).build()]),
-        None,
+        (),
         sat(20_000),
         2,
     );
     let builders = [spend(&first), spend(&second)];
     let tx = manager.build_batch_tx(&builders).unwrap();
-    let mut conflicting = ContractInstance::new(test_contract(91, None), None).unwrap();
-    conflicting.mark_funded(
+    let conflicting = ContractInstance::funded(
+        test_contract(91, None),
+        Box::new(()),
         OutPoint {
             txid: tx.compute_txid(),
             vout: 1,
         },
-        tx,
-    );
+        Arc::new(tx),
+    )
+    .unwrap();
     manager.instances.push(Rc::new(RefCell::new(conflicting)));
     assert!(matches!(
         manager.spend_batch(&builders),

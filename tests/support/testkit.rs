@@ -12,7 +12,7 @@ use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
-use mattrs::contracts::{ErasedContract, ErasedState};
+use mattrs::contracts::{ContractState, ErasedContract};
 use mattrs::manager::InstanceHandle;
 use mattrs::report::Report;
 
@@ -121,11 +121,11 @@ where
 /// Thin wrapper over [`mattrs::testutil::fund_fake`] taking sats directly.
 pub fn fund_fake(
     contract: Arc<dyn ErasedContract>,
-    expanded: Option<Box<dyn ErasedState>>,
+    state: impl ContractState + 'static,
     amount: u64,
     seed: u8,
 ) -> InstanceHandle {
-    mattrs::testutil::fund_fake(contract, expanded, Amount::from_sat(amount), seed)
+    mattrs::testutil::fund_fake(contract, state, Amount::from_sat(amount), seed)
 }
 
 /// Append the transaction that spent `handle` to `report` as a collapsible

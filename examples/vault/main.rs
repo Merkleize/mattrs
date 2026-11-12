@@ -107,7 +107,7 @@ impl Repl {
             "  -> instance {}: {} at {}",
             self.items.len(),
             self.kind_str(&handle),
-            handle.outpoint().map(|o| o.to_string()).unwrap_or_default()
+            handle.outpoint()
         );
         self.items.push(handle);
     }
@@ -126,11 +126,8 @@ impl Repl {
 
     fn list(&self) {
         for (i, handle) in self.items.iter().enumerate() {
-            let value = handle
-                .prevout()
-                .map(|p| p.value.to_sat().to_string())
-                .unwrap_or_default();
-            let outpoint = handle.outpoint().map(|o| o.to_string()).unwrap_or_default();
+            let value = handle.amount().to_sat().to_string();
+            let outpoint = handle.outpoint().to_string();
             let state = handle
                 .state::<UnvaultingState>()
                 .map(|s| format!(" ctv_hash={}", hex::encode(s.ctv_hash)))
@@ -184,10 +181,7 @@ impl Repl {
                 Amount::from_sat(amt.parse()?),
             ));
         }
-        let inputs_total: Amount = vaults
-            .iter()
-            .map(|(_, h)| h.prevout().expect("funded").value)
-            .sum();
+        let inputs_total: Amount = vaults.iter().map(|(_, h)| h.prevout().value).sum();
         let outputs_total: Amount = template.iter().map(|(_, a)| *a).sum();
         let revault = inputs_total
             .checked_sub(outputs_total)
@@ -204,7 +198,7 @@ impl Repl {
         );
 
         // The largest vault revaults the leftover; the others trigger plainly.
-        vaults.sort_by_key(|(_, h)| std::cmp::Reverse(h.prevout().expect("funded").value));
+        vaults.sort_by_key(|(_, h)| std::cmp::Reverse(h.prevout().value));
         let mut builders = Vec::new();
         for (i, (_, handle)) in vaults.iter().enumerate() {
             let vault: VaultHandle = handle.clone().try_into().expect("kind checked");
@@ -244,7 +238,7 @@ impl Repl {
 
         let unvaulting: UnvaultingHandle = handle.try_into().expect("kind checked");
         unvaulting
-            .withdraw()?
+            .withdraw()
             .outputs(outputs)
             .exec_none(&mut self.manager)?;
         println!("Withdrawn via the CTV template {}", hex::encode(ctv_hash));
@@ -256,7 +250,7 @@ impl Repl {
         if handle.status() != InstanceStatus::Funded {
             return Err(format!("instance {idx} is not funded").into());
         }
-        let value = handle.prevout().expect("funded").value;
+        let value = handle.prevout().value;
         // Recovery metadata derives the destination and preserves the full value.
 
         match self.kind(&handle) {

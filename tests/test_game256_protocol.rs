@@ -56,13 +56,13 @@ fn setup(
 
     let alice_entry = fund_fake(
         G256S0::new(params.clone()).unwrap().as_erased(),
-        None,
+        (),
         Amount::from_sat(AMOUNT),
         SEED,
     );
     let bob_entry = fund_fake(
         G256S0::new(params).unwrap().as_erased(),
-        None,
+        (),
         Amount::from_sat(AMOUNT),
         SEED,
     );

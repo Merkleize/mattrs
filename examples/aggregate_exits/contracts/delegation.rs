@@ -161,10 +161,8 @@ impl DelegationChallenge {
     fn defend_outputs(
         p: &PoolParams,
         witness: &[Vec<u8>],
-        state: Option<&DelegationChallengeState>,
+        state: &DelegationChallengeState,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state
-            .ok_or_else(|| ClauseError::Other("defend needs the challenge state".to_string()))?;
         let mut w = WitnessReader::new(witness);
         w.skip(4)?; // resume, pe_taptree, unwind_taptree, r
         let ingrid_pk = w.xonly()?;
@@ -219,11 +217,8 @@ impl DelegationChallenge {
     fn challenger_wins_outputs(
         p: &PoolParams,
         witness: &[Vec<u8>],
-        state: Option<&DelegationChallengeState>,
+        state: &DelegationChallengeState,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("challenger_wins needs the challenge state".to_string())
-        })?;
         let mut w = WitnessReader::new(witness);
         w.skip(6)?; // all STATE_ITEMS up to challenger_pk
         let challenger_pk = w.xonly()?;
@@ -245,7 +240,6 @@ impl DelegationChallenge {
 impl DelegationChallengeHandle {
     fn challenge_state(&self) -> DelegationChallengeState {
         self.state()
-            .expect("DelegationChallenge instances carry their state")
     }
 
     /// Ingrid reveals the challenged user's delegation signature. The caller

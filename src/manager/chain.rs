@@ -1,13 +1,13 @@
 //! Node I/O, funding, mining, and spend discovery.
 //! Shared scan helpers also serve the protocol runner.
 use super::{Children, ContractManager, InstanceHandle, ManagerError};
-use crate::contracts::{ContractInstance, ErasedContract, ErasedState, InstanceStatus};
+use crate::contracts::{ContractInstance, ContractState, ErasedContract, InstanceStatus};
 use bitcoin::{Amount, OutPoint, Transaction, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
-use std::{cell::RefCell, collections::HashMap, rc::Rc, thread::sleep, time::Duration};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc, thread::sleep, time::Duration};
 
 /// The interval between chain polls.
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// The default polling window of [`ContractManager::wait_for_spend`] and
 /// [`ContractManager::wait_for_transaction`]; see
@@ -33,17 +33,18 @@ pub(super) fn poll_until<T>(
 }
 
 impl ContractManager {
-    /// Create and fund a new contract instance. Params are taken from the
-    /// (self-describing) contract.
+    /// Create and fund a new contract instance holding `state` (pass `()` for
+    /// a stateless contract). Params are taken from the (self-describing)
+    /// contract.
     pub fn fund_instance(
         &mut self,
         contract: std::sync::Arc<dyn ErasedContract>,
-        state: Option<Box<dyn ErasedState>>,
+        state: impl ContractState + 'static,
         amount: Amount,
     ) -> Result<InstanceHandle, ManagerError> {
-        // Create the instance (its committed bytes derive from the logical state).
-        let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state)?));
-        let script_pubkey = instance.borrow().script_pubkey()?;
+        // Reject a state of the wrong type before any money moves.
+        crate::contracts::check_state_type(contract.as_ref(), &state)?;
+        let script_pubkey = contract.script_pubkey(&state.commitment())?;
 
         // Fund it using RPC
         let address = bitcoin::Address::from_script(&script_pubkey, self.network.params())
@@ -68,8 +69,8 @@ impl ContractManager {
             vout: vout as u32,
         };
 
-        instance.borrow_mut().mark_funded(outpoint, tx);
-        Ok(self.register_instance(instance))
+        let instance = ContractInstance::funded(contract, Box::new(state), outpoint, Arc::new(tx))?;
+        Ok(self.register_instance(Rc::new(RefCell::new(instance))))
     }
 
     /// Mine blocks (for regtest).
@@ -92,8 +93,8 @@ impl ContractManager {
 
     /// Start tracking a contract instance funded externally (e.g. by a
     /// counterparty): fetch its funding transaction, verify that `outpoint` pays
-    /// the contract's address (for the given state), and register the funded
-    /// instance.
+    /// the contract's address for `state` (`()` for a stateless contract), and
+    /// register the funded instance.
     ///
     /// This is the observer-side entry point of a multi-party protocol: the
     /// funder shares the outpoint, both sides construct the same contract, and
@@ -101,12 +102,11 @@ impl ContractManager {
     pub fn track_instance(
         &mut self,
         contract: std::sync::Arc<dyn ErasedContract>,
-        state: Option<Box<dyn ErasedState>>,
+        state: impl ContractState + 'static,
         outpoint: OutPoint,
     ) -> Result<InstanceHandle, ManagerError> {
-        let instance = Rc::new(RefCell::new(ContractInstance::new(contract, state)?));
-
-        let expected_spk = instance.borrow().script_pubkey()?;
+        crate::contracts::check_state_type(contract.as_ref(), &state)?;
+        let expected_spk = contract.script_pubkey(&state.commitment())?;
         let funding_tx = self.rpc.get_raw_transaction(&outpoint.txid, None)?;
         let paid = funding_tx
             .output
@@ -116,8 +116,9 @@ impl ContractManager {
             return Err(ManagerError::WrongFundingScript(outpoint));
         }
 
-        instance.borrow_mut().mark_funded(outpoint, funding_tx);
-        Ok(self.register_instance(instance))
+        let instance =
+            ContractInstance::funded(contract, Box::new(state), outpoint, Arc::new(funding_tx))?;
+        Ok(self.register_instance(Rc::new(RefCell::new(instance))))
     }
     /// Wait until `handle`'s instance is spent on-chain (watching the mempool and
     /// new blocks), then decode the spend and materialize the child instances via
@@ -154,20 +155,10 @@ impl ContractManager {
         let first = handles.first().ok_or_else(|| {
             ManagerError::InvalidInstance("cannot wait for an empty batch".into())
         })?;
-        let tx = if first.status() == InstanceStatus::Spent {
-            first.spending_tx().ok_or_else(|| {
-                ManagerError::InvalidInstance("spent instance has no spending transaction".into())
-            })?
-        } else {
-            if first.status() != InstanceStatus::Funded {
-                return Err(ManagerError::NotFunded);
-            }
-            self.wait_for_spending_tx(
-                first.outpoint().ok_or(ManagerError::NotFunded)?,
-                Some(DEFAULT_POLL_WINDOW),
-            )?
-        };
-        Ok(tx)
+        match first.spending_tx() {
+            Some(tx) => Ok(Transaction::clone(&tx)),
+            None => self.wait_for_spending_tx(first.outpoint(), Some(DEFAULT_POLL_WINDOW)),
+        }
     }
 
     /// [`wait_for_spend`](Self::wait_for_spend) with an explicit polling window:
@@ -181,8 +172,7 @@ impl ContractManager {
         if handle.status() == InstanceStatus::Spent {
             return Ok(handle.outputs());
         }
-        let outpoint = handle.outpoint().ok_or(ManagerError::NotFunded)?;
-        let spending_tx = self.wait_for_spending_tx(outpoint, window)?;
+        let spending_tx = self.wait_for_spending_tx(handle.outpoint(), window)?;
         self.observe_spend(handle, &spending_tx)
     }
 
@@ -200,12 +190,7 @@ impl ContractManager {
         // Join seen before its defining input can link to the shared child.
         for _ in 0..2 {
             for handle in handles {
-                let children = if handle.status() == InstanceStatus::Spent {
-                    let tx = handle.spending_tx().ok_or_else(|| {
-                        ManagerError::InvalidInstance(
-                            "spent instance has no spending transaction".to_string(),
-                        )
-                    })?;
+                let children = if let Some(tx) = handle.spending_tx() {
                     self.observe_spend(handle, &tx)?
                 } else {
                     self.wait_for_spend(handle)?
@@ -285,6 +270,21 @@ impl BlockCache {
     /// Drop every cached block below `height`.
     pub(crate) fn retain_from(&mut self, height: u64) {
         self.0.retain(|h, _| *h >= height);
+    }
+
+    /// Drop every cached block.
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, height: u64, block: bitcoin::Block) {
+        self.0.insert(height, block);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
     }
 }
 

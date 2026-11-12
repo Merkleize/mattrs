@@ -20,7 +20,7 @@ use bitcoin_script::{define_pushable, script};
 use mattrs::argtypes::IntType;
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::{ArgSpec, ClauseOutput};
-use mattrs::{ContractParams, ContractState, Signature, contract};
+use mattrs::{ContractState, Signature, contract};
 
 // Re-exported so tests can import the whole game through this module; each test
 // binary uses a subset, so per-binary "unused import" warnings are structural.
@@ -53,10 +53,7 @@ pub fn compute2x() -> Computer {
 /// The per-step [`Leaf`] contract: every step re-runs [`compute2x`], so the step
 /// index is ignored.
 pub fn leaf_factory(alice_pk: XOnlyPublicKey, bob_pk: XOnlyPublicKey) -> LeafFactory {
-    Arc::new(move |_i| {
-        Leaf::new(LeafParams { alice_pk, bob_pk }, compute2x())
-            .expect("Leaf contract definition is valid")
-    })
+    Arc::new(move |_i| Leaf::new(LeafParams { alice_pk, bob_pk }, compute2x()))
 }
 
 /// A game256 [`Leaf`] (the single disputed step).
@@ -92,7 +89,7 @@ pub fn bisect2(params: BisectParams) -> Bisect2 {
 //         hands off to Bisect_1(0, 7) — the 8-step fraud proof.
 // ============================================================================
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct G256Params {
     pub alice_pk: XOnlyPublicKey,
     pub bob_pk: XOnlyPublicKey,
@@ -158,16 +155,14 @@ contract! {
 }
 
 impl G256S0 {
-    fn choose_script(p: &G256Params) -> ScriptBuf {
-        let s1_root = G256S1::new(p.clone())
-            .expect("G256S1 contract definition is valid")
-            .taptree_root();
-        script! {
+    fn choose_script(p: &G256Params) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let s1_root = G256S1::new(p.clone())?.taptree_root();
+        Ok(script! {
             OP_SHA256
             { check_output_contract(s1_root, CcvIndex::CURRENT, None) }
             { p.bob_pk }
             OP_CHECKSIG
-        }
+        })
     }
 }
 
@@ -204,11 +199,9 @@ contract! {
 }
 
 impl G256S1 {
-    fn reveal_script(p: &G256Params) -> ScriptBuf {
-        let s2_root = G256S2::new(p.clone())
-            .expect("G256S2 contract definition is valid")
-            .taptree_root();
-        script! {
+    fn reveal_script(p: &G256Params) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let s2_root = G256S2::new(p.clone())?.taptree_root();
+        Ok(script! {
             OP_DUP
             OP_SHA256
             { check_input_contract(CcvIndex::CURRENT, None) }
@@ -216,7 +209,7 @@ impl G256S1 {
             { check_output_contract(s2_root, CcvIndex::CURRENT, None) }
             { p.alice_pk }
             OP_CHECKSIG
-        }
+        })
     }
 }
 

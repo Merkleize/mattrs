@@ -163,7 +163,7 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppR
     let s0 =
         RpsGameS0::new(params)?.fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
     let entry = s0.handle().clone();
-    let outpoint = entry.outpoint().expect("just funded");
+    let outpoint = entry.outpoint();
     println!("Game funded at {outpoint}");
     send_json(
         &mut stream,
@@ -233,7 +233,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector)?;
-    let entry = manager.track_instance(RpsGameS0::new(params)?.as_erased(), None, outpoint)?;
+    let entry = manager.track_instance(RpsGameS0::new(params)?.as_erased(), (), outpoint)?;
     println!("Tracking the game at {outpoint}");
 
     // Bob's role does the rest: reveal the move on-chain (signed), then follow

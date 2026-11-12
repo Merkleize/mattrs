@@ -2,9 +2,11 @@
 use super::observation::ObservedInput;
 use super::validation::ContractOutputIdentity;
 use super::{Children, ContractManager, InstanceHandle, ManagerError};
-use crate::contracts::{ClauseOutput, ContractInstance, NextOutputs};
+use crate::contracts::{
+    ClauseOutput, ContractInstance, NextOutputs, SpendRecord, check_state_type,
+};
 use bitcoin::{OutPoint, Transaction};
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 
 impl ContractManager {
     /// Register a freshly funded instance with the manager (and the inspector,
@@ -29,7 +31,7 @@ impl ContractManager {
     ) -> Option<Rc<RefCell<ContractInstance>>> {
         self.instances
             .iter()
-            .find(|inst| inst.borrow().outpoint() == Some(outpoint))
+            .find(|inst| inst.borrow().outpoint() == outpoint)
             .cloned()
     }
 
@@ -42,7 +44,7 @@ impl ContractManager {
         &mut self,
         parent: &Rc<RefCell<ContractInstance>>,
         outputs: &[ClauseOutput],
-        spending_tx: &Transaction,
+        spending_tx: &Arc<Transaction>,
         vin: usize,
     ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, ManagerError> {
         let txid = spending_tx.compute_txid();
@@ -52,7 +54,7 @@ impl ContractManager {
         for clause_out in outputs {
             let vout = clause_out.index.resolve(vin);
             let outpoint = OutPoint { txid, vout };
-            let identity = ContractOutputIdentity::from_clause_output(clause_out);
+            let identity = ContractOutputIdentity::from_clause_output(clause_out)?;
             if identities
                 .get(&vout)
                 .is_some_and(|previous| previous != &identity)
@@ -66,15 +68,15 @@ impl ContractManager {
                 .ok_or(ManagerError::MissingContractOutput(outpoint))?;
             let expected_script = clause_out
                 .next_contract
-                .script_pubkey(clause_out.state_commitment().as_ref())?;
+                .script_pubkey(&clause_out.state_commitment())?;
             if actual.script_pubkey != expected_script {
                 return Err(ManagerError::WrongContractOutput(outpoint));
             }
 
             if let Some(existing) = self.find_instance_by_outpoint(outpoint) {
                 let existing = existing.borrow();
-                if ContractOutputIdentity::from_instance(&existing)
-                    != ContractOutputIdentity::from_clause_output(clause_out)
+                if ContractOutputIdentity::from_instance(&existing)?
+                    != ContractOutputIdentity::from_clause_output(clause_out)?
                     || existing.script_pubkey()? != actual.script_pubkey
                 {
                     return Err(ManagerError::ConflictingOutputContract { index: vout });
@@ -91,13 +93,12 @@ impl ContractManager {
                     // The child contract is self-describing, so its params come
                     // from it; it also carries the logical state for its own
                     // future spends.
-                    let instance = Rc::new(RefCell::new(ContractInstance::new(
+                    let instance = Rc::new(RefCell::new(ContractInstance::funded(
                         clause_out.next_contract.clone(),
                         clause_out.next_state.clone(),
+                        outpoint,
+                        spending_tx.clone(),
                     )?));
-                    instance
-                        .borrow_mut()
-                        .mark_funded(outpoint, spending_tx.clone());
                     self.instances.push(instance.clone());
                     instance
                 }
@@ -114,7 +115,7 @@ impl ContractManager {
 /// Validated lifecycle changes, held privately until broadcast succeeds.
 /// Dropping a staged batch has no effect; committing consumes it and cannot fail.
 pub(super) struct StagedBatch {
-    spending_tx: Transaction,
+    spending_tx: Arc<Transaction>,
     observed: Vec<ObservedInput>,
     children: BTreeMap<u32, Rc<RefCell<ContractInstance>>>,
     new_children: Vec<Rc<RefCell<ContractInstance>>>,
@@ -128,6 +129,8 @@ impl ContractManager {
     ) -> Result<StagedBatch, ManagerError> {
         // Stage every child before mutating the registry or linking any parent.
         let txid = spending_tx.compute_txid();
+        // One shared copy for every parent's spend record and every child.
+        let spending_tx = Arc::new(spending_tx.clone());
         let mut children: BTreeMap<u32, Rc<RefCell<ContractInstance>>> = BTreeMap::new();
         let mut new_children = Vec::new();
         for input in &observed {
@@ -136,32 +139,36 @@ impl ContractManager {
                     let vout = output.index.resolve(input.vin);
                     let outpoint = OutPoint { txid, vout };
                     // Check expanded state type even if this output already exists.
-                    let mut candidate = ContractInstance::new(
-                        output.next_contract.clone(),
-                        output.next_state.clone(),
-                    )?;
+                    check_state_type(output.next_contract.as_ref(), output.next_state.as_ref())?;
                     let cached = input
                         .handle
                         .outputs()
                         .into_iter()
-                        .find(|child| child.outpoint() == Some(outpoint));
+                        .find(|child| child.outpoint() == outpoint);
                     let existing = children
                         .get(&vout)
                         .cloned()
                         .or_else(|| self.find_instance_by_outpoint(outpoint))
                         .or_else(|| cached.map(|child| child.instance));
                     let child = if let Some(existing) = existing {
-                        if ContractOutputIdentity::from_instance(&existing.borrow())
-                            != ContractOutputIdentity::from_clause_output(output)
-                            || existing.borrow().script_pubkey()?
-                                != spending_tx.output[vout as usize].script_pubkey
+                        let actual = spending_tx
+                            .output
+                            .get(vout as usize)
+                            .ok_or(ManagerError::MissingContractOutput(outpoint))?;
+                        if ContractOutputIdentity::from_instance(&existing.borrow())?
+                            != ContractOutputIdentity::from_clause_output(output)?
+                            || existing.borrow().script_pubkey()? != actual.script_pubkey
                         {
                             return Err(ManagerError::ConflictingOutputContract { index: vout });
                         }
                         existing
                     } else {
-                        candidate.mark_funded(outpoint, spending_tx.clone());
-                        let child = Rc::new(RefCell::new(candidate));
+                        let child = Rc::new(RefCell::new(ContractInstance::funded(
+                            output.next_contract.clone(),
+                            output.next_state.clone(),
+                            outpoint,
+                            spending_tx.clone(),
+                        )?));
                         new_children.push(child.clone());
                         child
                     };
@@ -171,7 +178,7 @@ impl ContractManager {
         }
 
         Ok(StagedBatch {
-            spending_tx: spending_tx.clone(),
+            spending_tx,
             observed,
             children,
             new_children,
@@ -207,12 +214,12 @@ impl StagedBatch {
                 );
             }
             if !input.already_spent {
-                parent.mark_spent(
+                parent.mark_spent(SpendRecord::new(
                     spending_tx.clone(),
                     input.vin,
                     input.clause_name.clone(),
                     input.witness_args.clone(),
-                );
+                ));
             }
         }
         #[cfg(feature = "inspector")]

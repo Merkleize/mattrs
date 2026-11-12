@@ -10,25 +10,24 @@ use std::collections::BTreeMap;
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct ContractOutputIdentity {
     pub(super) contract_type: std::any::TypeId,
-    pub(super) params: Vec<u8>,
-    pub(super) state: Option<Vec<u8>>,
+    pub(super) script_pubkey: bitcoin::ScriptBuf,
 }
 
 impl ContractOutputIdentity {
-    pub(super) fn from_clause_output(output: &ClauseOutput) -> Self {
-        Self {
+    pub(super) fn from_clause_output(output: &ClauseOutput) -> Result<Self, ManagerError> {
+        Ok(Self {
             contract_type: output.next_contract.contract_type_id(),
-            params: output.next_contract.params_bytes().to_vec(),
-            state: output.committed_state_bytes(),
-        }
+            script_pubkey: output
+                .next_contract
+                .script_pubkey(&output.state_commitment())?,
+        })
     }
 
-    pub(super) fn from_instance(instance: &ContractInstance) -> Self {
-        Self {
+    pub(super) fn from_instance(instance: &ContractInstance) -> Result<Self, ManagerError> {
+        Ok(Self {
             contract_type: instance.contract().contract_type_id(),
-            params: instance.contract().params_bytes().to_vec(),
-            state: instance.committed_state_bytes(),
-        }
+            script_pubkey: instance.script_pubkey()?,
+        })
     }
 }
 
@@ -56,11 +55,11 @@ pub(super) fn resolve_outputs(next: &NextOutputs) -> Result<Vec<ResolvedOutput>,
                     index: output.index,
                     script_pubkey: output
                         .next_contract
-                        .script_pubkey(output.state_commitment().as_ref())?,
+                        .script_pubkey(&output.state_commitment())?,
                     amount: output.next_amount,
                     identity: OutputIdentity::Contract(ContractOutputIdentity::from_clause_output(
                         output,
-                    )),
+                    )?),
                 })
             })
             .collect(),
@@ -196,7 +195,7 @@ pub(super) fn validate_batch_constraints(
                         return Err(ManagerError::MixedOutputSemantics { index });
                     }
                     residual = residual
-                        .checked_sub(tx.output[index as usize].value)
+                        .checked_sub(output_value(tx, index)?)
                         .ok_or(ManagerError::DeductExceedsInput)?;
                 }
                 ClauseOutputAmountBehaviour::IgnoreOutput => {}
@@ -217,7 +216,7 @@ pub(super) fn validate_batch_constraints(
         }
     }
     for (index, required) in minimum {
-        let actual = tx.output[index as usize].value;
+        let actual = output_value(tx, index)?;
         if actual < required {
             return Err(ManagerError::InsufficientOutputAmount {
                 index,
@@ -227,6 +226,21 @@ pub(super) fn validate_batch_constraints(
         }
     }
     Ok(())
+}
+
+/// The value of output `index`, or the error for a declared output the
+/// transaction does not have. Batch accounting does not rely on the per-input
+/// checks having already established that the output exists.
+fn output_value(tx: &Transaction, index: u32) -> Result<Amount, ManagerError> {
+    tx.output
+        .get(index as usize)
+        .map(|output| output.value)
+        .ok_or_else(|| {
+            ManagerError::MissingContractOutput(OutPoint {
+                txid: tx.compute_txid(),
+                vout: index,
+            })
+        })
 }
 
 /// Check scripts and per-input CCV amounts for resolved outputs. Cross-input
@@ -273,10 +287,11 @@ pub(super) fn validate_output_constraints(
                     return Err(ManagerError::MixedOutputSemantics { index });
                 }
                 if actual.value < remaining {
-                    return Err(ManagerError::UnrecognizedSpend(format!(
-                        "preserve output {index} has {}, below the input residual {remaining}",
-                        actual.value
-                    )));
+                    return Err(ManagerError::InsufficientOutputAmount {
+                        index,
+                        required: remaining,
+                        actual: actual.value,
+                    });
                 }
                 seen.insert(index, ClauseOutputAmountBehaviour::PreserveOutput);
                 remaining = Amount::ZERO;

@@ -61,7 +61,7 @@ fn funding_signs_all_prevouts_and_observes_only_final_transaction() {
         bitcoin::Script::from_bytes(&witness[1]),
         bitcoin::taproot::LeafVersion::TapScript,
     );
-    let prevouts = [handle.prevout().unwrap(), external.prevout.clone()];
+    let prevouts = [handle.prevout(), external.prevout.clone()];
     let hash = crate::signer::compute_tap_sighash(
         signed.transaction(),
         0,
@@ -115,10 +115,7 @@ fn funding_signs_all_prevouts_and_observes_only_final_transaction() {
     assert_eq!(observation.children.len(), 1);
     assert_eq!(observation.fee, sat(1_000));
     assert_eq!(handle.status(), InstanceStatus::Spent);
-    assert_eq!(
-        observation.children[0].outpoint().unwrap().txid,
-        tx.compute_txid()
-    );
+    assert_eq!(observation.children[0].outpoint().txid, tx.compute_txid());
     // Reobservation must reclassify wallet witnesses even when txid is cached.
     altered = tx.clone();
     altered.input[1].witness =
@@ -217,8 +214,8 @@ fn mixed_batch_uses_contract_contributions_not_wallet_value() {
     let mut manager = offline_manager();
     let child = test_contract(90, None);
     let parent = contract_yielding(80, vec![ClauseOutput::at(0).to(child).build()]);
-    let first = fund_fake(parent.clone(), None, sat(10_000), 1);
-    let second = fund_fake(parent, None, sat(20_000), 2);
+    let first = fund_fake(parent.clone(), (), sat(10_000), 1);
+    let second = fund_fake(parent, (), sat(20_000), 2);
     let mut tx = manager
         .build_batch_tx(&[spend(&first), spend(&second)])
         .unwrap();
@@ -281,11 +278,11 @@ fn invalid_external_contexts_are_atomic() {
         assert!(handle.outputs().is_empty());
         assert!(manager.instances.is_empty());
     }
-    let disguised = fund_fake(test_contract(23, None), None, sat(10_000), 5);
+    let disguised = fund_fake(test_contract(23, None), (), sat(10_000), 5);
     manager.instances.push(disguised.instance.clone());
-    tx.input[1].previous_output = disguised.outpoint().unwrap();
+    tx.input[1].previous_output = disguised.outpoint();
     let mut context = external;
-    context.outpoint = disguised.outpoint().unwrap(); // Even a forged native prevout cannot hide a known contract.
+    context.outpoint = disguised.outpoint(); // Even a forged native prevout cannot hide a known contract.
     assert!(
         manager
             .observe_batch_with_external_inputs(&[&handle], &[context], &tx)
@@ -330,7 +327,7 @@ fn same_index_outputs_follow_real_input_positions() {
     let mut manager = offline_manager();
     let child = test_contract(90, None);
     let parent = contract_yielding(80, vec![ClauseOutput::at_same_index().to(child).build()]);
-    let handle = fund_fake(parent, None, sat(10_000), 1);
+    let handle = fund_fake(parent, (), sat(10_000), 1);
     let mut tx = spend(&handle).build_tx(&manager).unwrap();
     let external = add_wallet_input(&mut tx);
     tx.input[1].witness = bitcoin::Witness::from_slice(&[vec![1; 64]]);
@@ -349,7 +346,7 @@ fn same_index_outputs_follow_real_input_positions() {
     let result = manager
         .observe_batch_with_external_inputs(&[&handle], &[external], &tx)
         .unwrap();
-    assert_eq!(result.children[0].outpoint().unwrap().vout, 1);
+    assert_eq!(result.children[0].outpoint().vout, 1);
     assert_eq!(result.fee, sat(500));
 }
 
@@ -378,17 +375,8 @@ fn join_links_are_atomic_with_interleaved_fee_inputs() {
 fn late_missing_signer_is_detected_before_any_signing() {
     let manager = offline_manager();
     let (_, first, first_calls) = signed_spend_fixture(true);
-    let (second_handle, mut second, second_calls) = signed_spend_fixture(true);
     // Distinct funding outpoint, same output contract and signing key.
-    let mut funding = second_handle.funding_tx().unwrap();
-    funding.lock_time = bitcoin::absolute::LockTime::from_consensus(9);
-    second_handle.instance.borrow_mut().mark_funded(
-        OutPoint {
-            txid: funding.compute_txid(),
-            vout: 0,
-        },
-        funding,
-    );
+    let (_, mut second, second_calls) = signed_spend_seeded(true, None, 9);
     second.signers.clear();
     let plan = manager.prepare_wallet_spend(vec![first, second]).unwrap();
     let mut tx = plan.transaction().clone();
@@ -446,9 +434,9 @@ fn nondefault_contract_signatures_are_rejected() {
 #[test]
 fn external_context_from_transaction_binds_the_outpoint() {
     let (handle, _, _) = signed_spend_fixture(true);
-    let tx = handle.funding_tx().unwrap();
+    let tx = handle.funding_tx();
     let context = ExternalInput::from_transaction(&tx, 0).unwrap();
-    assert_eq!(context.outpoint, handle.outpoint().unwrap());
-    assert_eq!(context.prevout, handle.prevout().unwrap());
+    assert_eq!(context.outpoint, handle.outpoint());
+    assert_eq!(context.prevout, handle.prevout());
     assert!(ExternalInput::from_transaction(&tx, 1).is_err());
 }

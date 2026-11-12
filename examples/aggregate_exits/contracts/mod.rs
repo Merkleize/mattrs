@@ -64,7 +64,6 @@ use bitcoin::hashes::{Hash, sha256};
 use bitcoin::key::{Keypair, Secp256k1};
 use bitcoin::secp256k1::Message;
 use bitcoin_script::{define_pushable, script};
-use mattrs::ContractParams;
 use mattrs::contracts::{ClauseError, WitnessError};
 use mattrs::fraud::trace;
 use mattrs::merkle::{MerkleProof, MerkleTree, NIL, ceil_lg};
@@ -77,7 +76,7 @@ define_pushable!();
 // ============================================================================
 
 /// The pool's immutable parameters, shared by every contract in the chain.
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct PoolParams {
     /// Identifies this pool in delegation messages (domain separation), e.g. a
     /// hash of the pool's genesis. Random in the demo.

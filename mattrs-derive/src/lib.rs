@@ -2,7 +2,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, GenericArgument, PathArguments, Type};
+use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
 
 mod contract;
 
@@ -24,7 +24,7 @@ mod contract;
 ///
 ///         clause trigger {
 ///             args {
-///                 // shorthand for `#[signer(|p| p.unvault_pk.serialize())]`
+///                 // shorthand for `#[signer(|p| p.unvault_pk)]`
 ///                 #[signer(p.unvault_pk)] sig: Signature,
 ///                 ctv_hash: [u8; 32],
 ///                 out_i: i64,
@@ -46,6 +46,12 @@ mod contract;
 /// and receives `(&params, &ctx)` when construction context is declared.
 /// Use it to reject invalid shared parameters before nested constructors run.
 ///
+/// Every builder section (`script`, `timelock`, `args raw`, `internal_key`, a
+/// dynamic `tree`) may evaluate to its value or to a `Result<_, ContractError>`
+/// of it: a script that needs a child
+/// contract's taptree root writes `Child::new(..)?.taptree_root()` and the
+/// failure surfaces from `Name::new` instead of panicking.
+///
 /// A clause's `timelock |p| ...;` returns a block count (`u32`) in 1..=65,535.
 /// Construction rejects invalid delays; valid delays prepend `CSV DROP` to
 /// the script and set metadata used to validate the spending input's sequence.
@@ -53,12 +59,11 @@ mod contract;
 /// Three optional forms cover contracts whose shape is only known at runtime
 /// (see `mattrs::fraud` for a worked example of all three):
 ///
-/// - **`ctx <Type>;`** — non-encodable construction context (script fragments,
+/// - **`ctx <Type>;`** — construction context kept apart from the params (script fragments,
 ///   factories, timeouts...). `new` becomes `new(params, ctx)` and stores the
 ///   ctx on the contract struct (`Type` must be `Clone`). Script/spec builder
 ///   exprs are then called with `(&params, &ctx)`, and `next` bodies (as well
 ///   as a dynamic `tree |p| ..` body) can reference the context as `ctx`.
-///   Unlike params, the ctx never round-trips through `ParamEncodable`.
 ///
 /// - **`args raw <expr>;`** — a clause whose witness layout is only known at
 ///   runtime. `<expr>` is called like a script builder and evaluates to the
@@ -68,9 +73,13 @@ mod contract;
 ///
 /// - **`#[from_state]`** on an `args` field — the generated handle method omits
 ///   the argument and fills it from the instance's typed state (the same-named
-///   state field), returning `Result<SpendBuilder, MissingStateError>`. For
-///   clauses that re-reveal state committed on-chain, this keeps the method's
-///   parameters down to the genuinely new values. Requires a `state` section.
+///   state field). For clauses that re-reveal state committed on-chain, this
+///   keeps the method's parameters down to the genuinely new values. Requires a
+///   `state` section.
+///
+/// A contract with a `state <Type>;` section is *augmented*: `fund` and
+/// `address` take the state, the handle gains `state()`, and a clause's
+/// `next(p, a, s)` receives `s: &Type`. Without one the state type is `()`.
 #[proc_macro]
 pub fn contract(input: TokenStream) -> TokenStream {
     contract::expand(input)
@@ -106,15 +115,17 @@ fn named_fields<'a>(
 ///   When specified, generates `arg_specs_for_params(params: &ParamsType)` in addition to `arg_specs()`.
 ///
 /// ## Field-level attributes
-/// - `#[signer(expr)]` - Creates a SignerType with the given pubkey expression.
-///   If `expr` is a closure like `|p| p.unvault_pk.serialize()`, it will be used in `arg_specs_for_params`.
+/// - `#[signer(expr)]` - Creates a SignerType for the given `XOnlyPublicKey` expression.
+///   If `expr` is a closure like `|p| p.unvault_pk`, it will be used in `arg_specs_for_params`.
 /// - `#[arg_type(expr)]` - Uses a custom ArgType expression
 ///
-/// # Default type mappings (when no attribute is specified)
-/// - `Vec<u8>` -> `BytesType`
-/// - `[u8; N]` -> `BytesType`
-/// - `i32`, `i64` -> `IntType`
-/// - `WitProof<N>` -> `MerkleProofType::new(N)`
+/// # Witness layout
+///
+/// A field without an attribute may be of any `WitnessEncodable` type —
+/// integers, byte arrays, `bool`, `XOnlyPublicKey`, `Option<T>`, `WitProof<N>`,
+/// a type alias, or your own type. Its spec is `TypedArg<FieldType>`: the
+/// layout is whatever the type's own codec consumes, so it cannot disagree
+/// with the encoding.
 ///
 /// # Examples
 ///
@@ -129,7 +140,7 @@ fn named_fields<'a>(
 /// #[derive(ClauseArgs)]
 /// #[clause_args(params = VaultParams)]
 /// pub struct TriggerArgs {
-///     #[signer(|p| p.unvault_pk.serialize())]
+///     #[signer(|p| p.unvault_pk)]
 ///     pub sig: Signature,
 ///     pub ctv_hash: [u8; 32],
 ///     pub out_i: i64,
@@ -171,6 +182,10 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
     });
 
     let field_names = fields.iter().map(|f| &f.ident);
+    let element_counts = fields.iter().map(|f| {
+        let ty = &f.ty;
+        quote! { <#ty as ::mattrs::contracts::WitnessEncodable>::ELEMENTS }
+    });
 
     // Does any field use a closure-based `#[signer(|p| ..)]`? Such fields need the
     // params to build their SignerType, so only `arg_specs_for_params()` is valid.
@@ -261,6 +276,9 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         impl #impl_generics ::mattrs::contracts::WitnessEncodable for #name #ty_generics #where_clause {
+            const ELEMENTS: ::core::option::Option<usize> =
+                ::mattrs::contracts::__sum_elements(&[#(#element_counts),*]);
+
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut stack = Vec::new();
                 #(#encode_fields)*
@@ -376,7 +394,7 @@ fn arg_spec_item(field: &syn::Field, params_ty: Option<&Type>) -> syn::Result<To
 enum SignerAttrInfo {
     /// Static expression: #[signer(pubkey_bytes)]
     Static(TokenStream2),
-    /// Closure expression: #[signer(|p| p.field.serialize())]
+    /// Closure expression: #[signer(|p| p.field)]
     Closure(TokenStream2),
 }
 
@@ -447,246 +465,10 @@ fn extract_arg_type_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<TokenSt
     Ok(result)
 }
 
-/// Whether a type is a path of exactly one segment named `ident` with no generics
-/// (`u8`, `i64`, ...).
-fn is_plain_ident(ty: &Type, ident: &str) -> bool {
-    matches!(ty, Type::Path(tp) if tp.qself.is_none()
-        && tp.path.segments.len() == 1
-        && tp.path.segments[0].ident == ident
-        && tp.path.segments[0].arguments.is_none())
-}
-
-/// Infer the ArgType from a Rust type.
+/// The ArgType of a plain field: its own witness codec (`TypedArg<T>`), so any
+/// `WitnessEncodable` type works and the layout cannot drift from the encoding.
 fn infer_arg_type(ty: &Type) -> TokenStream2 {
-    // [u8; N] — one Bytes element.
-    if let Type::Array(arr) = ty {
-        if is_plain_ident(&arr.elem, "u8") {
-            return quote! { ::std::sync::Arc::new(::mattrs::argtypes::BytesType) };
-        }
-    }
-
-    // i32 / i64 — one script-number element.
-    if is_plain_ident(ty, "i32") || is_plain_ident(ty, "i64") {
-        return quote! { ::std::sync::Arc::new(::mattrs::argtypes::IntType) };
-    }
-
-    if let Type::Path(tp) = ty {
-        if let Some(last) = tp.path.segments.last() {
-            // Vec<u8> (any path prefix) — one Bytes element.
-            if last.ident == "Vec" {
-                if let PathArguments::AngleBracketed(args) = &last.arguments {
-                    if args.args.len() == 1 {
-                        if let GenericArgument::Type(elem) = &args.args[0] {
-                            if is_plain_ident(elem, "u8") {
-                                return quote! {
-                                    ::std::sync::Arc::new(::mattrs::argtypes::BytesType)
-                                };
-                            }
-                        }
-                    }
-                }
-            }
-
-            // WitProof<N> — a depth-N Merkle proof occupying 2N+1 elements.
-            if last.ident == "WitProof" {
-                if let PathArguments::AngleBracketed(args) = &last.arguments {
-                    if args.args.len() == 1 {
-                        let depth = &args.args[0];
-                        return quote! {
-                            ::std::sync::Arc::new(::mattrs::merkle::MerkleProofType::new(#depth))
-                        };
-                    }
-                }
-            }
-        }
-    }
-
-    // Refuse to guess: an unrecognized field type is a compile error rather than
-    // a silently-wrong BytesType. The user can add #[arg_type(..)]/#[signer(..)].
-    let msg = format!(
-        "#[derive(ClauseArgs)]: cannot infer an ArgType for field type `{}`; \
-         annotate the field with #[arg_type(..)] or #[signer(..)] \
-         (auto-inferred types: Vec<u8>, [u8; N], i32, i64, WitProof<N>)",
-        quote!(#ty)
-    );
-    quote! {
-        {
-            compile_error!(#msg);
-            ::std::sync::Arc::new(::mattrs::argtypes::BytesType)
-        }
-    }
-}
-
-/// Derive macro for the ContractParams trait.
-///
-/// Implements the params' internal (non-consensus) serialization: it also derives
-/// [`ParamEncodable`](../mattrs/contracts/trait.ParamEncodable.html) for the struct,
-/// then frames each field's elements (length-prefixed) into a single byte vector.
-/// Because params use `ParamEncodable` — the superset that also covers the
-/// fixed-width unsigned integers — a params field may be a `u32` (e.g. a CSV
-/// delay), unlike a clause argument or a state leaf, which must be witness elements.
-#[proc_macro_derive(ContractParams)]
-pub fn derive_contract_params(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    expand_contract_params(&input)
-        .unwrap_or_else(syn::Error::into_compile_error)
-        .into()
-}
-
-fn expand_contract_params(input: &DeriveInput) -> syn::Result<TokenStream2> {
-    let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let fields = named_fields(input, "ContractParams")?;
-
-    let encode_param_fields = fields.iter().map(|f| {
-        let field_name = &f.ident;
-        quote! {
-            result.extend(::mattrs::contracts::ParamEncodable::encode_param(
-                &self.#field_name,
-            ));
-        }
-    });
-
-    let decode_param_fields = fields.iter().map(|f| {
-        let field_name = &f.ident;
-        let field_type = &f.ty;
-        quote! {
-            let (#field_name, consumed) = <#field_type as ::mattrs::contracts::ParamEncodable>::decode_param(&elements[offset..])?;
-            offset += consumed;
-        }
-    });
-
-    let encode_to_bytes_fields = fields.iter().map(|f| {
-        let field_name = &f.ident;
-        quote! {
-            // Encode field and prepend its element count and sizes.
-            let field_elements =
-                ::mattrs::contracts::ParamEncodable::encode_param(&self.#field_name);
-            // The framing format uses u32 lengths. Conversion is checked so a
-            // value can never be silently truncated into a corrupt frame.
-            let element_count = u32::try_from(field_elements.len())
-                .expect("contract parameter field has more than u32::MAX elements");
-            bytes.extend(&element_count.to_le_bytes());
-            // Write each element with its length prefix.
-            for elem in field_elements {
-                let elem_len = u32::try_from(elem.len())
-                    .expect("contract parameter element exceeds u32::MAX bytes");
-                bytes.extend(&elem_len.to_le_bytes());
-                bytes.extend(&elem);
-            }
-        }
-    });
-
-    let decode_from_bytes_fields = fields.iter().map(|f| {
-        let field_name = &f.ident;
-        let field_type = &f.ty;
-        quote! {
-            let (#field_name, consumed_bytes) = {
-                // Read number of witness elements
-                let count_end = byte_offset.checked_add(4)
-                    .ok_or_else(|| ::mattrs::contracts::WitnessError::InvalidData(
-                        "contract parameter frame offset overflow".to_string(),
-                    ))?;
-                if count_end > bytes.len() {
-                    return Err(::mattrs::contracts::WitnessError::InsufficientData);
-                }
-                let mut count_bytes = [0u8; 4];
-                count_bytes.copy_from_slice(&bytes[byte_offset..count_end]);
-                let element_count = usize::try_from(u32::from_le_bytes(count_bytes))
-                    .map_err(|_| ::mattrs::contracts::WitnessError::InvalidData(
-                        "contract parameter element count does not fit usize".to_string(),
-                    ))?;
-                let mut local_offset = count_end;
-
-                // Read witness elements
-                let mut temp_witness = Vec::new();
-                for _ in 0..element_count {
-                    let len_end = local_offset.checked_add(4)
-                        .ok_or_else(|| ::mattrs::contracts::WitnessError::InvalidData(
-                            "contract parameter frame offset overflow".to_string(),
-                        ))?;
-                    if len_end > bytes.len() {
-                        return Err(::mattrs::contracts::WitnessError::InsufficientData);
-                    }
-                    let mut len_bytes = [0u8; 4];
-                    len_bytes.copy_from_slice(&bytes[local_offset..len_end]);
-                    let elem_len = usize::try_from(u32::from_le_bytes(len_bytes))
-                        .map_err(|_| ::mattrs::contracts::WitnessError::InvalidData(
-                            "contract parameter element length does not fit usize".to_string(),
-                        ))?;
-                    local_offset = len_end;
-
-                    let elem_end = local_offset.checked_add(elem_len)
-                        .ok_or_else(|| ::mattrs::contracts::WitnessError::InvalidData(
-                            "contract parameter frame length overflow".to_string(),
-                        ))?;
-                    if elem_end > bytes.len() {
-                        return Err(::mattrs::contracts::WitnessError::InsufficientData);
-                    }
-                    temp_witness.push(bytes[local_offset..elem_end].to_vec());
-                    local_offset = elem_end;
-                }
-
-                let (value, consumed_elements) = <#field_type as ::mattrs::contracts::ParamEncodable>::decode_param(&temp_witness)?;
-                if consumed_elements != temp_witness.len() {
-                    return Err(::mattrs::contracts::WitnessError::InvalidData(format!(
-                        "field '{}' consumed {} of {} framed element(s)",
-                        ::core::stringify!(#field_name),
-                        consumed_elements,
-                        temp_witness.len(),
-                    )));
-                }
-                (value, local_offset - byte_offset)
-            };
-            byte_offset += consumed_bytes;
-        }
-    });
-
-    let field_names = fields.iter().map(|f| &f.ident);
-    let field_names_for_bytes = fields.iter().map(|f| &f.ident);
-
-    Ok(quote! {
-        impl #impl_generics ::mattrs::contracts::ParamEncodable for #name #ty_generics #where_clause {
-            fn encode_param(&self) -> Vec<Vec<u8>> {
-                let mut result = Vec::new();
-                #(#encode_param_fields)*
-                result
-            }
-
-            fn decode_param(elements: &[Vec<u8>]) -> ::core::result::Result<(Self, usize), ::mattrs::contracts::WitnessError> {
-                let mut offset = 0;
-                #(#decode_param_fields)*
-                Ok((Self {
-                    #(#field_names),*
-                }, offset))
-            }
-        }
-
-        impl #impl_generics ::mattrs::contracts::ContractParams for #name #ty_generics #where_clause {
-            fn encode(&self) -> Vec<u8> {
-                let mut bytes = Vec::new();
-                #(#encode_to_bytes_fields)*
-                bytes
-            }
-
-            fn decode(bytes: &[u8]) -> ::core::result::Result<Self, ::mattrs::contracts::WitnessError> {
-                let mut byte_offset = 0usize;
-                #(#decode_from_bytes_fields)*
-
-                if byte_offset != bytes.len() {
-                    return Err(::mattrs::contracts::WitnessError::InvalidData(format!(
-                        "{} trailing byte(s) after {} parameters",
-                        bytes.len() - byte_offset,
-                        ::core::stringify!(#name),
-                    )));
-                }
-
-                Ok(Self {
-                    #(#field_names_for_bytes),*
-                })
-            }
-        }
-    })
+    quote! { ::std::sync::Arc::new(::mattrs::argtypes::TypedArg::<#ty>::new()) }
 }
 
 /// How a `#[commit(merkle)]` state field contributes Merkle leaves.
@@ -855,6 +637,10 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
     });
 
     let field_names = fields.iter().map(|f| &f.ident);
+    let element_counts = fields.iter().map(|f| {
+        let ty = &f.ty;
+        quote! { <#ty as ::mattrs::contracts::WitnessEncodable>::ELEMENTS }
+    });
     let only_field = fields.first().expect("length checked above");
     let field_type = &only_field.ty;
     let state_field_name = only_field.ident.as_ref().expect("named fields");
@@ -866,6 +652,9 @@ fn expand_contract_state(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         impl #impl_generics ::mattrs::contracts::WitnessEncodable for #name #ty_generics #where_clause {
+            const ELEMENTS: ::core::option::Option<usize> =
+                ::mattrs::contracts::__sum_elements(&[#(#element_counts),*]);
+
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
                 let mut result = Vec::new();
                 #(#encode_fields)*

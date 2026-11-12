@@ -192,9 +192,9 @@ fn test_ram_write_commits_updated_root() {
     let committed = MerkleTree::new(leaves.clone()).root();
     let handle = try_handle::<RamHandle>(fund_fake(
         ram.as_erased(),
-        Some(Box::new(RamState {
+        RamState {
             leaves: leaves.clone(),
-        })),
+        },
         100_000,
         0,
     ));
@@ -218,7 +218,7 @@ fn test_ram_write_commits_updated_root() {
     let new_root = MerkleTree::new(updated).root();
     let expected = ram
         .as_erased()
-        .script_pubkey(Some(&mattrs::StateCommitment::identity(new_root.to_vec())))
+        .script_pubkey(&mattrs::StateCommitment::identity(new_root.to_vec()))
         .unwrap();
 
     assert_eq!(tx.output.len(), 1);

@@ -5,9 +5,9 @@ use super::validation::{
     validate_output_constraints,
 };
 use super::{Children, ContractManager, ExternalInput, InstanceHandle, ManagerError};
-use crate::contracts::{InstanceStatus, NextOutputs};
+use crate::contracts::{NextOutputs, SpendRecord};
 use bitcoin::{Amount, OutPoint, Transaction};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// Read-only result of authenticating a known input and resolving its metadata.
 pub(super) struct ObservedInput {
@@ -42,26 +42,16 @@ pub(super) fn decode_observation(
 ) -> Result<ObservedInput, ManagerError> {
     let txid = spending_tx.compute_txid();
 
-    let already_spent = {
-        let inst = handle.instance.borrow();
-        if inst.status() == InstanceStatus::Spent {
-            if inst.spent_in_tx() != Some(txid) {
-                return Err(ManagerError::InvalidInstance(
-                    "Instance already spent by a different transaction".to_string(),
-                ));
-            }
-            true
-        } else if inst.status() != InstanceStatus::Funded {
-            return Err(ManagerError::NotFunded);
-        } else {
-            false
+    let already_spent = match handle.instance.borrow().spent_in_tx() {
+        Some(recorded) if recorded != txid => {
+            return Err(ManagerError::InvalidInstance(
+                "Instance already spent by a different transaction".to_string(),
+            ));
         }
+        Some(_) => true,
+        None => false,
     };
-    let outpoint = handle
-        .instance
-        .borrow()
-        .outpoint()
-        .ok_or(ManagerError::NotFunded)?;
+    let outpoint = handle.outpoint();
 
     // Which input of `spending_tx` consumes this instance?
     let vin = spending_tx
@@ -97,7 +87,7 @@ pub(super) fn decode_observation(
 
         let internal_key = inst
             .contract()
-            .control_block_internal_key(inst.state_commitment().as_ref())?;
+            .control_block_internal_key(&inst.state_commitment())?;
         let expected_control = inst
             .contract()
             .taptree()
@@ -125,7 +115,7 @@ pub(super) fn decode_observation(
         (clause.name().to_string(), next)
     };
 
-    let value = handle.prevout().ok_or(ManagerError::NotFunded)?.value;
+    let value = handle.amount();
     let outputs = resolve_outputs(&next)?;
     validate_output_constraints(value, &outputs, spending_tx, vin)?;
     validate_ctv_commitment(&next, spending_tx, vin)?;
@@ -167,6 +157,8 @@ impl ContractManager {
         if already_spent && !handle.outputs().is_empty() {
             return Ok(handle.outputs());
         }
+        // One shared copy for the parent's spend record and every child.
+        let spending_tx = &Arc::new(spending_tx.clone());
 
         let children = match &next {
             // A re-observed instance with no cached children got here only to
@@ -196,12 +188,12 @@ impl ContractManager {
         };
 
         if !already_spent {
-            handle.instance.borrow_mut().mark_spent(
+            handle.instance.borrow_mut().mark_spent(SpendRecord::new(
                 spending_tx.clone(),
                 vin,
                 clause_name,
                 witness_args,
-            );
+            ));
         }
 
         #[cfg(feature = "inspector")]
@@ -273,7 +265,7 @@ impl ContractManager {
         }
         let mut supplied = BTreeMap::new();
         for handle in handles {
-            let outpoint = handle.outpoint().ok_or(ManagerError::NotFunded)?;
+            let outpoint = handle.outpoint();
             let vin = *input_indices.get(&outpoint).ok_or_else(|| {
                 ManagerError::InvalidInstance(format!(
                     "observation context {outpoint} is not an input of this transaction"

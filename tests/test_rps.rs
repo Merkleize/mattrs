@@ -86,7 +86,7 @@ fn test_rps_bob_move_commits_s1_state() {
 
     let handle = try_handle::<RpsGameS0Handle>(fund_fake(
         RpsGameS0::new(params.clone()).unwrap().as_erased(),
-        None,
+        (),
         2000,
         0,
     ));
@@ -105,9 +105,9 @@ fn test_rps_bob_move_commits_s1_state() {
     let expected = RpsGameS1::new(params)
         .unwrap()
         .as_erased()
-        .script_pubkey(Some(&mattrs::StateCommitment::identity(
+        .script_pubkey(&mattrs::StateCommitment::identity(
             move_commitment(1).to_vec(),
-        )))
+        ))
         .unwrap();
     assert_eq!(tx.output[0].script_pubkey, expected);
     assert_eq!(tx.output[0].value, Amount::from_sat(2000));
@@ -120,9 +120,9 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
 
     let handle = try_handle::<RpsGameS1Handle>(fund_fake(
         RpsGameS1::new(params).unwrap().as_erased(),
-        Some(Box::new(RpsGameS1State {
+        RpsGameS1State {
             commitment: move_commitment(1),
-        })),
+        },
         2000,
         0,
     ));
@@ -173,7 +173,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .sign(HotSigner::new(bob_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
-    let state = s1.state().expect("S1 state");
+    let state = s1.state();
     assert_eq!(state.commitment, move_commitment(1));
     report_spend(
         &mut report,

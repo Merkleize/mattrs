@@ -39,13 +39,13 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     let mut observer = ContractManager::new(regtest_rpc_client("testwallet"), Network::Regtest);
     let observed_first = observer.track_instance(
         Vault::new(params.clone())?.as_erased(),
-        None,
-        first.handle().outpoint().unwrap(),
+        (),
+        first.handle().outpoint(),
     )?;
     let observed_second = observer.track_instance(
         Vault::new(params)?.as_erased(),
-        None,
-        second.handle().outpoint().unwrap(),
+        (),
+        second.handle().outpoint(),
     )?;
 
     // The trigger commits to a later withdrawal. This example only triggers;
@@ -117,7 +117,7 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     let result = signed.observe_final(&mut manager, &final_tx)?;
     assert_eq!(result.children.len(), 1);
     assert_eq!(
-        result.children[0].prevout().unwrap().value,
+        result.children[0].prevout().value,
         Amount::from_sat(300_000)
     );
     assert_eq!(first.handle().status(), InstanceStatus::Spent);

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use bitcoin::{Amount, OutPoint, Transaction, TxOut};
 use bitcoincore_rpc::{Auth, Client};
 
-use crate::contracts::{ContractInstance, ErasedContract, ErasedState};
+use crate::contracts::{ContractInstance, ContractState, ErasedContract};
 use crate::manager::{Children, ContractManager, InstanceHandle, ManagerError, SpendBuilder};
 
 /// An RPC client that is never actually contacted: building (as opposed to
@@ -26,8 +26,8 @@ pub fn offline_client() -> Client {
     Client::new("http://127.0.0.1:1", Auth::None).expect("offline client is infallible")
 }
 
-/// Fake a funded instance of `contract` (optionally carrying `expanded` logical
-/// state) holding `amount`, at a distinct outpoint keyed by `seed`.
+/// Fake a funded instance of `contract` carrying `state` (`()` for a stateless
+/// contract) and holding `amount`, at a distinct outpoint keyed by `seed`.
 ///
 /// The in-memory "funding transaction" pays the contract's own address (derived
 /// from its committed state), so a spend built against the returned handle is
@@ -35,16 +35,12 @@ pub fn offline_client() -> Client {
 /// outpoints when a caller fake-funds several instances.
 pub fn fund_fake(
     contract: Arc<dyn ErasedContract>,
-    expanded: Option<Box<dyn ErasedState>>,
+    state: impl ContractState + 'static,
     amount: Amount,
     seed: u8,
 ) -> InstanceHandle {
-    let instance = Rc::new(RefCell::new(
-        ContractInstance::new(contract, expanded).expect("state matches contract"),
-    ));
-    let script_pubkey = instance
-        .borrow()
-        .script_pubkey()
+    let script_pubkey = contract
+        .script_pubkey(&state.commitment())
         .expect("contract script_pubkey");
     let funding_tx = Transaction {
         version: bitcoin::transaction::Version::TWO,
@@ -59,8 +55,10 @@ pub fn fund_fake(
         txid: funding_tx.compute_txid(),
         vout: 0,
     };
-    instance.borrow_mut().mark_funded(outpoint, funding_tx);
-    InstanceHandle::new(instance)
+    let instance =
+        ContractInstance::funded(contract, Box::new(state), outpoint, Arc::new(funding_tx))
+            .expect("state matches contract");
+    InstanceHandle::new(Rc::new(RefCell::new(instance)))
 }
 
 /// Build the batch transaction for `builders` and decode it against each of

@@ -22,7 +22,7 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, ClauseOutput, PaymentOutput};
 use mattrs::{
-    ContractParams, ContractState, Signature, contract, contracts::CCV_FLAG_CHECK_INPUT,
+    ContractState, Signature, contract, contracts::CCV_FLAG_CHECK_INPUT,
     contracts::CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, internal_key_or_nums, optional_key_script,
 };
 
@@ -47,7 +47,7 @@ fn recovery_output(index: i64, key: XOnlyPublicKey) -> Result<PaymentOutput, Cla
 // Vault Parameters & State
 // ============================================================================
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct VaultParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
@@ -55,7 +55,7 @@ pub struct VaultParams {
     pub unvault_pk: XOnlyPublicKey,
 }
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct UnvaultingParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
@@ -178,27 +178,27 @@ impl Vault {
         ])
     }
 
-    fn trigger_script(params: &VaultParams) -> ScriptBuf {
-        let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
-            .expect("Unvaulting contract definition is valid")
-            .taptree_root();
+    fn trigger_script(params: &VaultParams) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let unvaulting_taptree_root =
+            Unvaulting::new(Self::unvaulting_params(params))?.taptree_root();
 
-        script! {
+        Ok(script! {
             { optional_key_script(params.alternate_pk) }
             { unvaulting_taptree_root }
             0
             CHECKCONTRACTVERIFY
             { params.unvault_pk }
             CHECKSIG
-        }
+        })
     }
 
-    fn trigger_and_revault_script(params: &VaultParams) -> ScriptBuf {
-        let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
-            .expect("Unvaulting contract definition is valid")
-            .taptree_root();
+    fn trigger_and_revault_script(
+        params: &VaultParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let unvaulting_taptree_root =
+            Unvaulting::new(Self::unvaulting_params(params))?.taptree_root();
 
-        script! {
+        Ok(script! {
             0 OP_SWAP
             -1
             -1
@@ -210,7 +210,7 @@ impl Vault {
             CHECKCONTRACTVERIFY
             { params.unvault_pk }
             CHECKSIG
-        }
+        })
     }
 
     fn recover_script(params: &VaultParams) -> ScriptBuf {
@@ -245,7 +245,6 @@ contract! {
             timelock |p| p.spend_delay;
             script Unvaulting::withdraw_script;
             next(_p, a, s) {
-                let s = s.ok_or(mattrs::contracts::ContractError::MissingState)?;
                 if a.ctv_hash != s.ctv_hash {
                     return Err(ClauseError::Other("withdrawal hash does not match committed state".into()));
                 }

@@ -366,6 +366,8 @@ impl<const N: usize> WitProof<N> {
 }
 
 impl<const N: usize> WitnessEncodable for WitProof<N> {
+    const ELEMENTS: Option<usize> = Some(2 * N + 1);
+
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
         let mut stack = Vec::with_capacity(2 * N + 1);
         for i in 0..N {
@@ -460,14 +462,7 @@ impl ArgType for MerkleProofType {
         Ok(needed)
     }
 
-    fn witness_elements(&self) -> usize {
-        self.depth
-            .checked_mul(2)
-            .and_then(|n| n.checked_add(1))
-            .expect("Merkle proof depth is too large")
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ArgType> {
-        Box::new(self.clone())
+    fn witness_elements(&self) -> Option<usize> {
+        self.depth.checked_mul(2)?.checked_add(1)
     }
 }

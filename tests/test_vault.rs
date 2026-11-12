@@ -30,7 +30,7 @@ fn test_vault_address_is_stable() {
     })
     .unwrap();
 
-    let internal_key = vault.contract().internal_pubkey();
+    let internal_key = vault.contract().naked_internal_pubkey();
     let taptree_hash = TapNodeHash::from_byte_array(vault.contract().taptree().root_hash());
 
     let address = Address::p2tr(&secp, internal_key, Some(taptree_hash), KnownHrp::Regtest);
@@ -102,7 +102,7 @@ fn test_vault_trigger_outputs() {
         "Output index should be 0"
     );
     assert!(
-        outputs[0].next_state.is_some(),
+        !outputs[0].state_commitment().is_empty(),
         "Unvaulting should have state"
     );
 }
@@ -119,7 +119,7 @@ fn test_vault_rejects_negative_output_indices() {
         unvault_pk: alice_pk(),
     })
     .unwrap();
-    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, 9));
+    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 9));
     let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     let err = handle.trigger([0; 32], -1).build_tx(&manager).unwrap_err();
@@ -160,11 +160,11 @@ fn test_vault_trigger_and_revault_outputs() {
         "Unvaulting output index should be 0"
     );
     assert!(
-        outputs[0].next_state.is_none(),
+        outputs[0].state_commitment().is_empty(),
         "Revault (vault) has no state"
     );
     assert!(
-        outputs[1].next_state.is_some(),
+        !outputs[1].state_commitment().is_empty(),
         "Unvaulting should have state"
     );
 }
@@ -187,7 +187,7 @@ fn test_trigger_without_signer_errors() {
     let vault = Vault::new(params).unwrap();
 
     // Fake a funded instance so the tx can be built (and a prevout exists).
-    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, 0));
+    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 0));
 
     let client = offline_client();
     let manager = ContractManager::new(client, bitcoin::Network::Regtest);
@@ -224,7 +224,7 @@ fn test_batch_merges_and_deducts_outputs() {
 
     // Fund three vault instances of 100_000 sat each (same address, distinct txids).
     let funded =
-        |seed: u8| try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, seed));
+        |seed: u8| try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, seed));
     let h1 = funded(1);
     let h2 = funded(2);
     let h3 = funded(3);
@@ -277,7 +277,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let vault_contract = Vault::new(params.clone())?;
-    let internal_key = vault_contract.contract().internal_pubkey();
+    let internal_key = vault_contract.contract().naked_internal_pubkey();
     let taptree_hash =
         TapNodeHash::from_byte_array(vault_contract.contract().taptree().root_hash());
 
@@ -327,9 +327,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     // The child Unvaulting instance is funded and carries the ctv_hash as its state.
     assert_eq!(unvaulting.handle().status(), InstanceStatus::Funded);
-    let state = unvaulting
-        .state()
-        .expect("Unvaulting instance should have state");
+    let state = unvaulting.state();
     assert_eq!(state.ctv_hash, ctv_hash);
 
     let withdraw_outputs: Vec<bitcoin::TxOut> = ctv_template
@@ -342,7 +340,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     // Try to withdraw BEFORE the spend_delay - should fail (non-BIP68-final).
     let withdraw_result_early = unvaulting
-        .withdraw()?
+        .withdraw()
         .outputs(withdraw_outputs.clone())
         .exec_none(&mut manager);
 
@@ -363,7 +361,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     // Now withdraw AFTER the spend_delay - should succeed; terminal (no children).
     unvaulting
-        .withdraw()?
+        .withdraw()
         .outputs(withdraw_outputs)
         .exec_none(&mut manager)?;
 
@@ -393,7 +391,7 @@ fn test_observe_spend_decodes_clause_and_children() {
     // The actor builds (but does not broadcast) a trigger spend.
     let actor_client = offline_client();
     let actor_manager = ContractManager::new(actor_client, bitcoin::Network::Regtest);
-    let actor_handle: support::vault::VaultHandle = fund_fake(vault.as_erased(), None, 100_000, 7)
+    let actor_handle: support::vault::VaultHandle = fund_fake(vault.as_erased(), (), 100_000, 7)
         .try_into()
         .unwrap();
     let tx = actor_handle
@@ -405,7 +403,7 @@ fn test_observe_spend_decodes_clause_and_children() {
     // The observer holds its own instance of the same (deterministic) funding.
     let observer_client = offline_client();
     let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
-    let observed = fund_fake(vault.as_erased(), None, 100_000, 7);
+    let observed = fund_fake(vault.as_erased(), (), 100_000, 7);
 
     let children = observer.observe_spend(&observed, &tx).unwrap();
 
@@ -457,7 +455,7 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     let revault_amount = Amount::from_sat(30_000);
 
     let funded =
-        |seed: u8| try_handle::<VaultHandle>(fund_fake(vault.as_erased(), None, 100_000, seed));
+        |seed: u8| try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, seed));
     let h1 = funded(1);
     let h2 = funded(2);
 
@@ -473,8 +471,8 @@ fn test_observe_batch_spend_decodes_all_inputs() {
 
     // The observer holds its own twin instances (same deterministic outpoints).
     let mut observer = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
-    let o1 = fund_fake(vault.as_erased(), None, 100_000, 1);
-    let o2 = fund_fake(vault.as_erased(), None, 100_000, 2);
+    let o1 = fund_fake(vault.as_erased(), (), 100_000, 1);
+    let o2 = fund_fake(vault.as_erased(), (), 100_000, 2);
 
     let children1 = observer.observe_spend(&o1, &tx).unwrap();
     let children2 = observer.observe_spend(&o2, &tx).unwrap();
@@ -492,10 +490,7 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     assert_eq!(children2.len(), 1);
     assert!(children1.contains(&children2[0]));
     // The merged unvaulting holds both inputs' amounts, net of the revault.
-    assert_eq!(
-        children2[0].prevout().unwrap().value,
-        Amount::from_sat(170_000)
-    );
+    assert_eq!(children2[0].prevout().value, Amount::from_sat(170_000));
 }
 
 /// The parent's recorded children (used to check no duplicates were created).

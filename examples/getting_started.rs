@@ -17,7 +17,7 @@ use bitcoin_script::{define_pushable, script};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use mattrs::testutil::{fund_fake, offline_client};
-use mattrs::{ContractParams, Signature, contract};
+use mattrs::{Signature, contract};
 
 define_pushable!();
 
@@ -25,7 +25,7 @@ define_pushable!();
 // Contract definition
 // ============================================================================
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct TimeLockParams {
     pub owner_pk: XOnlyPublicKey,
     pub recover_pk: XOnlyPublicKey,
@@ -113,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    `mattrs::testutil`); against a real node you would use
     //    `timelock.fund(&mut manager, amount)` instead.
     let handle: TimeLockHandle =
-        fund_fake(timelock.as_erased(), None, Amount::from_sat(100_000), 1).try_into()?;
+        fund_fake(timelock.as_erased(), (), Amount::from_sat(100_000), 1).try_into()?;
 
     // 3. Build the withdraw spend. The signature argument is filled automatically
     //    from the registered signer — no placeholder is ever written by hand.

@@ -15,14 +15,14 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::{ClauseError, ClauseOutput};
-use mattrs::{ContractParams, ContractState, contract};
+use mattrs::{ContractState, contract};
 
 use mattrs::merkle::{WitProof, floor_lg};
 use mattrs::script_helpers::{check_input_contract, concat};
 
 define_pushable!();
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct RamParams {
     /// The number of cells; must be a power of two. (This port fixes it to 4.)
     pub size: i64,
@@ -60,9 +60,7 @@ contract! {
             }
             script Ram::write_script;
             next(p, a, s) {
-                let state = s.ok_or_else(|| {
-                    ClauseError::Other("RAM write needs the cell state".to_string())
-                })?;
+                let state = s;
                 let index = a
                     .proof
                     .leaf_index()

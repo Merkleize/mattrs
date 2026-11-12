@@ -84,7 +84,7 @@ impl Stage {
                 short(&xonly(&user_xpriv(i)).serialize())
             );
         }
-        println!("  Unwind funded at {}", unwind.handle().outpoint().unwrap());
+        println!("  Unwind funded at {}", unwind.handle().outpoint());
 
         Ok(Stage {
             manager,
@@ -204,7 +204,7 @@ fn scenario_direct(wallet: &str) -> DemoResult {
     let mut after = stage.pool.clone();
     after.zero(2);
     let next: UnwindHandle = children.typed(1)?;
-    assert_eq!(next.state().unwrap().root, after.root());
+    assert_eq!(next.state().root, after.root());
     println!(
         "  user 2 takes {} sats; the pool continues with {} sats at root {}",
         BALANCES[2],
@@ -219,7 +219,7 @@ fn scenario_direct(wallet: &str) -> DemoResult {
         .exec(&mut stage.manager)?;
     after.zero(5);
     let next: UnwindHandle = children.typed(1)?;
-    assert_eq!(next.state().unwrap().root, after.root());
+    assert_eq!(next.state().root, after.root());
     println!(
         "  user 5 takes {} sats; the pool continues with {} sats",
         BALANCES[5],
@@ -240,7 +240,7 @@ fn scenario_happy(wallet: &str) -> DemoResult {
         .output_amount(0, Amount::from_sat((claim.x + BOND) as u64))
         .exec(&mut stage.manager)?;
     let continued: UnwindHandle = children.typed(1)?;
-    assert_eq!(continued.state().unwrap().root, claim.r_prime);
+    assert_eq!(continued.state().root, claim.r_prime);
     println!(
         "  Ingrid takes {} sats (aggregate {} + bond {}); the pool continues with {} sats at R' {}",
         claim.x + BOND,
@@ -274,7 +274,7 @@ fn scenario_fraud(wallet: &str) -> DemoResult {
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
     let reverted: UnwindHandle = children.typed(2)?;
-    assert_eq!(reverted.state().unwrap().root, stage.pool.root());
+    assert_eq!(reverted.state().root, stage.pool.root());
     println!(
         "  step 4 re-run on-chain: Ingrid lied. The challenger takes {} sats (their bond back + half of Ingrid's), {} sats are burned,",
         BOND + BOND / 2,
@@ -305,7 +305,7 @@ fn scenario_false_challenge(wallet: &str) -> DemoResult {
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
     let resumed: PendingExitHandle = children.typed(2)?;
-    assert_eq!(resumed.state().unwrap(), claim_state);
+    assert_eq!(resumed.state(), claim_state);
     println!(
         "  step 2 re-run on-chain: the claim was honest. Ingrid pockets {} sats of the challenger's bond, {} are burned,",
         BOND / 2,
@@ -353,7 +353,7 @@ fn scenario_delegation_defend(wallet: &str) -> DemoResult {
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
     let resumed: PendingExitHandle = children.typed(2)?;
-    assert_eq!(resumed.state().unwrap(), claim_state);
+    assert_eq!(resumed.state(), claim_state);
     println!(
         "  Ingrid reveals user 2's delegation signature (verified with OP_CHECKSIGFROMSTACK):"
     );
@@ -399,7 +399,7 @@ fn scenario_delegation_timeout(wallet: &str) -> DemoResult {
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
     let reverted: UnwindHandle = children.typed(2)?;
-    assert_eq!(reverted.state().unwrap().root, stage.pool.root());
+    assert_eq!(reverted.state().root, stage.pool.root());
     println!(
         "  user 3 collects {} sats (their bond back + half of Ingrid's), {} sats are burned,",
         BOND + BOND / 2,

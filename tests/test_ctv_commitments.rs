@@ -24,9 +24,9 @@ fn fixture() -> (UnvaultingHandle, CtvTemplate) {
     .unwrap();
     let handle = mattrs::testutil::fund_fake(
         contract.as_erased(),
-        Some(Box::new(UnvaultingState {
+        UnvaultingState {
             ctv_hash: template.ctv_hash(),
-        })),
+        },
         Amount::from_sat(10_000),
         1,
     )
@@ -39,10 +39,9 @@ fn fixture() -> (UnvaultingHandle, CtvTemplate) {
 fn construction_checks_the_committed_outputs_and_sequence() {
     let (handle, template) = fixture();
     let manager = offline_manager();
-    assert!(handle.withdraw().unwrap().build_tx(&manager).is_err());
+    assert!(handle.withdraw().build_tx(&manager).is_err());
     let tx = handle
         .withdraw()
-        .unwrap()
         .outputs(template.outputs.clone())
         .build_tx(&manager)
         .unwrap();
@@ -54,11 +53,7 @@ fn construction_checks_the_committed_outputs_and_sequence() {
     wrong_script[0].script_pubkey = ScriptBuf::new();
     for outputs in [wrong_amount, wrong_script] {
         assert!(matches!(
-            handle
-                .withdraw()
-                .unwrap()
-                .outputs(outputs)
-                .build_tx(&manager),
+            handle.withdraw().outputs(outputs).build_tx(&manager),
             Err(ManagerError::CtvTemplateMismatch { input_index: 0 })
         ));
     }
@@ -66,7 +61,6 @@ fn construction_checks_the_committed_outputs_and_sequence() {
     assert!(matches!(
         handle
             .withdraw()
-            .unwrap()
             .outputs(template.outputs)
             .sequence(11)
             .build_tx(&manager),
@@ -81,7 +75,6 @@ fn observation_checks_every_committed_transaction_field_before_marking_spent() {
     let mut manager = offline_manager();
     let tx = handle
         .withdraw()
-        .unwrap()
         .outputs(template.outputs)
         .build_tx(&manager)
         .unwrap();
@@ -135,7 +128,6 @@ fn withdrawal_cannot_replace_the_hash_revealed_from_state() {
     );
     let mut tx = handle
         .withdraw()
-        .unwrap()
         .outputs(template.outputs)
         .build_tx(&manager)
         .unwrap();
@@ -151,7 +143,7 @@ fn hash_only_templates_cannot_be_batched_by_the_builder() {
     let (handle, template) = fixture();
     let other: UnvaultingHandle = mattrs::testutil::fund_fake(
         Unvaulting::new(handle.params()).unwrap().as_erased(),
-        Some(Box::new(handle.state().unwrap())),
+        handle.state(),
         Amount::from_sat(10_000),
         2,
     )
@@ -159,14 +151,14 @@ fn hash_only_templates_cannot_be_batched_by_the_builder() {
     .unwrap();
     // Check both with and without explicit outputs on the hash-only input.
     for explicit in [false, true] {
-        let builder = handle.withdraw().unwrap();
+        let builder = handle.withdraw();
         let builder = if explicit {
             builder.outputs(template.outputs.clone())
         } else {
             builder
         };
         let err = offline_manager()
-            .build_batch_tx(&[builder, other.withdraw().unwrap()])
+            .build_batch_tx(&[builder, other.withdraw()])
             .unwrap_err();
         assert!(
             matches!(err, ManagerError::TransactionBuildError(ref message)

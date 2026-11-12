@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use bitcoin::bip32::Xpriv;
 use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
-use mattrs::manager::{InstanceHandle, ManagerError};
+use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{Action, ProtocolError, Role, StepCtx};
 use mattrs::signer::HotSigner;
 
@@ -95,22 +95,20 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
         })
         .on::<Unvaulting, _>(|d: &mut OwnerData, h: UnvaultingHandle, _cx| {
             let p = h.params();
-            let state = h.state().ok_or_else(|| {
-                ProtocolError::Other("an Unvaulting instance carries its CTV hash".into())
-            })?;
+            let state = h.state();
             // Looked up, not consumed: two planned branches may commit to the
             // *same* template (equal outputs ⇒ equal CTV hash), and each must
             // still find its withdrawal here.
             let outputs = d.withdrawals.get(&state.ctv_hash).cloned().ok_or_else(|| {
                 ProtocolError::Other("unvaulting with a CTV hash the owner never planned".into())
             })?;
-            let amount = h.handle().prevout().ok_or(ManagerError::NotFunded)?.value;
+            let amount = h.handle().prevout().value;
             // Nobody should spend this branch before us; the CSV delay is what
             // gates the withdrawal, so it rides the timeout fallback (which
             // also sets the withdrawal's sequence to the same delay).
             Ok(Action::wait_or_send_final(
                 p.spend_delay,
-                h.withdraw()?.outputs(outputs),
+                h.withdraw().outputs(outputs),
                 VaultOutcome::Withdrawn { amount },
             ))
         })
@@ -130,13 +128,11 @@ pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
     Role::new()
         .on::<Vault, _>(|_d: &mut WatchtowerData, _h: VaultHandle, _cx| Ok(Action::Wait))
         .on::<Unvaulting, _>(|d: &mut WatchtowerData, h: UnvaultingHandle, _cx| {
-            let state = h.state().ok_or_else(|| {
-                ProtocolError::Other("an Unvaulting instance carries its CTV hash".into())
-            })?;
+            let state = h.state();
             if d.authorized.contains(&state.ctv_hash) {
                 return Ok(Action::Wait);
             }
-            let amount = h.handle().prevout().ok_or(ManagerError::NotFunded)?.value;
+            let amount = h.handle().prevout().value;
             Ok(Action::SendFinal(
                 h.recover(0),
                 VaultOutcome::Recovered { amount },
@@ -180,5 +176,5 @@ fn settled_unvaulting(
 
 /// The branch's UTXO value.
 fn branch_amount(handle: &InstanceHandle) -> Result<Amount, ProtocolError> {
-    Ok(handle.prevout().ok_or(ManagerError::NotFunded)?.value)
+    Ok(handle.prevout().value)
 }

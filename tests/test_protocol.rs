@@ -46,13 +46,13 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
 
     let alice_entry = fund_fake(
         RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        None,
+        (),
         pot,
         SEED,
     );
     let bob_entry = fund_fake(
         RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        None,
+        (),
         pot,
         SEED,
     );
@@ -123,7 +123,7 @@ fn missing_handler_is_reported() {
         (),
         fund_fake(
             RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-            None,
+            (),
             pot,
             SEED,
         ),
@@ -140,7 +140,7 @@ fn missing_handler_is_reported() {
         },
         fund_fake(
             RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-            None,
+            (),
             pot,
             SEED,
         ),
@@ -171,13 +171,13 @@ fn action_cannot_spend_a_different_token() {
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
     let entry = fund_fake(
         RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        None,
+        (),
         pot,
         31,
     );
     let other: RpsGameS0Handle = fund_fake(
         RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        None,
+        (),
         pot,
         32,
     )
@@ -192,12 +192,7 @@ fn action_cannot_spend_a_different_token() {
     assert!(matches!(&err, ProtocolError::Other(msg) if msg.contains("different instance")));
     assert_eq!(runner.state(), RunnerState::Failed);
     assert_eq!(runner.failed_at(), Some(&entry));
-    assert!(
-        chain
-            .find_spending_tx(entry.outpoint().unwrap())
-            .unwrap()
-            .is_none()
-    );
+    assert!(chain.find_spending_tx(entry.outpoint()).unwrap().is_none());
 }
 
 #[test]
@@ -207,7 +202,7 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
 
     let zero_entry = fund_fake(
         RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        None,
+        (),
         pot,
         41,
     );
@@ -236,11 +231,11 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     let chain = Rc::new(LocalChain::new());
     let entry = fund_fake(
         RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        None,
+        (),
         pot,
         42,
     );
-    let txid = entry.outpoint().unwrap().txid;
+    let txid = entry.outpoint().txid;
     chain.assume_confirmed(txid, 5);
     let role: Role<(), ()> = Role::new().on::<RpsGameS0, _>(|_d, _h, _cx| {
         Ok(Action::WaitWithTimeout {

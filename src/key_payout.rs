@@ -26,7 +26,6 @@ use crate::script_helpers::opaque_p2tr;
 pub struct KeyPayout {
     pk: XOnlyPublicKey,
     name: &'static str,
-    params_bytes: Vec<u8>,
     taptree: Arc<TapTree>,
 }
 
@@ -46,7 +45,6 @@ impl KeyPayout {
         KeyPayout {
             pk,
             name,
-            params_bytes: pk.serialize().to_vec(),
             // Placeholder: a KeyPayout has no script paths; the taptree is
             // never part of its scriptPubKey (the key is used verbatim).
             taptree: Arc::new(TapTree::leaf("none", ScriptBuf::new())),
@@ -59,8 +57,8 @@ impl ErasedContract for KeyPayout {
         &[]
     }
 
-    fn params_bytes(&self) -> &[u8] {
-        &self.params_bytes
+    fn params_any(&self) -> &dyn std::any::Any {
+        &self.pk
     }
 
     fn get_clause(&self, _name: &str) -> Option<&Arc<dyn ErasedClause>> {
@@ -71,7 +69,7 @@ impl ErasedContract for KeyPayout {
         &self,
         clause_name: &str,
         _witness: &[Vec<u8>],
-        _state: Option<&dyn ErasedState>,
+        _state: &dyn ErasedState,
     ) -> Result<NextOutputs, ClauseError> {
         Err(ClauseError::Other(format!(
             "{} has no clause {clause_name}",
@@ -87,30 +85,23 @@ impl ErasedContract for KeyPayout {
         self.name
     }
 
-    fn state_type_id(&self) -> Option<std::any::TypeId> {
-        None
+    fn state_type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<()>()
     }
 
-    fn script_pubkey(
-        &self,
-        _commitment: Option<&StateCommitment>,
-    ) -> Result<ScriptBuf, ContractError> {
+    fn script_pubkey(&self, _commitment: &StateCommitment) -> Result<ScriptBuf, ContractError> {
         Ok(opaque_p2tr(self.pk))
     }
 
     fn control_block_internal_key(
         &self,
-        _commitment: Option<&StateCommitment>,
+        _commitment: &StateCommitment,
     ) -> Result<XOnlyPublicKey, ContractError> {
         Ok(self.pk)
     }
 
     fn taptree(&self) -> &Arc<TapTree> {
         &self.taptree
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ErasedContract> {
-        Box::new(self.clone())
     }
 }
 

@@ -6,7 +6,7 @@ use super::validation::{
 };
 use super::{ManagerError, SpendBuilder};
 use crate::contracts::{
-    ClauseOutputAmountBehaviour, ContractInstance, InstanceStatus, NextOutputs,
+    ClauseOutputAmountBehaviour, InstanceStatus, NextOutputs, check_state_type,
 };
 use bitcoin::{Amount, Sequence, Transaction, TxIn, TxOut};
 use std::collections::BTreeMap;
@@ -52,10 +52,10 @@ pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, Manage
 
     for builder in builders {
         let inst = builder.instance.borrow();
-        if inst.status() != InstanceStatus::Funded {
-            return Err(ManagerError::NotFunded);
+        let outpoint = inst.outpoint();
+        if inst.status() == InstanceStatus::Spent {
+            return Err(ManagerError::AlreadySpent(outpoint));
         }
-        let outpoint = inst.outpoint().ok_or(ManagerError::NotFunded)?;
         if tx_inputs
             .iter()
             .any(|input: &TxIn| input.previous_output == outpoint)
@@ -65,7 +65,7 @@ pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, Manage
                 outpoint
             )));
         }
-        let prevout = inst.prevout().ok_or(ManagerError::NotFunded)?;
+        let prevout = inst.prevout().clone();
         let clause = inst
             .contract()
             .get_clause(builder.clause_name)
@@ -86,9 +86,9 @@ pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, Manage
         )?;
         if let NextOutputs::Contracts(outputs) = &next {
             for output in outputs {
-                // Validate state presence and concrete type before a
-                // transaction can be broadcast.
-                ContractInstance::new(output.next_contract.clone(), output.next_state.clone())?;
+                // Validate the state's concrete type before a transaction
+                // can be broadcast.
+                check_state_type(output.next_contract.as_ref(), output.next_state.as_ref())?;
             }
         }
         nexts.push(next);

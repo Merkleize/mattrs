@@ -2,11 +2,11 @@
 
 use super::signing::input_witness;
 use super::*;
-use crate::contracts::NextOutputs;
 use crate::contracts::{
     ClauseOutput, ClauseOutputAmountBehaviour, ErasedContract, InstanceStatus, OutputIndex,
 };
 use crate::contracts::{ClauseTree, PaymentOutput, RawArgs, StandardClause, StandardP2TR};
+use crate::contracts::{NextOutputs, StateCommitment};
 use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut};
 use bitcoincore_rpc::Client;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ fn contract(tag: i64, next: NextOutputs) -> Arc<dyn ErasedContract> {
         Some(Arc::new(move |_, _, _| Ok(next.clone()))),
     );
     Arc::new(
-        StandardP2TR::new(
+        StandardP2TR::<_>::new(
             "ObservationTest",
             crate::nums_key(),
             &(),
@@ -46,7 +46,7 @@ fn contract(tag: i64, next: NextOutputs) -> Arc<dyn ErasedContract> {
 }
 
 fn fund(tag: u8, value: Amount, next: NextOutputs) -> InstanceHandle {
-    crate::testutil::fund_fake(contract(tag.into(), next), None, value, tag)
+    crate::testutil::fund_fake(contract(tag.into(), next), (), value, tag)
 }
 
 fn pay(value: Amount, tag: u8) -> InstanceHandle {
@@ -66,14 +66,14 @@ fn transaction(handles: &[&InstanceHandle], output: Vec<TxOut>) -> Transaction {
         input: handles
             .iter()
             .map(|h| TxIn {
-                previous_output: h.outpoint().unwrap(),
+                previous_output: h.outpoint(),
                 sequence: Sequence::ZERO,
                 ..Default::default()
             })
             .collect(),
         output,
     };
-    let prevouts: Vec<_> = handles.iter().map(|h| h.prevout().unwrap()).collect();
+    let prevouts: Vec<_> = handles.iter().map(|h| h.prevout()).collect();
     for (vin, handle) in handles.iter().enumerate() {
         tx.input[vin].witness =
             input_witness(&handle.spend_clause("spend", vec![]), &tx, vin, &prevouts).unwrap();
@@ -209,7 +209,7 @@ fn joins_contribute_value_and_link_without_a_second_observation_pass() {
         &[&a, &b],
         vec![TxOut {
             value: sat(10_000),
-            script_pubkey: dest.script_pubkey(None).unwrap(),
+            script_pubkey: dest.script_pubkey(&StateCommitment::empty()).unwrap(),
         }],
     );
     let mut manager = manager();
@@ -249,7 +249,7 @@ fn context_must_cover_every_input_exactly_once() {
     );
     let mut manager = manager();
     assert!(matches!(manager.observe_batch(&[&a], &tx),
-        Err(ManagerError::IncompleteObservation { missing }) if missing == vec![b.outpoint().unwrap()]));
+        Err(ManagerError::IncompleteObservation { missing }) if missing == vec![b.outpoint()]));
     assert!(manager.observe_batch(&[], &tx).is_err());
     assert!(manager.observe_batch(&[&a, &a], &tx).is_err());
     assert!(manager.observe_batch(&[&a, &b, &extra], &tx).is_err());
@@ -281,7 +281,7 @@ fn a_bad_later_witness_does_not_commit_an_earlier_parent_or_child() {
         &[&a, &b],
         vec![TxOut {
             value: sat(20_000),
-            script_pubkey: dest.script_pubkey(None).unwrap(),
+            script_pubkey: dest.script_pubkey(&StateCommitment::empty()).unwrap(),
         }],
     );
     let mut invalid = tx.clone();
@@ -316,20 +316,22 @@ fn a_late_child_registry_conflict_leaves_every_parent_unchanged() {
     );
     let output = TxOut {
         value: sat(10_000),
-        script_pubkey: dest.script_pubkey(None).unwrap(),
+        script_pubkey: dest.script_pubkey(&StateCommitment::empty()).unwrap(),
     };
     let tx = transaction(&[&a, &b], vec![output.clone(), output]);
     // Same nominal type/params, but an incompatible script at the second child:
     // identity checks alone must not allow reusing this cached instance.
     let wrong = contract(91, NextOutputs::Contracts(vec![]));
-    let mut existing = ContractInstance::new(wrong, None).unwrap();
-    existing.mark_funded(
+    let existing = ContractInstance::funded(
+        wrong,
+        Box::new(()),
         OutPoint {
             txid: tx.compute_txid(),
             vout: 1,
         },
-        tx.clone(),
-    );
+        Arc::new(tx.clone()),
+    )
+    .unwrap();
     let mut manager = manager();
     manager.instances.push(Rc::new(RefCell::new(existing)));
     assert!(matches!(

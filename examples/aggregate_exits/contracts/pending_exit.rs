@@ -128,7 +128,7 @@ contract! {
         // witness: <state...> <pe_taptree> <challenger_pk> <user_pk> <bal>
         //          (<sib_r_l> <sib_s_l> <d_l>) x depth
         clause challenge_delegation {
-            args raw |p| PendingExit::challenge_delegation_specs(p);
+            args raw PendingExit::challenge_delegation_specs;
             script PendingExit::challenge_delegation_script;
             next(p, a, s) {
                 PendingExit::challenge_delegation_outputs(p, &a.0, s)
@@ -236,7 +236,9 @@ impl PendingExit {
         specs
     }
 
-    fn challenge_state_script(p: &PoolParams) -> ScriptBuf {
+    fn challenge_state_script(
+        p: &PoolParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
         let mut s = StackScript::from_specs(&Self::challenge_state_specs());
 
         // Verify the state against the input, binding the witness copy of our
@@ -259,9 +261,7 @@ impl PendingExit {
         // Output 0 is the bisection game over the full step range.
         // TODO(OP_AMOUNT): enforce that output 0 carries the pot plus the
         // challenger's bond (`p.bond` sats on top of the input amount).
-        let b1_root = ExitBisect1::new(BisectRangeParams::entry(p))
-            .expect("ExitBisect1 contract definition is valid")
-            .taptree_root();
+        let b1_root = ExitBisect1::new(BisectRangeParams::entry(p))?.taptree_root();
         s.ccv(
             CcvData::Item("b1_state"),
             CcvIndex::at(0).expect("valid output index"),
@@ -269,17 +269,14 @@ impl PendingExit {
             CcvTaptree::Const(b1_root),
             CcvMode::Preserve,
         );
-        s.into_script()
+        Ok(s.into_script())
     }
 
     fn challenge_state_outputs(
         p: &PoolParams,
         witness: &[Vec<u8>],
-        state: Option<&PendingExitState>,
+        state: &PendingExitState,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("challenge_state needs the claim state".to_string())
-        })?;
         let mut w = WitnessReader::new(witness);
         w.skip(7)?; // the state fields; `state` already carries them decoded
         let ctx = ChallengeContext {
@@ -321,7 +318,9 @@ impl PendingExit {
         specs
     }
 
-    fn challenge_delegation_script(p: &PoolParams) -> ScriptBuf {
+    fn challenge_delegation_script(
+        p: &PoolParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
         let depth = p.depth();
         let mut s = StackScript::from_specs(&Self::challenge_delegation_specs(p));
 
@@ -354,9 +353,7 @@ impl PendingExit {
         );
         // TODO(OP_AMOUNT): enforce that output 0 carries the pot plus the
         // challenger's bond (`p.bond` sats on top of the input amount).
-        let dc_root = DelegationChallenge::new(p.clone())
-            .expect("DelegationChallenge contract definition is valid")
-            .taptree_root();
+        let dc_root = DelegationChallenge::new(p.clone())?.taptree_root();
         s.ccv(
             CcvData::Item("dc_state"),
             CcvIndex::at(0).expect("valid output index"),
@@ -364,17 +361,14 @@ impl PendingExit {
             CcvTaptree::Const(dc_root),
             CcvMode::Preserve,
         );
-        s.into_script()
+        Ok(s.into_script())
     }
 
     fn challenge_delegation_outputs(
         p: &PoolParams,
         witness: &[Vec<u8>],
-        state: Option<&PendingExitState>,
+        state: &PendingExitState,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("challenge_delegation needs the claim state".to_string())
-        })?;
         let mut w = WitnessReader::new(witness);
         w.skip(7)?; // the state fields; `state` already carries them decoded
         let pe_taptree = w.bytes32()?;
@@ -401,7 +395,6 @@ impl PendingExit {
 impl PendingExitHandle {
     fn claim_state(&self) -> PendingExitState {
         self.state()
-            .expect("PendingExit instances carry their claim state")
     }
 
     /// Settle the matured claim: output 0 pays Ingrid, output 1 continues the

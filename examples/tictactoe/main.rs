@@ -40,7 +40,6 @@ use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
-use mattrs::contracts::ErasedState;
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{ProtocolError, RpcChain, Runner};
 
@@ -217,7 +216,7 @@ fn run_alice(
         TttState::initial(),
     )?;
     let entry = game.handle().clone();
-    let outpoint = entry.outpoint().expect("just funded");
+    let outpoint = entry.outpoint();
     println!("Game funded at {outpoint}");
     send_json(
         &mut stream,
@@ -280,7 +279,7 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     maybe_enable_inspector(&mut manager, inspector)?;
     let entry = manager.track_instance(
         TicTacToe::new(params)?.as_erased(),
-        Some(Box::new(TttState::initial()) as Box<dyn ErasedState>),
+        TttState::initial(),
         outpoint,
     )?;
     println!("Tracking the game at {outpoint}");

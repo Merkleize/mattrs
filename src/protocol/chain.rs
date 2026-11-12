@@ -56,6 +56,22 @@ struct ScanState {
     blocks: BlockCache,
 }
 
+impl ScanState {
+    /// Bookkeeping after one look for a spend of `outpoint`. A found spend is
+    /// final for this scan, so its cursor is dropped: a cursor left behind
+    /// would pin the eviction floor at its height and retain every block
+    /// fetched afterwards. Blocks below every remaining cursor are evicted.
+    fn settle(&mut self, outpoint: OutPoint, found: bool) {
+        if found {
+            self.cursors.remove(&outpoint);
+        }
+        match self.cursors.values().copied().min() {
+            Some(min) => self.blocks.retain_from(min),
+            None => self.blocks.clear(),
+        }
+    }
+}
+
 impl RpcChain {
     /// Wrap an RPC client (e.g. from
     /// [`regtest_rpc_client`](crate::manager::regtest_rpc_client)).
@@ -83,10 +99,7 @@ impl ChainView for RpcChain {
             Entry::Vacant(e) => e.insert(spend_scan_start(&self.client, outpoint)?),
         };
         let found = find_spending_tx_once(&self.client, outpoint, cursor, blocks)?;
-        // Once every cursor is past a height, nobody will read it again.
-        if let Some(min) = cursors.values().copied().min() {
-            blocks.retain_from(min);
-        }
+        scan.settle(outpoint, found.is_some());
         Ok(found)
     }
 
@@ -234,6 +247,32 @@ mod tests {
             txid: Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([seed; 32])),
             vout: 0,
         }
+    }
+
+    #[test]
+    fn a_found_spend_releases_its_cursor_and_blocks() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let mut scan = ScanState::default();
+        scan.cursors.insert(outpoint(1), 10);
+        scan.cursors.insert(outpoint(2), 12);
+        for height in 10..=14 {
+            scan.blocks.insert(height, block.clone());
+        }
+
+        // Still waiting on both: everything from the lowest cursor is kept.
+        scan.settle(outpoint(2), false);
+        assert_eq!(scan.blocks.len(), 5);
+
+        // The lagging outpoint's spend is found: its cursor must not keep
+        // pinning the blocks only it still needed.
+        scan.settle(outpoint(1), true);
+        assert!(!scan.cursors.contains_key(&outpoint(1)));
+        assert_eq!(scan.blocks.len(), 3);
+
+        // Nothing left to watch: nothing left to cache.
+        scan.settle(outpoint(2), true);
+        assert!(scan.cursors.is_empty());
+        assert_eq!(scan.blocks.len(), 0);
     }
 
     #[test]

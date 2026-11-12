@@ -42,9 +42,10 @@ mod wallet;
 pub use builder::SpendBuilder;
 pub use chain::regtest_rpc_client;
 pub(crate) use chain::{
-    BlockCache, find_spending_tx_once, is_tx_not_found, spend_scan_start, tx_confirmation_height,
+    BlockCache, POLL_INTERVAL, find_spending_tx_once, is_tx_not_found, spend_scan_start,
+    tx_confirmation_height,
 };
-pub use error::{ManagerError, MissingStateError, WrongContractType};
+pub use error::{ManagerError, WrongContractType};
 pub use handles::{Children, InstanceHandle};
 use transaction::PreparedBatch;
 pub use wallet::{BatchObservation, ExternalInput, SignedWalletSpend, WalletSpend};
