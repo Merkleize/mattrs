@@ -2,7 +2,7 @@
 //!
 //! `SpendBuilder::build_tx` (and the batch `build_batch_tx`) perform no RPC, so a
 //! spend can be built and inspected offline against a fake-funded instance
-//! (`offline_client` + `fund_fake`). The `#[ignore]`d end-to-end tests use
+//! (`ContractManager::offline` + `fund_fake`). The `#[ignore]`d end-to-end tests use
 //! `regtest_client` against a real regtest `bitcoind` instead.
 
 use std::str::FromStr;
@@ -48,16 +48,10 @@ pub fn bob_pk() -> XOnlyPublicKey {
     xonly_of(&bob_xpriv())
 }
 
-/// An offline RPC client. It is never actually contacted — building (as opposed to
-/// broadcasting) a spend performs no RPC.
-pub fn offline_client() -> Client {
-    mattrs::testutil::offline_client()
-}
-
-/// A manager over an [`offline_client`], for tests driving protocols on a
+/// A manager with no node behind it, for tests driving protocols on a
 /// `LocalChain`.
 pub fn offline_manager() -> mattrs::manager::ContractManager {
-    mattrs::manager::ContractManager::new(offline_client(), bitcoin::Network::Regtest)
+    mattrs::manager::ContractManager::offline(bitcoin::Network::Regtest)
 }
 
 /// Interleave two parties' runners — one step each per round — until both

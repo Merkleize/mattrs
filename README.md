@@ -421,9 +421,10 @@ fragments (`mattrs::script_helpers`), `commit_int` (`mattrs::script_utils`),
 bare-key payout and burn outputs (the `ClauseOutput::pay_key` /
 `ClauseOutput::burn` constructors), a `WitnessReader`
 for parsing raw-args witnesses sequentially, the `opaque_merkle_state!` macro
-for expanded states committed as a Merkle root, and `offline_client()` /
-`fund_fake(..)` / `apply_batch(..)` for building and applying spends without a
-node (`mattrs::testutil`, used by the examples and fixtures).
+for expanded states committed as a Merkle root, and `fund_fake(..)` /
+`apply_batch(..)` for building and applying spends without a node
+(`mattrs::testutil`, used by the examples and fixtures, together with
+`ContractManager::offline(network)`).
 
 ## Demos
 

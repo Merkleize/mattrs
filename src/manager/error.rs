@@ -5,6 +5,9 @@ use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 /// Error type for manager operations.
 #[derive(Debug)]
 pub enum ManagerError {
+    /// The operation needs a node, but this manager was created
+    /// [`offline`](super::ContractManager::offline).
+    NoNode,
     RpcError(bitcoincore_rpc::Error),
     ClauseError(ClauseError),
     ContractError(ContractError),
@@ -130,6 +133,9 @@ pub enum ManagerError {
 impl std::fmt::Display for ManagerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ManagerError::NoNode => {
+                write!(f, "this manager is offline: the operation needs a node")
+            }
             ManagerError::RpcError(e) => write!(f, "RPC error: {}", e),
             ManagerError::ClauseError(e) => write!(f, "Clause error: {}", e),
             ManagerError::ContractError(e) => write!(f, "Contract error: {}", e),

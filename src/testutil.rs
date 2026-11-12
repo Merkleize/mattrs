@@ -4,27 +4,18 @@
 //! [`SpendBuilder::build_tx`](crate::manager::SpendBuilder::build_tx) (and the
 //! batch variant) perform no RPC, so a spend can be built and inspected against a
 //! *fake-funded* instance: [`fund_fake`] materializes an instance at a made-up
-//! outpoint paying the contract's own address, and [`offline_client`] supplies a
-//! [`ContractManager`] client that is never
-//! actually contacted. Drive real funding/spending against a live node with
-//! [`ContractManager`] instead.
+//! outpoint paying the contract's own address, and
+//! [`ContractManager::offline`] records spends with no node behind it. Drive
+//! real funding/spending against a live node with [`ContractManager::new`].
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use bitcoin::{Amount, OutPoint, Transaction, TxOut};
-use bitcoincore_rpc::{Auth, Client};
 
 use crate::contracts::{ContractInstance, ContractState, ErasedContract};
 use crate::manager::{Children, ContractManager, InstanceHandle, ManagerError, SpendBuilder};
-
-/// An RPC client that is never actually contacted: building (as opposed to
-/// broadcasting) a spend performs no RPC, so this lets a
-/// [`ContractManager`] run fully offline.
-pub fn offline_client() -> Client {
-    Client::new("http://127.0.0.1:1", Auth::None).expect("offline client is infallible")
-}
 
 /// Fake a funded instance of `contract` carrying `state` (`()` for a stateless
 /// contract) and holding `amount`, at a distinct outpoint keyed by `seed`.

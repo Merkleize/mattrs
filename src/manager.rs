@@ -60,8 +60,8 @@ pub fn build_batch_tx(builders: &[SpendBuilder]) -> Result<Transaction, ManagerE
 
 /// Manages contract instances and their lifecycle.
 pub struct ContractManager {
-    /// RPC client for blockchain interaction.
-    rpc: Client,
+    /// RPC client for blockchain interaction; `None` for an offline manager.
+    rpc: Option<Client>,
 
     /// The network the node runs on (used to derive contract addresses).
     network: bitcoin::Network,
@@ -83,7 +83,22 @@ impl ContractManager {
     /// `network` (used to derive contract addresses).
     pub fn new(rpc: Client, network: bitcoin::Network) -> Self {
         Self {
-            rpc,
+            rpc: Some(rpc),
+            ..Self::offline(network)
+        }
+    }
+
+    /// Create a manager with no node behind it. Everything that does not need
+    /// one works as usual: building and signing spends, recording spends
+    /// observed elsewhere ([`observe_spend`](Self::observe_spend),
+    /// [`observe_batch`](Self::observe_batch)), and executing spends through
+    /// an external broadcaster ([`spend_batch_with`](Self::spend_batch_with),
+    /// e.g. a protocol runner on a
+    /// [`LocalChain`](crate::protocol::LocalChain)). Operations that must
+    /// talk to a node return [`ManagerError::NoNode`].
+    pub fn offline(network: bitcoin::Network) -> Self {
+        Self {
+            rpc: None,
             network,
             instances: Vec::new(),
             #[cfg(feature = "inspector")]
@@ -93,9 +108,11 @@ impl ContractManager {
         }
     }
 
-    /// The RPC client, for callers that need direct access (e.g. mining or funding).
-    pub fn rpc(&self) -> &Client {
-        &self.rpc
+    /// The RPC client, for callers that need direct access (e.g. mining or
+    /// funding); [`ManagerError::NoNode`] for an [`offline`](Self::offline)
+    /// manager.
+    pub fn rpc(&self) -> Result<&Client, ManagerError> {
+        self.rpc.as_ref().ok_or(ManagerError::NoNode)
     }
     /// Spend several instances in one transaction (build, sign, broadcast), and
     /// return handles to the child instances created — one per merged output index.
@@ -112,7 +129,7 @@ impl ContractManager {
 
     /// Broadcast through this manager's own node.
     fn send_to_node(&self, tx: &Transaction) -> Result<(), ManagerError> {
-        self.rpc.send_raw_transaction(tx)?;
+        self.rpc()?.send_raw_transaction(tx)?;
         Ok(())
     }
 

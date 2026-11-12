@@ -51,7 +51,7 @@ impl ContractManager {
             .map_err(|e| ManagerError::Other(format!("Failed to create address: {}", e)))?;
 
         let txid = self
-            .rpc
+            .rpc()?
             .send_to_address(&address, amount, None, None, None, None, None, None)?;
 
         // Wait for the transaction to appear
@@ -75,14 +75,14 @@ impl ContractManager {
 
     /// Mine blocks (for regtest).
     pub fn mine_blocks(&self, n: u64) -> Result<(), ManagerError> {
-        let address = self.rpc.get_new_address(None, None)?.assume_checked();
-        self.rpc.generate_to_address(n, &address)?;
+        let address = self.rpc()?.get_new_address(None, None)?.assume_checked();
+        self.rpc()?.generate_to_address(n, &address)?;
         Ok(())
     }
 
     pub(super) fn wait_for_transaction(&self, txid: Txid) -> Result<Transaction, ManagerError> {
         poll_until(Some(DEFAULT_POLL_WINDOW), || {
-            match self.rpc.get_raw_transaction(&txid, None) {
+            match self.rpc()?.get_raw_transaction(&txid, None) {
                 Ok(tx) => Ok(Some(tx)),
                 Err(e) if is_tx_not_found(&e) => Ok(None), // not (yet) known to the node
                 Err(e) => Err(e.into()),
@@ -107,7 +107,7 @@ impl ContractManager {
     ) -> Result<InstanceHandle, ManagerError> {
         crate::contracts::check_state_type(contract.as_ref(), &state)?;
         let expected_spk = contract.script_pubkey(&state.commitment())?;
-        let funding_tx = self.rpc.get_raw_transaction(&outpoint.txid, None)?;
+        let funding_tx = self.rpc()?.get_raw_transaction(&outpoint.txid, None)?;
         let paid = funding_tx
             .output
             .get(outpoint.vout as usize)
@@ -213,10 +213,10 @@ impl ContractManager {
         outpoint: OutPoint,
         window: Option<Duration>,
     ) -> Result<Transaction, ManagerError> {
-        let mut next_height = spend_scan_start(&self.rpc, outpoint)?;
+        let mut next_height = spend_scan_start(self.rpc()?, outpoint)?;
         let mut blocks = BlockCache::default();
         poll_until(window, || {
-            let found = find_spending_tx_once(&self.rpc, outpoint, &mut next_height, &mut blocks);
+            let found = find_spending_tx_once(self.rpc()?, outpoint, &mut next_height, &mut blocks);
             // A single cursor never re-reads a scanned block.
             blocks.retain_from(next_height);
             found

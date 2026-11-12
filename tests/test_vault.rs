@@ -372,7 +372,7 @@ fn test_observe_spend_decodes_clause_and_children() {
     // tapscript, witness args recorded (and typed-decodable), and the child
     // instance materialized with its logical state. No node involved.
     use mattrs::signer::HotSigner;
-    use support::testkit::{alice_xpriv, fund_fake, offline_client};
+    use support::testkit::{alice_xpriv, fund_fake};
     use support::vault::{VaultClause, VaultSpend};
 
     let params = VaultParams {
@@ -395,8 +395,7 @@ fn test_observe_spend_decodes_clause_and_children() {
         .unwrap();
 
     // The observer holds its own instance of the same (deterministic) funding.
-    let observer_client = offline_client();
-    let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
+    let mut observer = ContractManager::offline(bitcoin::Network::Regtest);
     let observed = fund_fake(vault.as_erased(), (), 100_000, 7);
 
     assert!(actor_handle.spent().is_none());
@@ -440,7 +439,7 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     // instances decodes each input's clause — including at vin > 0 — and
     // materializes the merged child once, shared between both parents.
     use mattrs::signer::HotSigner;
-    use support::testkit::{alice_xpriv, fund_fake, offline_client, try_handle};
+    use support::testkit::{alice_xpriv, fund_fake, try_handle};
     use support::vault::VaultHandle;
 
     let params = VaultParams {
@@ -467,7 +466,7 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     .unwrap();
 
     // The observer holds its own twin instances (same deterministic outpoints).
-    let mut observer = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
+    let mut observer = ContractManager::offline(bitcoin::Network::Regtest);
     let o1 = fund_fake(vault.as_erased(), (), 100_000, 1);
     let o2 = fund_fake(vault.as_erased(), (), 100_000, 2);
 
@@ -554,4 +553,23 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
         seen.iter().map(|c| c.outpoint().vout).collect::<Vec<_>>(),
         [0, 1]
     );
+}
+
+/// An offline manager reports node operations as `NoNode` instead of trying to
+/// reach one.
+#[test]
+fn test_offline_manager_reports_node_operations() {
+    let mut manager = ContractManager::offline(bitcoin::Network::Regtest);
+    assert!(matches!(manager.rpc(), Err(ManagerError::NoNode)));
+    let vault = Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })
+    .unwrap();
+    assert!(matches!(
+        vault.fund(&mut manager, Amount::from_sat(1_000)),
+        Err(ManagerError::NoNode)
+    ));
 }

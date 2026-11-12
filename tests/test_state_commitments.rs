@@ -7,7 +7,7 @@ use mattrs::contracts::{
     StandardP2TR, StateCodec, StateCommitment,
 };
 use mattrs::manager::ContractManager;
-use mattrs::testutil::{fund_fake, offline_client};
+use mattrs::testutil::fund_fake;
 
 #[derive(Debug, Clone, mattrs::ContractState)]
 #[commit(identity)]
@@ -199,7 +199,7 @@ fn commitments_are_independent_of_optional_serialization() {
     assert_eq!(state.commitment().as_bytes(), [7; 32]);
     let handle = fund_fake(contract, state, Amount::from_sat(1_000), 0);
     assert!(handle.state::<NoCodecAccess>().is_some());
-    let mut manager = ContractManager::new(offline_client(), Network::Regtest);
+    let mut manager = ContractManager::offline(Network::Regtest);
     let tx = handle
         .spend_clause("spend", vec![])
         .outputs(vec![TxOut {

@@ -277,7 +277,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     let proof: WitProof<2> = new_tree.prove_leaf(2)?.to_wit_proof()?;
 
     use bitcoincore_rpc::RpcApi;
-    let dest = manager.rpc().get_new_address(None, None)?.assume_checked();
+    let dest = manager.rpc()?.get_new_address(None, None)?.assume_checked();
     child
         .withdraw(proof, new_tree.root())
         .outputs(vec![bitcoin::TxOut {

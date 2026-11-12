@@ -17,12 +17,12 @@ use super::*;
 use crate::contracts::{
     ClauseOutput, ClauseTree, CtvTemplate, NextOutputsFn, RawArgs, StandardClause, StandardP2TR,
 };
-use crate::testutil::{fund_fake, offline_client};
+use crate::testutil::fund_fake;
 use bitcoin::ScriptBuf;
 use std::sync::Arc;
 
 fn offline_manager() -> ContractManager {
-    ContractManager::new(offline_client(), bitcoin::Network::Regtest)
+    ContractManager::offline(bitcoin::Network::Regtest)
 }
 
 /// A one-request RPC endpoint: acknowledge and return the broadcast tx.
