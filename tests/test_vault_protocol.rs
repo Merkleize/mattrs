@@ -61,6 +61,20 @@ fn withdrawal(amount: Amount) -> Vec<TxOut> {
     }]
 }
 
+/// Step until every live token is waiting. One `Progress::Waiting` only says
+/// the token just stepped is waiting; which token that is depends on the order
+/// a fork's children are queued in, so wait for a full quiet round instead.
+fn step_until_all_wait<D: 'static, O: 'static>(runner: &mut Runner<D, O>) {
+    let mut quiet = 0;
+    while quiet < runner.tokens().len() {
+        match runner.step().expect("the runner steps") {
+            Progress::Advanced => quiet = 0,
+            Progress::Waiting => quiet += 1,
+            Progress::Done(_) => panic!("nothing can resolve before the CSV delay"),
+        }
+    }
+}
+
 #[test]
 fn revault_forks_and_both_branches_withdraw() {
     let chain = Rc::new(LocalChain::new());
@@ -91,13 +105,7 @@ fn revault_forks_and_both_branches_withdraw() {
     // The runner triggers both plan steps by itself: the first spend forks the
     // token (Unvaulting + revaulted Vault), the Vault child re-arrives and
     // triggers again. It then sits waiting out two CSV delays.
-    loop {
-        match owner.step().expect("owner steps") {
-            Progress::Advanced => continue,
-            Progress::Waiting => break,
-            Progress::Done(_) => panic!("nothing can resolve before the CSV delay"),
-        }
-    }
+    step_until_all_wait(&mut owner);
     assert_eq!(owner.tokens().len(), 2, "the trigger_and_revault forked");
     assert!(owner.current().is_none(), "several tokens in flight");
 
@@ -166,7 +174,7 @@ fn identical_templates_on_both_branches_withdraw() {
         fake_vault(SEED),
     );
 
-    while let Progress::Advanced = owner.step().expect("owner steps") {}
+    step_until_all_wait(&mut owner);
     assert_eq!(owner.tokens().len(), 2, "the trigger_and_revault forked");
 
     chain.mine(SPEND_DELAY + 1);

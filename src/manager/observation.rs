@@ -5,9 +5,9 @@ use super::validation::{
     validate_output_constraints,
 };
 use super::{Children, ContractManager, ExternalInput, InstanceHandle, ManagerError};
-use crate::contracts::{NextOutputs, SpendRecord};
-use bitcoin::{Amount, OutPoint, Transaction};
-use std::{collections::BTreeMap, sync::Arc};
+use crate::contracts::NextOutputs;
+use bitcoin::{Amount, Transaction};
+use std::collections::BTreeMap;
 
 /// Read-only result of authenticating a known input and resolving its metadata.
 pub(super) struct ObservedInput {
@@ -140,69 +140,23 @@ impl ContractManager {
     /// signatures, or establish confirmation/consensus validity. Re-observing a
     /// spend validates its witness again before returning cached children.
     /// A join whose defining input has not been observed yet can be retried.
+    /// Children are returned in output-index order, as for a batch.
     pub fn observe_spend(
         &mut self,
         handle: &InstanceHandle,
         spending_tx: &Transaction,
     ) -> Result<Children, ManagerError> {
-        let ObservedInput {
-            vin,
-            clause_name,
-            witness_args,
-            next,
-            already_spent,
-            ..
-        } = decode_observation(handle, spending_tx)?;
-        let txid = spending_tx.compute_txid();
-        if already_spent && !handle.outputs().is_empty() {
+        let observed = decode_observation(handle, spending_tx)?;
+        if observed.already_spent && !handle.outputs().is_empty() {
             return Ok(handle.outputs());
         }
-        // One shared copy for the parent's spend record and every child.
-        let spending_tx = &Arc::new(spending_tx.clone());
-
-        let children = match &next {
-            // A re-observed instance with no cached children got here only to
-            // retry a join link; its (childless) non-join clause has nothing
-            // to re-materialize.
-            NextOutputs::Outputs(_) if already_spent => Vec::new(),
-            NextOutputs::Outputs(outputs) => {
-                self.materialize_outputs(&handle.instance, outputs, spending_tx, vin)?
-            }
-            NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => Vec::new(),
-            // A joining input contributes to a child another input's clause
-            // defines: link it when that input's observation already
-            // materialized the child; otherwise return nothing (a later
-            // re-observation — after the defining input's — repairs the link).
-            NextOutputs::Join { index } => {
-                let outpoint = OutPoint { txid, vout: *index };
-                match self.find_instance_by_outpoint(outpoint) {
-                    Some(child) => {
-                        handle.instance.borrow_mut().add_output(child.clone());
-                        vec![child]
-                    }
-                    None => Vec::new(),
-                }
-            }
-        };
-
-        if !already_spent {
-            handle.instance.borrow_mut().mark_spent(SpendRecord::new(
-                spending_tx.clone(),
-                vin,
-                clause_name,
-                witness_args,
-            ));
-        }
-
-        #[cfg(feature = "inspector")]
-        self.notify_inspector();
-
-        Ok(Children::new(
-            children
-                .into_iter()
-                .map(|instance| InstanceHandle { instance })
-                .collect(),
-        ))
+        // The same staging as a complete batch, for this one input: its
+        // per-input constraints were validated while decoding. A joining
+        // input links to the child another input's clause defines when that
+        // input was already observed; otherwise it returns nothing, and a
+        // later re-observation repairs the link.
+        let staged = self.stage_batch_update(vec![observed], spending_tx)?;
+        Ok(staged.commit(self))
     }
 
     /// Validate and observe a complete batch of contract inputs, without RPC.

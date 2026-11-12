@@ -506,3 +506,64 @@ fn test_observe_batch_spend_decodes_all_inputs() {
 fn observer_instances_count(handle: &mattrs::manager::InstanceHandle) -> usize {
     handle.outputs().len()
 }
+
+/// A spend handed to an external broadcaster is staged first and recorded only
+/// if the broadcast succeeds; an actor and an observer of the same spend then
+/// list its children in the same (output-index) order.
+#[test]
+fn test_external_broadcast_is_staged_first_and_orders_children_like_observation() {
+    use mattrs::signer::HotSigner;
+    use support::testkit::{alice_xpriv, fund_fake, offline_manager, try_handle};
+    use support::vault::VaultHandle;
+
+    let vault = Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })
+    .unwrap();
+    let spend = |handle: &VaultHandle| {
+        // The clause declares the revault (output 1) before the unvaulting
+        // (output 0).
+        handle
+            .trigger_and_revault([7; 32], 0, 1)
+            .output_amount(1, Amount::from_sat(30_000))
+            .sign(HotSigner::new(alice_xpriv()))
+    };
+
+    // A refused broadcast leaves the instance untouched.
+    let mut actor = offline_manager();
+    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 11));
+    let refused = actor.spend_batch_with(&[spend(&handle)], |_| {
+        Err(ManagerError::Other("the relay refused it".into()))
+    });
+    assert!(matches!(refused, Err(ManagerError::Other(_))));
+    assert_eq!(handle.handle().status(), InstanceStatus::Funded);
+    assert!(handle.handle().outputs().is_empty());
+
+    // An accepted one is recorded, with the transaction the broadcaster saw.
+    let mut sent = None;
+    let children = actor
+        .spend_batch_with(&[spend(&handle)], |tx| {
+            sent = Some(tx.clone());
+            Ok::<_, ManagerError>(())
+        })
+        .unwrap();
+    assert_eq!(handle.handle().status(), InstanceStatus::Spent);
+    let sent = sent.expect("the broadcaster ran");
+
+    // An observer of that transaction sees the same children, in the same order.
+    let mut observer = offline_manager();
+    let observed = fund_fake(vault.as_erased(), (), 100_000, 11);
+    let seen = observer.observe_spend(&observed, &sent).unwrap();
+    let outpoints = |children: &[mattrs::manager::InstanceHandle]| -> Vec<_> {
+        children.iter().map(|child| child.outpoint()).collect()
+    };
+    assert_eq!(outpoints(&children), outpoints(&seen));
+    assert_eq!(outpoints(&seen), outpoints(&observed.outputs()));
+    assert_eq!(
+        seen.iter().map(|c| c.outpoint().vout).collect::<Vec<_>>(),
+        [0, 1]
+    );
+}

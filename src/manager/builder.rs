@@ -41,7 +41,7 @@ impl SpendBuilder {
         if got != expected {
             return Err(ManagerError::UnexpectedOutputCount { expected, got });
         }
-        manager.execute_prepared(builders, prepared)
+        manager.execute_prepared(builders, prepared, ContractManager::send_to_node)
     }
 
     /// Register a signer (matched to the clause's signature args by public key).

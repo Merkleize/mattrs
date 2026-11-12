@@ -106,14 +106,39 @@ impl ContractManager {
     /// template clauses are single-input only and are rejected here.
     pub fn spend_batch(&mut self, builders: &[SpendBuilder]) -> Result<Children, ManagerError> {
         let prepared = transaction::prepare(builders)?;
-        self.execute_prepared(builders, prepared)
+        self.execute_prepared(builders, prepared, Self::send_to_node)
     }
 
-    fn execute_prepared(
+    /// Broadcast through this manager's own node.
+    fn send_to_node(&self, tx: &Transaction) -> Result<(), ManagerError> {
+        self.rpc.send_raw_transaction(tx)?;
+        Ok(())
+    }
+
+    /// Like [`spend_batch`](Self::spend_batch), but hands the signed
+    /// transaction to `broadcast` instead of this manager's own node — for
+    /// callers that reach the chain another way (a protocol runner's
+    /// [`ChainView`](crate::protocol::ChainView), a test chain, a relay).
+    ///
+    /// The order is the same as for `spend_batch`: the spend is fully
+    /// validated and staged *before* `broadcast` runs, and recorded only if it
+    /// returns `Ok`. A transaction this manager could not record is therefore
+    /// never sent, and a failed broadcast leaves the manager untouched.
+    pub fn spend_batch_with<E: From<ManagerError>>(
+        &mut self,
+        builders: &[SpendBuilder],
+        broadcast: impl FnOnce(&Transaction) -> Result<(), E>,
+    ) -> Result<Children, E> {
+        let prepared = transaction::prepare(builders)?;
+        self.execute_prepared(builders, prepared, |_, tx| broadcast(tx))
+    }
+
+    fn execute_prepared<E: From<ManagerError>>(
         &mut self,
         builders: &[SpendBuilder],
         prepared: PreparedBatch,
-    ) -> Result<Children, ManagerError> {
+        broadcast: impl FnOnce(&Self, &Transaction) -> Result<(), E>,
+    ) -> Result<Children, E> {
         let tx = signing::sign_prepared(builders, prepared)?;
         let handles: Vec<_> = builders
             .iter()
@@ -123,7 +148,7 @@ impl ContractManager {
             .collect();
         let staged = self.stage_batch(&handles.iter().collect::<Vec<_>>(), &[], &tx)?;
 
-        self.rpc.send_raw_transaction(&tx)?;
+        broadcast(self, &tx)?;
         Ok(staged.commit(self))
     }
 }

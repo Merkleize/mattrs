@@ -2,9 +2,7 @@
 use super::observation::ObservedInput;
 use super::validation::ContractOutputIdentity;
 use super::{Children, ContractManager, InstanceHandle, ManagerError};
-use crate::contracts::{
-    ClauseOutput, ContractInstance, NextOutputs, SpendRecord, check_state_type,
-};
+use crate::contracts::{ContractInstance, NextOutputs, SpendRecord, check_state_type};
 use bitcoin::{OutPoint, Transaction};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 
@@ -34,79 +32,6 @@ impl ContractManager {
             .find(|inst| inst.borrow().outpoint() == outpoint)
             .cloned()
     }
-
-    /// Materialize (and register) the child instances a spent parent's clause
-    /// outputs define, linking them to the parent. `vin` is the parent's input
-    /// index within `spending_tx` (which resolves [`CcvIndex::CURRENT`](crate::contracts::CcvIndex::CURRENT)). A child
-    /// already materialized at the same outpoint — e.g. a batch output merged
-    /// across inputs — is reused, not duplicated.
-    pub(super) fn materialize_outputs(
-        &mut self,
-        parent: &Rc<RefCell<ContractInstance>>,
-        outputs: &[ClauseOutput],
-        spending_tx: &Arc<Transaction>,
-        vin: usize,
-    ) -> Result<Vec<Rc<RefCell<ContractInstance>>>, ManagerError> {
-        let txid = spending_tx.compute_txid();
-        let mut resolved = Vec::with_capacity(outputs.len());
-        let mut identities = BTreeMap::new();
-
-        for clause_out in outputs {
-            // Plain payments are constrained, but never tracked as children.
-            let Some((contract, state)) = clause_out.contract() else {
-                continue;
-            };
-            let vout = clause_out.index.resolve(vin);
-            let outpoint = OutPoint { txid, vout };
-            let identity = ContractOutputIdentity::from_clause_output(contract, clause_out)?;
-            if identities
-                .get(&vout)
-                .is_some_and(|previous| previous != &identity)
-            {
-                return Err(ManagerError::ConflictingOutputContract { index: vout });
-            }
-            let actual = spending_tx
-                .output
-                .get(vout as usize)
-                .ok_or(ManagerError::MissingContractOutput(outpoint))?;
-            if actual.script_pubkey != identity.script_pubkey {
-                return Err(ManagerError::WrongContractOutput(outpoint));
-            }
-
-            if let Some(existing) = self.find_instance_by_outpoint(outpoint)
-                && ContractOutputIdentity::from_instance(&existing.borrow())? != identity
-            {
-                return Err(ManagerError::ConflictingOutputContract { index: vout });
-            }
-            identities.entry(vout).or_insert(identity);
-            resolved.push((contract, state, outpoint));
-        }
-
-        let mut children = Vec::with_capacity(resolved.len());
-        for (contract, state, outpoint) in resolved {
-            let child = match self.find_instance_by_outpoint(outpoint) {
-                Some(existing) => existing,
-                None => {
-                    // The child contract is self-describing, so its params come
-                    // from it; it also carries the logical state for its own
-                    // future spends.
-                    let instance = Rc::new(RefCell::new(ContractInstance::funded(
-                        contract.clone(),
-                        state.clone_boxed(),
-                        outpoint,
-                        spending_tx.clone(),
-                    )?));
-                    self.instances.push(instance.clone());
-                    instance
-                }
-            };
-
-            parent.borrow_mut().add_output(child.clone());
-            children.push(child);
-        }
-
-        Ok(children)
-    }
 }
 
 /// Validated lifecycle changes, held privately until broadcast succeeds.
@@ -131,6 +56,15 @@ impl ContractManager {
         let mut children: BTreeMap<u32, Rc<RefCell<ContractInstance>>> = BTreeMap::new();
         let mut new_children = Vec::new();
         for input in &observed {
+            // A join adds to a child another input defines. Within a complete
+            // batch that input stages it here; a join observed on its own links
+            // to the child only if it is already registered.
+            if let NextOutputs::Join { index } = &input.next
+                && !children.contains_key(index)
+                && let Some(child) = self.find_instance_by_outpoint(OutPoint { txid, vout: *index })
+            {
+                children.insert(*index, child);
+            }
             if let NextOutputs::Outputs(outputs) = &input.next {
                 for output in outputs {
                     // Plain payments are constrained, but never tracked.
@@ -199,23 +133,23 @@ impl StagedBatch {
         // Nothing below is fallible: all input metadata and children are staged.
         manager.instances.extend(new_children);
         for input in &observed {
-            let indices: Vec<_> = match &input.next {
+            // Output-index order, so a parent lists its children the way the
+            // spend's `Children` does.
+            let indices: std::collections::BTreeSet<u32> = match &input.next {
                 NextOutputs::Outputs(outputs) => outputs
                     .iter()
                     .filter(|o| o.contract().is_some())
                     .map(|o| o.index.resolve(input.vin))
                     .collect(),
-                NextOutputs::Join { index } => vec![*index],
-                _ => Vec::new(),
+                NextOutputs::Join { index } => [*index].into(),
+                _ => Default::default(),
             };
             let mut parent = input.handle.instance.borrow_mut();
             for index in indices {
-                parent.add_output(
-                    children
-                        .get(&index)
-                        .expect("validated child target")
-                        .clone(),
-                );
+                // Absent only for a lone join whose target is not observed yet.
+                if let Some(child) = children.get(&index) {
+                    parent.add_output(child.clone());
+                }
             }
             if !input.already_spent {
                 parent.mark_spent(SpendRecord::new(

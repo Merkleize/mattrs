@@ -293,6 +293,18 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         }
     }
 
+    /// Sign, validate and stage a spend, then broadcast it on the runner's
+    /// chain, recording it only once the broadcast succeeded. A spend the
+    /// manager could not record never reaches the chain.
+    fn send(
+        &mut self,
+        builder: crate::manager::SpendBuilder,
+    ) -> Result<crate::manager::Children, ProtocolError> {
+        let chain = &self.chain;
+        self.manager
+            .spend_batch_with(std::slice::from_ref(&builder), |tx| chain.broadcast(tx))
+    }
+
     /// Carry out a handler's decision for the token at `current`.
     fn execute_action(
         &mut self,
@@ -307,9 +319,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                         "role returned a spend builder for a different instance".to_string(),
                     ));
                 }
-                let tx = builder.build_tx(&self.manager)?;
-                self.chain.broadcast(&tx)?;
-                let children = self.manager.observe_spend(&current, &tx)?;
+                let children = self.send(builder)?;
                 self.follow_spend(children, current, parent)
             }
             Action::SendFinal(builder, outcome) => {
@@ -318,9 +328,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                         "role returned a final spend builder for a different instance".to_string(),
                     ));
                 }
-                let tx = builder.build_tx(&self.manager)?;
-                self.chain.broadcast(&tx)?;
-                self.manager.observe_spend(&current, &tx)?;
+                self.send(builder)?;
                 Ok(TokenStep::Resolved(Some(outcome)))
             }
             // Poll right away: the spend may already be there (e.g. an
