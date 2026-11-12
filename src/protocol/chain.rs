@@ -12,28 +12,76 @@ use std::collections::hash_map::Entry;
 use bitcoin::{OutPoint, Transaction, Txid};
 use bitcoincore_rpc::{Client, RpcApi};
 
-use super::ProtocolError;
 use crate::manager::{
     BlockCache, ManagerError, find_spending_tx_once, is_tx_not_found, spend_scan_start,
     tx_confirmation_height,
 };
+
+/// Why a [`ChainView`] operation failed. Deliberately independent of the
+/// protocol and manager layers, so a chain backend can be implemented (and
+/// used) without either.
+#[derive(Debug)]
+pub enum ChainError {
+    /// The node could not be reached, or answered with an error.
+    Rpc(bitcoincore_rpc::Error),
+    /// The chain refused a broadcast transaction (e.g. a double spend).
+    Rejected(String),
+    /// Any other backend failure.
+    Other(String),
+}
+
+impl std::fmt::Display for ChainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChainError::Rpc(e) => write!(f, "RPC error: {e}"),
+            ChainError::Rejected(msg) => write!(f, "transaction rejected: {msg}"),
+            ChainError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for ChainError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ChainError::Rpc(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<bitcoincore_rpc::Error> for ChainError {
+    fn from(e: bitcoincore_rpc::Error) -> Self {
+        ChainError::Rpc(e)
+    }
+}
+
+/// The manager's node-scanning helpers report [`ManagerError`]; only its RPC
+/// variant can actually occur there.
+impl From<ManagerError> for ChainError {
+    fn from(e: ManagerError) -> Self {
+        match e {
+            ManagerError::RpcError(e) => ChainError::Rpc(e),
+            other => ChainError::Other(other.to_string()),
+        }
+    }
+}
 
 /// The chain operations a protocol runner performs. Methods take `&self`
 /// (implementations use interior mutability) so one chain can be shared —
 /// e.g. by two parties' runners interleaved in a test.
 pub trait ChainView {
     /// Broadcast a transaction.
-    fn broadcast(&self, tx: &Transaction) -> Result<(), ProtocolError>;
+    fn broadcast(&self, tx: &Transaction) -> Result<(), ChainError>;
 
     /// A single, non-blocking look for a transaction spending `outpoint`
     /// (mempool or block), if one exists.
-    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ProtocolError>;
+    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError>;
 
     /// The current tip height.
-    fn height(&self) -> Result<u32, ProtocolError>;
+    fn height(&self) -> Result<u32, ChainError>;
 
     /// The height `txid` confirmed at (`None` while unconfirmed or unknown).
-    fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ProtocolError>;
+    fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ChainError>;
 }
 
 /// A [`ChainView`] over a real Bitcoin node's RPC interface (the same watching
@@ -84,14 +132,12 @@ impl RpcChain {
 }
 
 impl ChainView for RpcChain {
-    fn broadcast(&self, tx: &Transaction) -> Result<(), ProtocolError> {
-        self.client
-            .send_raw_transaction(tx)
-            .map_err(ManagerError::from)?;
+    fn broadcast(&self, tx: &Transaction) -> Result<(), ChainError> {
+        self.client.send_raw_transaction(tx)?;
         Ok(())
     }
 
-    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ProtocolError> {
+    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
         let mut scan = self.scan.borrow_mut();
         let ScanState { cursors, blocks } = &mut *scan;
         let cursor = match cursors.entry(outpoint) {
@@ -103,18 +149,18 @@ impl ChainView for RpcChain {
         Ok(found)
     }
 
-    fn height(&self) -> Result<u32, ProtocolError> {
-        let height = self.client.get_block_count().map_err(ManagerError::from)?;
+    fn height(&self) -> Result<u32, ChainError> {
+        let height = self.client.get_block_count()?;
         u32::try_from(height)
-            .map_err(|_| ProtocolError::Other(format!("block height {height} exceeds u32::MAX")))
+            .map_err(|_| ChainError::Other(format!("block height {height} exceeds u32::MAX")))
     }
 
-    fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ProtocolError> {
+    fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ChainError> {
         match tx_confirmation_height(&self.client, &txid) {
             Ok(height) => height
                 .map(|h| {
                     u32::try_from(h).map_err(|_| {
-                        ProtocolError::Other(format!("confirmation height {h} exceeds u32::MAX"))
+                        ChainError::Other(format!("confirmation height {h} exceeds u32::MAX"))
                     })
                 })
                 .transpose(),
@@ -181,7 +227,7 @@ impl LocalChain {
 }
 
 impl ChainView for LocalChain {
-    fn broadcast(&self, tx: &Transaction) -> Result<(), ProtocolError> {
+    fn broadcast(&self, tx: &Transaction) -> Result<(), ChainError> {
         let mut inner = self.inner.borrow_mut();
         let txid = tx.compute_txid();
         if inner.txs.contains_key(&txid) {
@@ -189,7 +235,7 @@ impl ChainView for LocalChain {
         }
         for input in &tx.input {
             if let Some(other) = inner.spends.get(&input.previous_output) {
-                return Err(ProtocolError::Other(format!(
+                return Err(ChainError::Rejected(format!(
                     "double spend of {} (already spent by {})",
                     input.previous_output, other
                 )));
@@ -203,7 +249,7 @@ impl ChainView for LocalChain {
         Ok(())
     }
 
-    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ProtocolError> {
+    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
         let inner = self.inner.borrow();
         Ok(inner
             .spends
@@ -211,11 +257,11 @@ impl ChainView for LocalChain {
             .map(|txid| inner.txs[txid].clone()))
     }
 
-    fn height(&self) -> Result<u32, ProtocolError> {
+    fn height(&self) -> Result<u32, ChainError> {
         Ok(self.inner.borrow().height)
     }
 
-    fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ProtocolError> {
+    fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ChainError> {
         Ok(self.inner.borrow().confirmed.get(&txid).copied())
     }
 }

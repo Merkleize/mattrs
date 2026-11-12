@@ -37,7 +37,7 @@ use std::rc::Rc;
 use crate::contracts::WitnessError;
 use crate::manager::{InstanceHandle, ManagerError, SpendBuilder, WrongContractType};
 
-pub use chain::{ChainView, LocalChain, RpcChain};
+pub use chain::{ChainError, ChainView, LocalChain, RpcChain};
 pub use runner::{Progress, Runner, RunnerState};
 
 /// Bridge from a `contract!`-generated contract type to its typed handle and
@@ -213,6 +213,8 @@ pub struct StepCtx<'a> {
 pub enum ProtocolError {
     /// An underlying manager operation failed.
     Manager(ManagerError),
+    /// A chain operation (broadcast, spend lookup, height) failed.
+    Chain(ChainError),
     /// Decoding witness data or contract parameters failed.
     Witness(WitnessError),
     /// A handler ran against an instance of the wrong contract type.
@@ -237,6 +239,7 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProtocolError::Manager(e) => write!(f, "manager error: {}", e),
+            ProtocolError::Chain(e) => write!(f, "chain error: {}", e),
             ProtocolError::Witness(e) => write!(f, "witness error: {}", e),
             ProtocolError::WrongContract(e) => write!(f, "{}", e),
             ProtocolError::NoHandler { contract } => {
@@ -254,6 +257,12 @@ impl std::error::Error for ProtocolError {}
 impl From<ManagerError> for ProtocolError {
     fn from(e: ManagerError) -> Self {
         ProtocolError::Manager(e)
+    }
+}
+
+impl From<ChainError> for ProtocolError {
+    fn from(e: ChainError) -> Self {
+        ProtocolError::Chain(e)
     }
 }
 
@@ -572,19 +581,16 @@ mod tests {
     /// A chain that answers nothing (handlers under test never reach it).
     struct NoChain;
     impl ChainView for NoChain {
-        fn broadcast(&self, _tx: &Transaction) -> Result<(), ProtocolError> {
-            Err(ProtocolError::Other("no chain".into()))
+        fn broadcast(&self, _tx: &Transaction) -> Result<(), ChainError> {
+            Err(ChainError::Other("no chain".into()))
         }
-        fn find_spending_tx(
-            &self,
-            _outpoint: OutPoint,
-        ) -> Result<Option<Transaction>, ProtocolError> {
+        fn find_spending_tx(&self, _outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
             Ok(None)
         }
-        fn height(&self) -> Result<u32, ProtocolError> {
+        fn height(&self) -> Result<u32, ChainError> {
             Ok(0)
         }
-        fn confirmation_height(&self, _txid: Txid) -> Result<Option<u32>, ProtocolError> {
+        fn confirmation_height(&self, _txid: Txid) -> Result<Option<u32>, ChainError> {
             Ok(None)
         }
     }

@@ -302,7 +302,9 @@ impl<D: 'static, O: 'static> Runner<D, O> {
     ) -> Result<crate::manager::Children, ProtocolError> {
         let chain = &self.chain;
         self.manager
-            .spend_batch_with(std::slice::from_ref(&builder), |tx| chain.broadcast(tx))
+            .spend_batch_with(std::slice::from_ref(&builder), |tx| {
+                chain.broadcast(tx).map_err(ProtocolError::from)
+            })
     }
 
     /// Carry out a handler's decision for the token at `current`.
