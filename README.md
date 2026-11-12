@@ -207,10 +207,13 @@ state. A wrong payment, sequence, or revealed state hash fails locally.
 Construction supports single-input CTV transactions with version 2 and locktime
 0; `compute_ctv_hash_for_tx` also hashes general transactions for observation.
 
-For a childless CCV payment, return `PaymentOutput::at(index, script_pubkey)`
-from `next`. It preserves the input's residual amount by default; use
-`NextOutputs::Payments(vec![...])` for multiple payments. Deduct and ignore modes
-use the same accounting rules as tracked contract outputs, including requiring
+A clause output goes either to a contract — `ClauseOutput::at(index).to(contract)`,
+tracked as a child — or to an exact script — `ClauseOutput::at(index).pay(script_pubkey)`,
+constrained the same way but not tracked. One clause may return both, e.g. a
+payout next to the continuing contract (`ClauseOutput::pay_key` and
+`ClauseOutput::burn` are shorthands for bare-key and unspendable payouts). A
+payment preserves the input's residual amount by default; deduct and ignore
+modes use the same accounting rules as contract outputs, including requiring
 `.output_amount(index, amount)` when building them. The metadata must match the
 clause's script checks.
 
@@ -396,8 +399,8 @@ instead of hand-counted `OP_PICK` depths (`mattrs::stack`), the
 `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
 `check_output_contract` / `older` / `timeout_sig_script` / `opaque_p2tr` script
 fragments (`mattrs::script_helpers`), `commit_int` (`mattrs::script_utils`),
-bare-key payout and burn outputs (`mattrs::key_payout`, with the
-`ClauseOutput::pay_key` / `ClauseOutput::burn` constructors), a `WitnessReader`
+bare-key payout and burn outputs (the `ClauseOutput::pay_key` /
+`ClauseOutput::burn` constructors), a `WitnessReader`
 for parsing raw-args witnesses sequentially, the `opaque_merkle_state!` macro
 for expanded states committed as a Merkle root, and `offline_client()` /
 `fund_fake(..)` / `apply_batch(..)` for building and applying spends without a

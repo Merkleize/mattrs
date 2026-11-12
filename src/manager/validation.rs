@@ -1,10 +1,11 @@
 //! RPC-free witness, template, output-identity, and CCV amount validation.
 use super::ManagerError;
 use crate::contracts::{
-    AmountMode, CcvIndex, ClauseOutput, ContractInstance, ErasedClause, NextOutputs,
+    AmountMode, CcvIndex, ClauseOutput, ContractInstance, ErasedClause, ErasedContract, NextOutputs,
 };
 use bitcoin::{Amount, OutPoint, Transaction};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct ContractOutputIdentity {
@@ -13,12 +14,14 @@ pub(super) struct ContractOutputIdentity {
 }
 
 impl ContractOutputIdentity {
-    pub(super) fn from_clause_output(output: &ClauseOutput) -> Result<Self, ManagerError> {
+    /// The identity of a contract output; `contract` is `output`'s own.
+    pub(super) fn from_clause_output(
+        contract: &Arc<dyn ErasedContract>,
+        output: &ClauseOutput,
+    ) -> Result<Self, ManagerError> {
         Ok(Self {
-            contract_type: output.next_contract.contract_type_id(),
-            script_pubkey: output
-                .next_contract
-                .script_pubkey(&output.state_commitment())?,
+            contract_type: contract.contract_type_id(),
+            script_pubkey: output.script_pubkey()?,
         })
     }
 
@@ -47,30 +50,23 @@ pub(super) struct ResolvedOutput {
 }
 pub(super) fn resolve_outputs(next: &NextOutputs) -> Result<Vec<ResolvedOutput>, ManagerError> {
     match next {
-        NextOutputs::Contracts(outputs) => outputs
+        NextOutputs::Outputs(outputs) => outputs
             .iter()
             .map(|output| {
+                let script_pubkey = output.script_pubkey()?;
                 Ok(ResolvedOutput {
                     index: output.index,
-                    script_pubkey: output
-                        .next_contract
-                        .script_pubkey(&output.state_commitment())?,
-                    amount: output.next_amount,
-                    identity: OutputIdentity::Contract(ContractOutputIdentity::from_clause_output(
-                        output,
-                    )?),
+                    amount: output.amount,
+                    identity: match output.contract() {
+                        Some((contract, _)) => OutputIdentity::Contract(
+                            ContractOutputIdentity::from_clause_output(contract, output)?,
+                        ),
+                        None => OutputIdentity::Payment(script_pubkey.clone()),
+                    },
+                    script_pubkey,
                 })
             })
             .collect(),
-        NextOutputs::Payments(outputs) => Ok(outputs
-            .iter()
-            .map(|output| ResolvedOutput {
-                index: output.index,
-                script_pubkey: output.script_pubkey.clone(),
-                amount: output.amount,
-                identity: OutputIdentity::Payment(output.script_pubkey.clone()),
-            })
-            .collect()),
         _ => Ok(Vec::new()),
     }
 }

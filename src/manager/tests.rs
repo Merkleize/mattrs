@@ -130,7 +130,7 @@ fn signed_spend_seeded(
     } else {
         vec![]
     };
-    let next = constraint.unwrap_or(NextOutputs::Contracts(next));
+    let next = constraint.unwrap_or(NextOutputs::Outputs(next));
     let clause = StandardClause::<(), (), RawArgs>::new(
         "spend".into(),
         bitcoin::script::Builder::new()
@@ -242,10 +242,10 @@ fn checked_execution_signs_once_and_records_the_broadcast_witness() {
 
 #[test]
 fn payment_checks_run_before_signing_and_execution_tracks_no_children() {
-    use crate::contracts::PaymentOutput;
+    use crate::contracts::ClauseOutput;
     let (_, fixture, _) = signed_spend_fixture(false);
     let script = fixture.explicit_outputs.unwrap()[0].script_pubkey.clone();
-    let next = NextOutputs::from(PaymentOutput::at(0, script.clone()));
+    let next = NextOutputs::from(ClauseOutput::at(0).pay(script.clone()));
     let (_, invalid, calls) = signed_spend_with_constraint(false, Some(next.clone()));
     // The fixture supplies only 9,000 of the required 10,000 sats.
     assert!(invalid.exec_none(&mut offline_manager()).is_err());
@@ -276,9 +276,9 @@ fn payment_checks_run_before_signing_and_execution_tracks_no_children() {
 
 #[test]
 fn payments_cannot_conflict_with_contract_tracking_or_join_targets() {
-    use crate::contracts::PaymentOutput;
+    use crate::contracts::ClauseOutput;
     let dest = test_contract(90, None);
-    let payment = PaymentOutput::at(0, spk_of(&dest));
+    let payment = ClauseOutput::at(0).pay(spk_of(&dest));
     let paid = test_contract(1, Some(Arc::new(move |_, _, _| Ok(payment.clone().into()))));
     let h1 = fund_fake(paid, (), sat(10_000), 1);
     let tracked = contract_yielding(2, vec![ClauseOutput::at(0).to(dest).build()]);
@@ -297,9 +297,9 @@ fn payments_cannot_conflict_with_contract_tracking_or_join_targets() {
 
 #[test]
 fn a_payment_can_share_a_transaction_but_not_tracking_with_a_contract() {
-    use crate::contracts::PaymentOutput;
+    use crate::contracts::ClauseOutput;
     let dest = test_contract(90, None);
-    let payment = PaymentOutput::at(1, spk_of(&dest));
+    let payment = ClauseOutput::at(1).pay(spk_of(&dest));
     let paid = test_contract(1, Some(Arc::new(move |_, _, _| Ok(payment.clone().into()))));
     let h1 = fund_fake(paid, (), sat(10_000), 1);
     let tracked = contract_yielding(2, vec![ClauseOutput::at(0).to(dest).build()]);
@@ -365,7 +365,7 @@ fn contract_yielding(tag: i64, outputs: Vec<ClauseOutput>) -> Arc<dyn ErasedCont
     test_contract(
         tag,
         Some(Arc::new(move |_: &(), _: &RawArgs, _: &()| {
-            Ok(NextOutputs::Contracts(outputs.clone()))
+            Ok(NextOutputs::Outputs(outputs.clone()))
         })),
     )
 }
@@ -830,7 +830,7 @@ fn terminal_clause_without_explicit_outputs_errors() {
 fn empty_outputs_are_rejected_even_for_childless_spends() {
     let template = CtvTemplate::new(vec![], Sequence::ZERO);
     for next in [
-        NextOutputs::Contracts(vec![]),
+        NextOutputs::Outputs(vec![]),
         NextOutputs::Template(template.clone()),
         NextOutputs::TemplateHash(template.ctv_hash()),
     ] {

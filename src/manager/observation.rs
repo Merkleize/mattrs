@@ -164,13 +164,11 @@ impl ContractManager {
             // A re-observed instance with no cached children got here only to
             // retry a join link; its (childless) non-join clause has nothing
             // to re-materialize.
-            NextOutputs::Contracts(_) if already_spent => Vec::new(),
-            NextOutputs::Contracts(outputs) => {
+            NextOutputs::Outputs(_) if already_spent => Vec::new(),
+            NextOutputs::Outputs(outputs) => {
                 self.materialize_outputs(&handle.instance, outputs, spending_tx, vin)?
             }
-            NextOutputs::Payments(_) | NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => {
-                Vec::new()
-            }
+            NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => Vec::new(),
             // A joining input contributes to a child another input's clause
             // defines: link it when that input's observation already
             // materialized the child; otherwise return nothing (a later

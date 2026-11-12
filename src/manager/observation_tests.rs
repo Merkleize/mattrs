@@ -2,8 +2,8 @@
 
 use super::signing::input_witness;
 use super::*;
-use crate::contracts::{AmountMode, CcvIndex, ClauseOutput, ErasedContract, InstanceStatus};
-use crate::contracts::{ClauseTree, PaymentOutput, RawArgs, StandardClause, StandardP2TR};
+use crate::contracts::{AmountMode, ClauseOutput, ErasedContract, InstanceStatus};
+use crate::contracts::{ClauseTree, RawArgs, StandardClause, StandardP2TR};
 use crate::contracts::{NextOutputs, StateCommitment};
 use bitcoin::{Amount, OutPoint, Sequence, TxIn, TxOut};
 use bitcoincore_rpc::Client;
@@ -48,7 +48,7 @@ fn fund(tag: u8, value: Amount, next: NextOutputs) -> InstanceHandle {
 }
 
 fn pay(value: Amount, tag: u8) -> InstanceHandle {
-    fund(tag, value, PaymentOutput::at(0, script()).into())
+    fund(tag, value, ClauseOutput::at(0).pay(script()).into())
 }
 
 fn script() -> bitcoin::ScriptBuf {
@@ -116,11 +116,9 @@ fn cross_input_deduct_conflicts_are_rejected_in_either_order() {
     use AmountMode::{Deduct, Preserve};
     for modes in [[Deduct, Deduct], [Deduct, Preserve], [Preserve, Deduct]] {
         let payment = |amount| {
-            NextOutputs::Payments(vec![PaymentOutput {
-                index: CcvIndex::from(0u16),
-                script_pubkey: script(),
-                amount,
-            }])
+            let mut output = ClauseOutput::at(0).pay(script());
+            output.amount = amount;
+            NextOutputs::from(output)
         };
         let a = fund(1, sat(10_000), payment(modes[0]));
         let b = fund(2, sat(10_000), payment(modes[1]));
@@ -145,12 +143,12 @@ fn preserve_aggregates_residuals_after_actual_deductions() {
     let a = fund(
         1,
         sat(10_000),
-        NextOutputs::Payments(vec![
-            PaymentOutput::at(0, script()).deduct_amount(),
-            PaymentOutput::at(1, script()),
+        NextOutputs::Outputs(vec![
+            ClauseOutput::at(0).pay(script()).deduct_amount(),
+            ClauseOutput::at(1).pay(script()),
         ]),
     );
-    let b = fund(2, sat(10_000), PaymentOutput::at(1, script()).into());
+    let b = fund(2, sat(10_000), ClauseOutput::at(1).pay(script()).into());
     let mut tx = transaction(
         &[&a, &b],
         vec![
@@ -177,7 +175,7 @@ fn ignore_mode_does_not_conflict_with_another_inputs_amount_check() {
     let a = fund(
         1,
         sat(10_000),
-        PaymentOutput::at(0, script()).ignore_amount().into(),
+        ClauseOutput::at(0).pay(script()).ignore_amount().into(),
     );
     let b = pay(sat(10_000), 2);
     let tx = transaction(
@@ -192,7 +190,7 @@ fn ignore_mode_does_not_conflict_with_another_inputs_amount_check() {
 
 #[test]
 fn joins_contribute_value_and_link_without_a_second_observation_pass() {
-    let dest = contract(90, NextOutputs::Contracts(vec![]));
+    let dest = contract(90, NextOutputs::Outputs(vec![]));
     let a = fund(1, sat(5_000), NextOutputs::join(0));
     let b = fund(
         2,
@@ -260,7 +258,7 @@ fn context_must_cover_every_input_exactly_once() {
 
 #[test]
 fn a_bad_later_witness_does_not_commit_an_earlier_parent_or_child() {
-    let dest = contract(90, NextOutputs::Contracts(vec![]));
+    let dest = contract(90, NextOutputs::Outputs(vec![]));
     let a = fund(
         1,
         sat(10_000),
@@ -297,7 +295,7 @@ fn a_bad_later_witness_does_not_commit_an_earlier_parent_or_child() {
 
 #[test]
 fn a_late_child_registry_conflict_leaves_every_parent_unchanged() {
-    let dest = contract(90, NextOutputs::Contracts(vec![]));
+    let dest = contract(90, NextOutputs::Outputs(vec![]));
     let a = fund(
         1,
         sat(10_000),
@@ -315,7 +313,7 @@ fn a_late_child_registry_conflict_leaves_every_parent_unchanged() {
     let tx = transaction(&[&a, &b], vec![output.clone(), output]);
     // Same nominal type/params, but an incompatible script at the second child:
     // identity checks alone must not allow reusing this cached instance.
-    let wrong = contract(91, NextOutputs::Contracts(vec![]));
+    let wrong = contract(91, NextOutputs::Outputs(vec![]));
     let existing = ContractInstance::funded(
         wrong,
         Box::new(()),

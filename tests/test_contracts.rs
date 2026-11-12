@@ -534,7 +534,7 @@ fn test_expanded_state_flows_to_next_outputs() {
         SampleArgs::arg_specs(),
         Some(Arc::new(
             |_p: &(), _a: &SampleArgs, s: &CounterState| match s {
-                st if st.secret == 42 => Ok(NextOutputs::Contracts(vec![])),
+                st if st.secret == 42 => Ok(NextOutputs::Outputs(vec![])),
                 other => Err(ClauseError::Other(format!("unexpected state: {:?}", other))),
             },
         )),

@@ -5,7 +5,7 @@ use super::validation::{
     validate_output_constraints,
 };
 use super::{ManagerError, SpendBuilder};
-use crate::contracts::{AmountMode, InstanceStatus, NextOutputs, check_state_type};
+use crate::contracts::{AmountMode, ClauseOutput, InstanceStatus, NextOutputs, check_state_type};
 use bitcoin::{Amount, Sequence, Transaction, TxIn, TxOut};
 use std::collections::BTreeMap;
 
@@ -22,20 +22,30 @@ impl PreparedBatch {
         let mut indices = std::collections::BTreeSet::new();
         for (vin, next) in self.nexts.iter().enumerate() {
             match next {
-                NextOutputs::Contracts(outputs) => {
-                    indices.extend(outputs.iter().map(|output| output.index.resolve(vin)));
+                NextOutputs::Outputs(outputs) => {
+                    indices.extend(
+                        outputs
+                            .iter()
+                            .filter(|output| output.contract().is_some())
+                            .map(|output| output.index.resolve(vin)),
+                    );
                 }
                 NextOutputs::Join { index } => {
                     indices.insert(*index);
                 }
-                NextOutputs::Payments(_)
-                | NextOutputs::Template(_)
-                | NextOutputs::TemplateHash(_) => {}
+                NextOutputs::Template(_) | NextOutputs::TemplateHash(_) => {}
             }
         }
         indices.len()
     }
 }
+/// Whether a clause constrains outputs but tracks no children: its explicit
+/// transaction outputs are checked against the declared payments.
+fn is_payments_only(next: &NextOutputs) -> bool {
+    matches!(next, NextOutputs::Outputs(outputs)
+        if !outputs.is_empty() && outputs.iter().all(|output| output.contract().is_none()))
+}
+
 pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, ManagerError> {
     if builders.is_empty() {
         return Err(ManagerError::TransactionBuildError(
@@ -82,11 +92,11 @@ pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, Manage
             &builder.witness_args,
             inst.state(),
         )?;
-        if let NextOutputs::Contracts(outputs) = &next {
-            for output in outputs {
+        if let NextOutputs::Outputs(outputs) = &next {
+            for (contract, state) in outputs.iter().filter_map(ClauseOutput::contract) {
                 // Validate the state's concrete type before a transaction
                 // can be broadcast.
-                check_state_type(output.next_contract.as_ref(), output.next_state.as_ref())?;
+                check_state_type(contract.as_ref(), state)?;
             }
         }
         nexts.push(next);
@@ -112,7 +122,7 @@ pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, Manage
     // may lengthen a CSV delay only if any exact CTV commitment still matches.
     for (vin, builder) in builders.iter().enumerate() {
         validate_ctv_commitment(&nexts[vin], &tx, vin)?;
-        if matches!(nexts[vin], NextOutputs::Payments(_)) {
+        if is_payments_only(&nexts[vin]) {
             validate_output_constraints(
                 prevouts[vin].value,
                 &resolve_outputs(&nexts[vin])?,
@@ -186,18 +196,20 @@ fn derive_tx_outputs(
                     .to_string(),
             ));
         }
-        if !matches!(nexts.first(), Some(NextOutputs::Contracts(outputs)) if outputs.is_empty())
-            && !committed_hash
-            && !matches!(nexts.first(), Some(NextOutputs::Payments(_)))
-        {
+        // Explicit outputs may stand in for payments (which are then checked
+        // against them), but never for a tracked contract output.
+        let untracked = matches!(
+            nexts.first(),
+            Some(NextOutputs::Outputs(outputs))
+                if outputs.iter().all(|output| output.contract().is_none())
+        );
+        if !untracked && !committed_hash {
             return Err(ManagerError::TransactionBuildError(
                 "explicit outputs require an unconstrained clause, payments, or a CTV template hash"
                     .to_string(),
             ));
         }
-        if matches!(nexts.first(), Some(NextOutputs::Payments(_)))
-            && !builders[0].output_amounts.is_empty()
-        {
+        if nexts.first().is_some_and(is_payments_only) && !builders[0].output_amounts.is_empty() {
             return Err(ManagerError::TransactionBuildError(
                 "explicit payment outputs already supply amounts; do not also set output_amount"
                     .into(),

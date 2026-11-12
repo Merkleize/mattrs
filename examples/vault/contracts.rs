@@ -20,7 +20,7 @@
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{ClauseError, ClauseOutput, PaymentOutput};
+use mattrs::contracts::{ClauseError, ClauseOutput};
 use mattrs::{
     ContractState, Signature,
     ccv::{CcvIndex, CcvMode},
@@ -29,10 +29,10 @@ use mattrs::{
 
 define_pushable!();
 
-fn recovery_output(index: i64, key: XOnlyPublicKey) -> Result<PaymentOutput, ClauseError> {
+fn recovery_output(index: i64, key: XOnlyPublicKey) -> Result<ClauseOutput, ClauseError> {
     // CCV with empty data and taptree pays the output key without a tweak.
     let script = mattrs::script_helpers::opaque_p2tr(key);
-    Ok(PaymentOutput::at(CcvIndex::try_from(index)?, script))
+    Ok(ClauseOutput::at(CcvIndex::try_from(index)?).pay(script))
 }
 
 // ============================================================================

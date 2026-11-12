@@ -52,41 +52,38 @@ impl ContractManager {
         let mut identities = BTreeMap::new();
 
         for clause_out in outputs {
+            // Plain payments are constrained, but never tracked as children.
+            let Some((contract, state)) = clause_out.contract() else {
+                continue;
+            };
             let vout = clause_out.index.resolve(vin);
             let outpoint = OutPoint { txid, vout };
-            let identity = ContractOutputIdentity::from_clause_output(clause_out)?;
+            let identity = ContractOutputIdentity::from_clause_output(contract, clause_out)?;
             if identities
                 .get(&vout)
                 .is_some_and(|previous| previous != &identity)
             {
                 return Err(ManagerError::ConflictingOutputContract { index: vout });
             }
-            identities.entry(vout).or_insert(identity);
             let actual = spending_tx
                 .output
                 .get(vout as usize)
                 .ok_or(ManagerError::MissingContractOutput(outpoint))?;
-            let expected_script = clause_out
-                .next_contract
-                .script_pubkey(&clause_out.state_commitment())?;
-            if actual.script_pubkey != expected_script {
+            if actual.script_pubkey != identity.script_pubkey {
                 return Err(ManagerError::WrongContractOutput(outpoint));
             }
 
-            if let Some(existing) = self.find_instance_by_outpoint(outpoint) {
-                let existing = existing.borrow();
-                if ContractOutputIdentity::from_instance(&existing)?
-                    != ContractOutputIdentity::from_clause_output(clause_out)?
-                    || existing.script_pubkey()? != actual.script_pubkey
-                {
-                    return Err(ManagerError::ConflictingOutputContract { index: vout });
-                }
+            if let Some(existing) = self.find_instance_by_outpoint(outpoint)
+                && ContractOutputIdentity::from_instance(&existing.borrow())? != identity
+            {
+                return Err(ManagerError::ConflictingOutputContract { index: vout });
             }
-            resolved.push((clause_out, outpoint));
+            identities.entry(vout).or_insert(identity);
+            resolved.push((contract, state, outpoint));
         }
 
         let mut children = Vec::with_capacity(resolved.len());
-        for (clause_out, outpoint) in resolved {
+        for (contract, state, outpoint) in resolved {
             let child = match self.find_instance_by_outpoint(outpoint) {
                 Some(existing) => existing,
                 None => {
@@ -94,8 +91,8 @@ impl ContractManager {
                     // from it; it also carries the logical state for its own
                     // future spends.
                     let instance = Rc::new(RefCell::new(ContractInstance::funded(
-                        clause_out.next_contract.clone(),
-                        clause_out.next_state.clone(),
+                        contract.clone(),
+                        state.clone_boxed(),
                         outpoint,
                         spending_tx.clone(),
                     )?));
@@ -134,12 +131,16 @@ impl ContractManager {
         let mut children: BTreeMap<u32, Rc<RefCell<ContractInstance>>> = BTreeMap::new();
         let mut new_children = Vec::new();
         for input in &observed {
-            if let NextOutputs::Contracts(outputs) = &input.next {
+            if let NextOutputs::Outputs(outputs) = &input.next {
                 for output in outputs {
+                    // Plain payments are constrained, but never tracked.
+                    let Some((contract, state)) = output.contract() else {
+                        continue;
+                    };
                     let vout = output.index.resolve(input.vin);
                     let outpoint = OutPoint { txid, vout };
                     // Check expanded state type even if this output already exists.
-                    check_state_type(output.next_contract.as_ref(), output.next_state.as_ref())?;
+                    check_state_type(contract.as_ref(), state)?;
                     let cached = input
                         .handle
                         .outputs()
@@ -155,17 +156,18 @@ impl ContractManager {
                             .output
                             .get(vout as usize)
                             .ok_or(ManagerError::MissingContractOutput(outpoint))?;
-                        if ContractOutputIdentity::from_instance(&existing.borrow())?
-                            != ContractOutputIdentity::from_clause_output(output)?
-                            || existing.borrow().script_pubkey()? != actual.script_pubkey
+                        let identity =
+                            ContractOutputIdentity::from_clause_output(contract, output)?;
+                        if ContractOutputIdentity::from_instance(&existing.borrow())? != identity
+                            || identity.script_pubkey != actual.script_pubkey
                         {
                             return Err(ManagerError::ConflictingOutputContract { index: vout });
                         }
                         existing
                     } else {
                         let child = Rc::new(RefCell::new(ContractInstance::funded(
-                            output.next_contract.clone(),
-                            output.next_state.clone(),
+                            contract.clone(),
+                            state.clone_boxed(),
                             outpoint,
                             spending_tx.clone(),
                         )?));
@@ -198,9 +200,11 @@ impl StagedBatch {
         manager.instances.extend(new_children);
         for input in &observed {
             let indices: Vec<_> = match &input.next {
-                NextOutputs::Contracts(outputs) => {
-                    outputs.iter().map(|o| o.index.resolve(input.vin)).collect()
-                }
+                NextOutputs::Outputs(outputs) => outputs
+                    .iter()
+                    .filter(|o| o.contract().is_some())
+                    .map(|o| o.index.resolve(input.vin))
+                    .collect(),
                 NextOutputs::Join { index } => vec![*index],
                 _ => Vec::new(),
             };

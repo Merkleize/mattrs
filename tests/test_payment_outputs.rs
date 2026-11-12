@@ -4,7 +4,7 @@ mod support;
 
 use bitcoin::{Amount, ScriptBuf, TxOut};
 use mattrs::contract;
-use mattrs::contracts::{InstanceStatus, NextOutputs, PaymentOutput};
+use mattrs::contracts::{ClauseOutput, InstanceStatus, NextOutputs};
 use mattrs::manager::{InstanceHandle, ManagerError};
 use mattrs::script_helpers::opaque_p2tr;
 use support::testkit::{alice_pk, bob_pk, offline_manager};
@@ -184,10 +184,10 @@ contract! {
         clause split {
             script |_| ScriptBuf::from_bytes(vec![0x51]);
             next(p, _a) {
-                let first = PaymentOutput::at(0, opaque_p2tr(alice_pk()));
-                Ok(NextOutputs::Payments(vec![
+                let first = ClauseOutput::at(0).pay(opaque_p2tr(alice_pk()));
+                Ok(NextOutputs::Outputs(vec![
                     if p.ignore { first.ignore_amount() } else { first.deduct_amount() },
-                    PaymentOutput::at(1, opaque_p2tr(bob_pk())),
+                    ClauseOutput::at(1).pay(opaque_p2tr(bob_pk())),
                 ]))
             }
         }

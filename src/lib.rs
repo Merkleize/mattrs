@@ -67,7 +67,6 @@ pub mod ctv;
 pub mod fraud;
 #[cfg(feature = "inspector")]
 pub mod inspector;
-pub mod key_payout;
 #[macro_use]
 pub mod macros;
 pub mod manager;

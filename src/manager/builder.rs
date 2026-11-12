@@ -51,8 +51,9 @@ impl SpendBuilder {
         self
     }
 
-    /// Supply outputs for a clause with no declared output constraints,
-    /// [`NextOutputs::Payments`](crate::contracts::NextOutputs::Payments), or a
+    /// Supply outputs for a clause with no declared output constraints, one
+    /// whose outputs are all plain payments
+    /// ([`ClauseOutputTo::pay`](crate::contracts::ClauseOutputTo::pay)), or a
     /// [`NextOutputs::TemplateHash`](crate::contracts::NextOutputs::TemplateHash) commitment.
     /// Single-input spends only. Payment destinations and amount relationships
     /// are validated; amounts already supplied here cannot also be set with
