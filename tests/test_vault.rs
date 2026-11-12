@@ -109,7 +109,7 @@ fn test_vault_trigger_outputs() {
 
 #[test]
 fn test_vault_output_indices_follow_ccv_semantics() {
-    use support::testkit::{fund_fake, offline_client, try_handle};
+    use support::testkit::{fund_fake, try_handle};
     use support::vault::VaultHandle;
 
     let vault = Vault::new(VaultParams {
@@ -120,9 +120,8 @@ fn test_vault_output_indices_follow_ccv_semantics() {
     })
     .unwrap();
     let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 9));
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
-    let err = handle.trigger([0; 32], -2).build_tx(&manager).unwrap_err();
+    let err = handle.trigger([0; 32], -2).build_tx().unwrap_err();
     assert!(matches!(
         err,
         ManagerError::ClauseError(ClauseError::Other(message))
@@ -131,7 +130,7 @@ fn test_vault_output_indices_follow_ccv_semantics() {
 
     // `-1` is CCV's "same index as this input", exactly as the script reads it.
     // The clause accepts it; the spend only lacks its (unprovided) signer.
-    let err = handle.trigger([0; 32], -1).build_tx(&manager).unwrap_err();
+    let err = handle.trigger([0; 32], -1).build_tx().unwrap_err();
     assert!(matches!(err, ManagerError::MissingSigner(_)));
 }
 
@@ -180,7 +179,7 @@ fn test_trigger_without_signer_errors() {
     // must fail loudly (MissingSigner) rather than broadcast an unsigned witness.
     // This builds the tx locally and does no RPC.
     use mattrs::manager::ManagerError;
-    use support::testkit::{fund_fake, offline_client, try_handle};
+    use support::testkit::{fund_fake, try_handle};
     use support::vault::VaultHandle;
 
     let params = VaultParams {
@@ -194,10 +193,7 @@ fn test_trigger_without_signer_errors() {
     // Fake a funded instance so the tx can be built (and a prevout exists).
     let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 0));
 
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
-
-    let err = handle.trigger([7u8; 32], 0).build_tx(&manager).unwrap_err();
+    let err = handle.trigger([7u8; 32], 0).build_tx().unwrap_err();
 
     assert!(
         matches!(err, ManagerError::MissingSigner(_)),
@@ -213,7 +209,7 @@ fn test_batch_merges_and_deducts_outputs() {
     // merge into a single output; the revault is a separate deducted output at
     // index 1. Mirrors pymatt's trigger_with_revault batch. Builds locally, no RPC.
     use mattrs::signer::HotSigner;
-    use support::testkit::{fund_fake, offline_client, try_handle};
+    use support::testkit::{fund_fake, try_handle};
     use support::vault::VaultHandle;
 
     let unvault_privkey = alice_xpriv();
@@ -234,23 +230,19 @@ fn test_batch_merges_and_deducts_outputs() {
     let h2 = funded(2);
     let h3 = funded(3);
 
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
-
     let ctv_hash = [7u8; 32];
     let revault_amount = Amount::from_sat(30_000);
 
-    let tx = manager
-        .build_batch_tx(&[
-            h1.trigger_and_revault(ctv_hash, 0, 1)
-                .sign(HotSigner::new(unvault_privkey))
-                .output_amount(1, revault_amount),
-            h2.trigger(ctv_hash, 0)
-                .sign(HotSigner::new(unvault_privkey)),
-            h3.trigger(ctv_hash, 0)
-                .sign(HotSigner::new(unvault_privkey)),
-        ])
-        .unwrap();
+    let tx = mattrs::manager::build_batch_tx(&[
+        h1.trigger_and_revault(ctv_hash, 0, 1)
+            .sign(HotSigner::new(unvault_privkey))
+            .output_amount(1, revault_amount),
+        h2.trigger(ctv_hash, 0)
+            .sign(HotSigner::new(unvault_privkey)),
+        h3.trigger(ctv_hash, 0)
+            .sign(HotSigner::new(unvault_privkey)),
+    ])
+    .unwrap();
 
     assert_eq!(tx.input.len(), 3);
     assert_eq!(tx.output.len(), 2);
@@ -393,15 +385,13 @@ fn test_observe_spend_decodes_clause_and_children() {
     let ctv_hash = [0xabu8; 32];
 
     // The actor builds (but does not broadcast) a trigger spend.
-    let actor_client = offline_client();
-    let actor_manager = ContractManager::new(actor_client, bitcoin::Network::Regtest);
     let actor_handle: support::vault::VaultHandle = fund_fake(vault.as_erased(), (), 100_000, 7)
         .try_into()
         .unwrap();
     let tx = actor_handle
         .trigger(ctv_hash, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&actor_manager)
+        .build_tx()
         .unwrap();
 
     // The observer holds its own instance of the same (deterministic) funding.
@@ -468,15 +458,13 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     let h1 = funded(1);
     let h2 = funded(2);
 
-    let actor = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
-    let tx = actor
-        .build_batch_tx(&[
-            h1.trigger_and_revault(ctv_hash, 0, 1)
-                .sign(HotSigner::new(alice_xpriv()))
-                .output_amount(1, revault_amount),
-            h2.trigger(ctv_hash, 0).sign(HotSigner::new(alice_xpriv())),
-        ])
-        .unwrap();
+    let tx = mattrs::manager::build_batch_tx(&[
+        h1.trigger_and_revault(ctv_hash, 0, 1)
+            .sign(HotSigner::new(alice_xpriv()))
+            .output_amount(1, revault_amount),
+        h2.trigger(ctv_hash, 0).sign(HotSigner::new(alice_xpriv())),
+    ])
+    .unwrap();
 
     // The observer holds its own twin instances (same deterministic outpoints).
     let mut observer = ContractManager::new(offline_client(), bitcoin::Network::Regtest);

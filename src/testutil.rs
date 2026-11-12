@@ -74,7 +74,7 @@ pub fn apply_batch(
     parents: &[&InstanceHandle],
     builders: &[SpendBuilder],
 ) -> Result<(Transaction, Children), ManagerError> {
-    let tx = manager.build_batch_tx(builders)?;
+    let tx = crate::manager::build_batch_tx(builders)?;
     let children = manager.observe_batch(parents, &tx)?;
     Ok((tx, children))
 }

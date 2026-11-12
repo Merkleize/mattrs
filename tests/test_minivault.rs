@@ -18,8 +18,7 @@ use support::minivault::{
     MiniUnvaulting, MiniUnvaultingHandle, MiniVault, MiniVaultHandle, MiniVaultParams,
 };
 use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, fund_fake, offline_client, regtest_client, report_spend,
-    try_handle,
+    alice_pk, alice_xpriv, bob_pk, fund_fake, regtest_client, report_spend, try_handle,
 };
 
 const SPEND_DELAY: u32 = 10;
@@ -104,11 +103,10 @@ fn test_minivault_trigger_commits_unvaulting_state() {
         0,
     ));
 
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
     let tx = handle
         .trigger(wpk, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
 
     let unvaulting = MiniUnvaulting::new(support::minivault::MiniUnvaultingParams {
@@ -136,11 +134,10 @@ fn test_minivault_rejects_invalid_output_indices() {
         100_000,
         8,
     ));
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     let err = handle
         .trigger_and_revault(withdrawal_pk(), 0, -2)
-        .build_tx(&manager)
+        .build_tx()
         .unwrap_err();
     // `-1` is CCV's "same index as this input"; anything below is undefined.
     assert!(matches!(

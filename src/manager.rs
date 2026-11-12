@@ -50,6 +50,14 @@ pub use handles::{Children, InstanceHandle};
 use transaction::PreparedBatch;
 pub use wallet::{BatchObservation, ExternalInput, SignedWalletSpend, WalletSpend};
 
+/// Build and sign (without broadcasting or recording) a single transaction
+/// that spends several instances at once, merging their clause outputs by
+/// index. It needs no manager or node: everything comes from the builders.
+/// [`ContractManager::spend_batch`] also broadcasts and records the spend.
+pub fn build_batch_tx(builders: &[SpendBuilder]) -> Result<Transaction, ManagerError> {
+    signing::sign_prepared(builders, transaction::prepare(builders)?)
+}
+
 /// Manages contract instances and their lifecycle.
 pub struct ContractManager {
     /// RPC client for blockchain interaction.
@@ -89,13 +97,6 @@ impl ContractManager {
     pub fn rpc(&self) -> &Client {
         &self.rpc
     }
-    /// Build (without broadcasting) a single transaction that spends several
-    /// instances at once, merging their clause outputs by index. Useful for
-    /// inspection/tests; [`spend_batch`](Self::spend_batch) also broadcasts.
-    pub fn build_batch_tx(&self, builders: &[SpendBuilder]) -> Result<Transaction, ManagerError> {
-        signing::sign_prepared(builders, transaction::prepare(builders)?)
-    }
-
     /// Spend several instances in one transaction (build, sign, broadcast), and
     /// return handles to the child instances created — one per merged output index.
     ///

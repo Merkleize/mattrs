@@ -90,8 +90,8 @@ impl SpendBuilder {
     }
 
     /// Build and sign the spending transaction without broadcasting it.
-    pub fn build_tx(&self, manager: &ContractManager) -> Result<Transaction, ManagerError> {
-        manager.build_batch_tx(std::slice::from_ref(self))
+    pub fn build_tx(&self) -> Result<Transaction, ManagerError> {
+        super::build_batch_tx(std::slice::from_ref(self))
     }
 
     /// Build, sign, broadcast, and return handles to all child instances.

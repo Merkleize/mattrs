@@ -7,7 +7,7 @@ use mattrs::contract;
 use mattrs::contracts::{
     ClauseTree, ContractError, CtvTemplate, RawArgs, StandardClause, StandardP2TR,
 };
-use support::testkit::{alice_pk, bob_pk, offline_manager};
+use support::testkit::{alice_pk, bob_pk};
 use support::vault::{Unvaulting, UnvaultingParams, Vault, VaultParams};
 
 #[derive(Debug, Clone)]
@@ -104,7 +104,6 @@ fn low_level_clause_metadata_is_validated_too() {
 
 #[test]
 fn explicit_sequence_may_lengthen_but_not_bypass_the_delay() {
-    let manager = offline_manager();
     let handle: TimedHandle = mattrs::testutil::fund_fake(
         Timed::new(DelayParams { blocks: 10 }).unwrap().as_erased(),
         (),
@@ -121,7 +120,7 @@ fn explicit_sequence_may_lengthen_but_not_bypass_the_delay() {
         handle
             .spend()
             .outputs(outputs.clone())
-            .build_tx(&manager)
+            .build_tx()
             .unwrap()
             .input[0]
             .sequence,
@@ -133,7 +132,7 @@ fn explicit_sequence_may_lengthen_but_not_bypass_the_delay() {
                 .spend()
                 .sequence(sequence)
                 .outputs(outputs.clone())
-                .build_tx(&manager)
+                .build_tx()
                 .is_err()
         );
     }
@@ -142,7 +141,7 @@ fn explicit_sequence_may_lengthen_but_not_bypass_the_delay() {
             .spend()
             .sequence(11)
             .outputs(outputs)
-            .build_tx(&manager)
+            .build_tx()
             .is_ok()
     );
 }
@@ -172,5 +171,5 @@ fn ctv_sequence_cannot_bypass_declared_csv() {
     .unwrap();
     // Match the template's sequence explicitly, to exercise CSV validation
     // after template resolution rather than the template/override conflict.
-    assert!(h.spend().sequence(5).build_tx(&offline_manager()).is_err());
+    assert!(h.spend().sequence(5).build_tx().is_err());
 }

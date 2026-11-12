@@ -38,12 +38,11 @@ fn fixture() -> (UnvaultingHandle, CtvTemplate) {
 #[test]
 fn construction_checks_the_committed_outputs_and_sequence() {
     let (handle, template) = fixture();
-    let manager = offline_manager();
-    assert!(handle.withdraw().build_tx(&manager).is_err());
+    assert!(handle.withdraw().build_tx().is_err());
     let tx = handle
         .withdraw()
         .outputs(template.outputs.clone())
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert_eq!(tx.output, template.outputs);
     assert_eq!(tx.input[0].sequence, template.sequence);
@@ -53,7 +52,7 @@ fn construction_checks_the_committed_outputs_and_sequence() {
     wrong_script[0].script_pubkey = ScriptBuf::new();
     for outputs in [wrong_amount, wrong_script] {
         assert!(matches!(
-            handle.withdraw().outputs(outputs).build_tx(&manager),
+            handle.withdraw().outputs(outputs).build_tx(),
             Err(ManagerError::CtvTemplateMismatch { input_index: 0 })
         ));
     }
@@ -63,7 +62,7 @@ fn construction_checks_the_committed_outputs_and_sequence() {
             .withdraw()
             .outputs(template.outputs)
             .sequence(11)
-            .build_tx(&manager),
+            .build_tx(),
         Err(ManagerError::CtvTemplateMismatch { input_index: 0 })
     ));
     assert_eq!(handle.handle().status(), InstanceStatus::Funded);
@@ -76,7 +75,7 @@ fn observation_checks_every_committed_transaction_field_before_marking_spent() {
     let tx = handle
         .withdraw()
         .outputs(template.outputs)
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     let mutations: &[fn(&mut Transaction)] = &[
         |tx| tx.version = bitcoin::transaction::Version::ONE,
@@ -123,13 +122,13 @@ fn withdrawal_cannot_replace_the_hash_revealed_from_state() {
             .handle()
             .spend_clause("withdraw", vec![vec![42; 32]])
             .outputs(template.outputs.clone())
-            .build_tx(&manager)
+            .build_tx()
             .is_err()
     );
     let mut tx = handle
         .withdraw()
         .outputs(template.outputs)
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     let mut witness = tx.input[0].witness.to_vec();
     witness[0] = vec![42; 32];
@@ -157,9 +156,7 @@ fn hash_only_templates_cannot_be_batched_by_the_builder() {
         } else {
             builder
         };
-        let err = offline_manager()
-            .build_batch_tx(&[builder, other.withdraw()])
-            .unwrap_err();
+        let err = mattrs::manager::build_batch_tx(&[builder, other.withdraw()]).unwrap_err();
         assert!(
             matches!(err, ManagerError::TransactionBuildError(ref message)
             if message.contains("template-hash clauses are single-input only"))

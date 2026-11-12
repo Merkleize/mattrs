@@ -151,7 +151,7 @@ fn known_amount_gap_allows_an_account_to_over_withdraw() {
     let tx = unwind
         .withdraw_direct(&pool, 0)
         .output_amount(0, Amount::from_sat(20_000))
-        .build_tx(&offline_manager())
+        .build_tx()
         .unwrap();
     assert_eq!(tx.output[0].value, Amount::from_sat(20_000));
     assert_eq!(

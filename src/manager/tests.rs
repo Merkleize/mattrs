@@ -284,13 +284,13 @@ fn payments_cannot_conflict_with_contract_tracking_or_join_targets() {
     let tracked = contract_yielding(2, vec![ClauseOutput::at(0).to(dest).build()]);
     let h2 = fund_fake(tracked, (), sat(10_000), 2);
     assert!(matches!(
-        offline_manager().build_batch_tx(&[spend(&h1), spend(&h2)]),
+        crate::manager::build_batch_tx(&[spend(&h1), spend(&h2)]),
         Err(ManagerError::ConflictingOutputContract { index: 0 })
     ));
     let joining = test_contract(3, Some(Arc::new(|_, _, _| Ok(NextOutputs::join(0)))));
     let h3 = fund_fake(joining, (), sat(10_000), 3);
     assert!(matches!(
-        offline_manager().build_batch_tx(&[spend(&h1), spend(&h3)]),
+        crate::manager::build_batch_tx(&[spend(&h1), spend(&h3)]),
         Err(ManagerError::JoinWithoutTarget { index: 0 })
     ));
 }
@@ -305,7 +305,7 @@ fn a_payment_can_share_a_transaction_but_not_tracking_with_a_contract() {
     let tracked = contract_yielding(2, vec![ClauseOutput::at(0).to(dest).build()]);
     let h2 = fund_fake(tracked, (), sat(20_000), 2);
     let mut manager = offline_manager();
-    let tx = manager.build_batch_tx(&[spend(&h1), spend(&h2)]).unwrap();
+    let tx = crate::manager::build_batch_tx(&[spend(&h1), spend(&h2)]).unwrap();
     assert_eq!(
         tx.output
             .iter()
@@ -424,9 +424,9 @@ fn merges_preserves_and_deducts_across_inputs() {
     let h1 = fund_fake(c1, (), sat(100_000), 1);
     let h2 = fund_fake(c2, (), sat(60_000), 2);
 
-    let tx = offline_manager()
-        .build_batch_tx(&[spend(&h1).output_amount(1, sat(30_000)), spend(&h2)])
-        .unwrap();
+    let tx =
+        crate::manager::build_batch_tx(&[spend(&h1).output_amount(1, sat(30_000)), spend(&h2)])
+            .unwrap();
 
     assert_eq!(tx.input.len(), 2);
     assert_eq!(tx.output.len(), 2);
@@ -460,7 +460,7 @@ fn join_contributes_to_another_inputs_output() {
 
     // Both orders: the join is resolved after all defining inputs.
     for builders in [[spend(&hd), spend(&hj)], [spend(&hj), spend(&hd)]] {
-        let tx = offline_manager().build_batch_tx(&builders).unwrap();
+        let tx = crate::manager::build_batch_tx(&builders).unwrap();
         assert_eq!(tx.output.len(), 1);
         assert_eq!(tx.output[0].value, sat(160_000));
         assert_eq!(tx.output[0].script_pubkey, spk_of(&dest));
@@ -476,7 +476,7 @@ fn join_without_target_errors() {
         })),
     );
     let h = fund_fake(joining, (), sat(60_000), 1);
-    let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(err, ManagerError::JoinWithoutTarget { index: 0 }));
 }
 
@@ -495,9 +495,9 @@ fn join_into_a_deduct_output_errors() {
     );
     let hd = fund_fake(deducting, (), sat(100_000), 1);
     let hj = fund_fake(joining, (), sat(60_000), 2);
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hj)])
-        .unwrap_err();
+    let err =
+        crate::manager::build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hj)])
+            .unwrap_err();
     assert!(matches!(
         err,
         ManagerError::MixedOutputSemantics { index: 0 }
@@ -528,7 +528,7 @@ fn join_fixture() -> (InstanceHandle, InstanceHandle) {
 fn join_link_survives_observation_order() {
     let (hd, hj) = join_fixture();
     let mut manager = offline_manager();
-    let tx = manager.build_batch_tx(&[spend(&hd), spend(&hj)]).unwrap();
+    let tx = crate::manager::build_batch_tx(&[spend(&hd), spend(&hj)]).unwrap();
 
     // The joining input observed first: the shared child does not exist yet.
     assert!(manager.observe_spend(&hj, &tx).unwrap().is_empty());
@@ -571,7 +571,7 @@ fn second_preserve_in_one_input_errors() {
     );
     let h = fund_fake(c, (), sat(100_000), 1);
 
-    let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(
         matches!(&err, ManagerError::TransactionBuildError(msg) if msg.contains("PreserveOutput")),
         "unexpected error: {err:?}"
@@ -598,17 +598,17 @@ fn mixing_preserve_and_deduct_at_same_index_errors() {
     let hd = fund_fake(deducting, (), sat(50_000), 2);
 
     // Preserve first, deduct second — and the other way around.
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&hp), spend(&hd).output_amount(0, sat(10_000))])
-        .unwrap_err();
+    let err =
+        crate::manager::build_batch_tx(&[spend(&hp), spend(&hd).output_amount(0, sat(10_000))])
+            .unwrap_err();
     assert!(matches!(
         err,
         ManagerError::MixedOutputSemantics { index: 0 }
     ));
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hp)])
-        .unwrap_err();
+    let err =
+        crate::manager::build_batch_tx(&[spend(&hd).output_amount(0, sat(10_000)), spend(&hp)])
+            .unwrap_err();
     assert!(matches!(
         err,
         ManagerError::MixedOutputSemantics { index: 0 }
@@ -635,9 +635,7 @@ fn merged_output_requires_one_contract_identity() {
     let h1 = fund_fake(c1, (), sat(50_000), 1);
     let h2 = fund_fake(c2, (), sat(50_000), 2);
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&h1), spend(&h2)])
-        .unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h1), spend(&h2)]).unwrap_err();
     assert!(matches!(
         err,
         ManagerError::ConflictingOutputContract { index: 0 }
@@ -658,7 +656,7 @@ fn observation_validates_child_outputs_before_marking_spent() {
     );
     let handle = fund_fake(parent, (), sat(50_000), 1);
     let mut manager = offline_manager();
-    let valid = spend(&handle).build_tx(&manager).unwrap();
+    let valid = spend(&handle).build_tx().unwrap();
 
     let mut wrong_script = valid.clone();
     wrong_script.output[0].script_pubkey = ScriptBuf::new();
@@ -699,7 +697,7 @@ fn child_state_must_match_the_destination_contract() {
     );
     let handle = fund_fake(parent, (), sat(50_000), 1);
 
-    let err = spend(&handle).build_tx(&offline_manager()).unwrap_err();
+    let err = spend(&handle).build_tx().unwrap_err();
     assert!(matches!(
         err,
         ManagerError::ContractError(ContractError::WrongStateType)
@@ -715,9 +713,8 @@ fn unused_output_amount_errors() {
     );
     let h = fund_fake(c, (), sat(100_000), 1);
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&h).output_amount(1, sat(10_000))])
-        .unwrap_err();
+    let err =
+        crate::manager::build_batch_tx(&[spend(&h).output_amount(1, sat(10_000))]).unwrap_err();
     assert!(matches!(err, ManagerError::UnusedOutputAmount { index: 1 }));
 }
 
@@ -730,7 +727,7 @@ fn missing_deduct_amount_errors() {
     );
     let h = fund_fake(c, (), sat(100_000), 1);
 
-    let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(
         err,
         ManagerError::MissingDeductAmount { index: 0 }
@@ -746,15 +743,13 @@ fn ignore_output_requires_an_explicit_amount() {
     );
     let h = fund_fake(c, (), sat(100_000), 1);
 
-    let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(
         err,
         ManagerError::MissingIgnoredAmount { index: 0 }
     ));
 
-    let tx = offline_manager()
-        .build_batch_tx(&[spend(&h).output_amount(0, sat(25_000))])
-        .unwrap();
+    let tx = crate::manager::build_batch_tx(&[spend(&h).output_amount(0, sat(25_000))]).unwrap();
     assert_eq!(tx.output[0].value, sat(25_000));
 }
 
@@ -767,9 +762,8 @@ fn deduct_exceeding_input_errors() {
     );
     let h = fund_fake(c, (), sat(50_000), 1);
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&h).output_amount(0, sat(60_000))])
-        .unwrap_err();
+    let err =
+        crate::manager::build_batch_tx(&[spend(&h).output_amount(0, sat(60_000))]).unwrap_err();
     assert!(matches!(err, ManagerError::DeductExceedsInput));
 }
 
@@ -786,12 +780,11 @@ fn conflicting_output_amounts_error() {
     let h1 = deducting(1, 1);
     let h2 = deducting(2, 2);
 
-    let err = offline_manager()
-        .build_batch_tx(&[
-            spend(&h1).output_amount(0, sat(10_000)),
-            spend(&h2).output_amount(0, sat(20_000)),
-        ])
-        .unwrap_err();
+    let err = crate::manager::build_batch_tx(&[
+        spend(&h1).output_amount(0, sat(10_000)),
+        spend(&h2).output_amount(0, sat(20_000)),
+    ])
+    .unwrap_err();
     assert!(matches!(
         err,
         ManagerError::ConflictingOutputAmount { index: 0 }
@@ -807,7 +800,7 @@ fn non_contiguous_outputs_error() {
     );
     let h = fund_fake(c, (), sat(100_000), 1);
 
-    let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(
         err,
         ManagerError::NonContiguousOutputs { missing_index: 0 }
@@ -819,7 +812,7 @@ fn terminal_clause_without_explicit_outputs_errors() {
     let c = test_contract(1, None);
     let h = fund_fake(c, (), sat(100_000), 1);
 
-    let err = offline_manager().build_batch_tx(&[spend(&h)]).unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(matches!(err, ManagerError::NoOutputs));
 }
 
@@ -843,10 +836,7 @@ fn empty_outputs_are_rejected_even_for_childless_spends() {
         } else {
             builder
         };
-        assert!(matches!(
-            builder.build_tx(&offline_manager()),
-            Err(ManagerError::NoOutputs)
-        ));
+        assert!(matches!(builder.build_tx(), Err(ManagerError::NoOutputs)));
     }
 }
 // ------------------------------------------------------------------
@@ -867,18 +857,17 @@ fn template_fixes_outputs_and_sequence() {
     let template = template_to(&dest, sat(50_000), 5);
     let c = contract_with_template(1, template.clone());
     let h = fund_fake(c, (), sat(50_000), 1);
-    let manager = offline_manager();
 
-    let tx = spend(&h).build_tx(&manager).unwrap();
+    let tx = spend(&h).build_tx().unwrap();
     assert_eq!(tx.output, template.outputs);
     assert_eq!(tx.input[0].sequence, Sequence(5));
 
     // A caller-set sequence must agree with the template's...
-    let tx = spend(&h).sequence(5).build_tx(&manager).unwrap();
+    let tx = spend(&h).sequence(5).build_tx().unwrap();
     assert_eq!(tx.input[0].sequence, Sequence(5));
 
     // ...or the build is rejected.
-    let err = spend(&h).sequence(6).build_tx(&manager).unwrap_err();
+    let err = spend(&h).sequence(6).build_tx().unwrap_err();
     assert!(matches!(err, ManagerError::TransactionBuildError(_)));
 }
 
@@ -898,9 +887,7 @@ fn template_in_batch_errors() {
     let h1 = fund_fake(templated, (), sat(50_000), 1);
     let h2 = fund_fake(preserving, (), sat(60_000), 2);
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&h1), spend(&h2)])
-        .unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h1), spend(&h2)]).unwrap_err();
     assert!(matches!(err, ManagerError::TransactionBuildError(_)));
 }
 
@@ -926,9 +913,8 @@ fn explicit_outputs_in_batch_error() {
         value: sat(100_000),
     }];
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&h1).outputs(outputs), spend(&h2)])
-        .unwrap_err();
+    let err =
+        crate::manager::build_batch_tx(&[spend(&h1).outputs(outputs), spend(&h2)]).unwrap_err();
     assert!(matches!(err, ManagerError::TransactionBuildError(_)));
 }
 
@@ -938,12 +924,11 @@ fn explicit_outputs_cannot_override_a_template() {
     let c = contract_with_template(1, template_to(&dest, sat(50_000), 0));
     let h = fund_fake(c, (), sat(50_000), 1);
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&h).outputs(vec![TxOut {
-            script_pubkey: spk_of(&dest),
-            value: sat(40_000),
-        }])])
-        .unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h).outputs(vec![TxOut {
+        script_pubkey: spk_of(&dest),
+        value: sat(40_000),
+    }])])
+    .unwrap_err();
     assert!(matches!(err, ManagerError::TransactionBuildError(_)));
 }
 
@@ -961,12 +946,11 @@ fn explicit_outputs_cannot_override_contract_outputs() {
     );
     let h = fund_fake(c, (), sat(50_000), 1);
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&h).outputs(vec![TxOut {
-            script_pubkey: spk_of(&dest),
-            value: sat(1),
-        }])])
-        .unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h).outputs(vec![TxOut {
+        script_pubkey: spk_of(&dest),
+        value: sat(1),
+    }])])
+    .unwrap_err();
     assert!(matches!(err, ManagerError::TransactionBuildError(_)));
 }
 
@@ -976,7 +960,7 @@ fn observation_rejects_a_ctv_template_mismatch() {
     let c = contract_with_template(1, template_to(&dest, sat(50_000), 5));
     let h = fund_fake(c, (), sat(50_000), 1);
     let mut manager = offline_manager();
-    let tx = spend(&h).build_tx(&manager).unwrap();
+    let tx = spend(&h).build_tx().unwrap();
     let mut wrong_amount = tx.clone();
     wrong_amount.output[0].value = sat(49_999);
     let mut wrong_script_sig = tx.clone();
@@ -1002,7 +986,7 @@ fn raw_witness_layout_is_checked_when_no_signer_exists() {
             script_pubkey: ScriptBuf::new(),
             value: sat(50_000),
         }])
-        .build_tx(&offline_manager())
+        .build_tx()
         .unwrap_err();
     assert!(matches!(err, ManagerError::TransactionBuildError(_)));
 }
@@ -1016,9 +1000,7 @@ fn duplicate_instance_in_batch_errors() {
     );
     let h = fund_fake(c, (), sat(100_000), 1);
 
-    let err = offline_manager()
-        .build_batch_tx(&[spend(&h), spend(&h)])
-        .unwrap_err();
+    let err = crate::manager::build_batch_tx(&[spend(&h), spend(&h)]).unwrap_err();
     assert!(
         matches!(&err, ManagerError::TransactionBuildError(msg) if msg.contains("duplicate")),
         "unexpected error: {err:?}"

@@ -181,8 +181,8 @@ fn test_ram_write_commits_updated_root() {
     // (MerkleProofType), reads the cells from the instance's expanded state, updates
     // cell 2, and commits the new Merkle root to the output. Builds locally, no RPC.
     use bitcoin::Amount;
-    use mattrs::manager::ContractManager;
-    use support::testkit::{fund_fake, offline_client, try_handle};
+
+    use support::testkit::{fund_fake, try_handle};
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
     let ram = Ram::new(RamParams { size: 4 }).unwrap();
@@ -199,9 +199,6 @@ fn test_ram_write_commits_updated_root() {
         0,
     ));
 
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
-
     // Prove cell 2 and write a new value into it.
     let tree = MerkleTree::new(leaves.clone());
     let proof: WitProof<2> = tree.prove_leaf(2).unwrap().to_wit_proof().unwrap();
@@ -209,7 +206,7 @@ fn test_ram_write_commits_updated_root() {
 
     let tx = handle
         .write(proof, new_value, committed)
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
 
     // The single output commits the updated Merkle root, preserving the amount.

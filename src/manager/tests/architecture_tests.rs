@@ -19,9 +19,7 @@ fn pure_preparation_and_signing_need_no_manager() {
 fn staged_updates_do_nothing_until_consumed_by_commit() {
     let mut manager = offline_manager();
     let (defining, joining) = join_fixture();
-    let tx = manager
-        .build_batch_tx(&[spend(&joining), spend(&defining)])
-        .unwrap();
+    let tx = crate::manager::build_batch_tx(&[spend(&joining), spend(&defining)]).unwrap();
     let handles = [&joining, &defining];
     let staged = manager.stage_batch(&handles, &[], &tx).unwrap();
     for h in handles {
@@ -80,7 +78,7 @@ fn late_registry_conflict_is_rejected_before_broadcast() {
         2,
     );
     let builders = [spend(&first), spend(&second)];
-    let tx = manager.build_batch_tx(&builders).unwrap();
+    let tx = crate::manager::build_batch_tx(&builders).unwrap();
     let conflicting = ContractInstance::funded(
         test_contract(91, None),
         Box::new(()),

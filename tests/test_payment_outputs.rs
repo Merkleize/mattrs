@@ -60,7 +60,7 @@ fn recovery_derives_the_untweaked_payment_and_has_no_children() {
     for handle in [a.handle(), b.handle()] {
         let tx = handle
             .spend_clause("recover", vec![vec![]])
-            .build_tx(&manager)
+            .build_tx()
             .unwrap();
         assert_eq!(
             tx.output,
@@ -81,18 +81,13 @@ fn recovery_derives_the_untweaked_payment_and_has_no_children() {
 fn explicit_recovery_outputs_cannot_change_destination_or_reduce_value() {
     let h = vault(1);
     let mut manager = offline_manager();
-    let tx = h.recover(0).build_tx(&manager).unwrap();
+    let tx = h.recover(0).build_tx().unwrap();
     let mut wrong_script = tx.output.clone();
     wrong_script[0].script_pubkey = opaque_p2tr(alice_pk());
     let mut underpayment = tx.output.clone();
     underpayment[0].value = sat(9_999);
     for invalid in [wrong_script, underpayment] {
-        assert!(
-            h.recover(0)
-                .outputs(invalid.clone())
-                .build_tx(&manager)
-                .is_err()
-        );
+        assert!(h.recover(0).outputs(invalid.clone()).build_tx().is_err());
         let mut observed = tx.clone();
         observed.output = invalid;
         assert!(manager.observe_spend(h.handle(), &observed).is_err());
@@ -105,9 +100,9 @@ fn explicit_recovery_outputs_cannot_change_destination_or_reduce_value() {
         manager.observe_spend(h.handle(), &missing),
         Err(ManagerError::PaymentOutputMismatch { index: 0 })
     ));
-    assert!(h.recover(0).outputs(tx.output).build_tx(&manager).is_ok());
+    assert!(h.recover(0).outputs(tx.output).build_tx().is_ok());
     for invalid in [-2, i64::MAX] {
-        assert!(h.recover(invalid).build_tx(&manager).is_err());
+        assert!(h.recover(invalid).build_tx().is_err());
     }
 }
 
@@ -116,9 +111,7 @@ fn recovery_respects_explicit_and_same_input_indices() {
     let a = vault(1);
     let b = unvaulting(2);
     let mut manager = offline_manager();
-    let tx = manager
-        .build_batch_tx(&[a.recover(-1), b.recover(-1)])
-        .unwrap();
+    let tx = mattrs::manager::build_batch_tx(&[a.recover(-1), b.recover(-1)]).unwrap();
     assert_eq!(
         tx.output.iter().map(|out| out.value).collect::<Vec<_>>(),
         vec![sat(10_000), sat(20_000)]
@@ -129,7 +122,7 @@ fn recovery_respects_explicit_and_same_input_indices() {
     let a = vault(3);
     // Gaps require explicit outputs; the manager does not invent fillers.
     assert!(matches!(
-        a.recover(1).build_tx(&manager),
+        a.recover(1).build_tx(),
         Err(ManagerError::NonContiguousOutputs { missing_index: 0 })
     ));
     let outputs = vec![
@@ -142,11 +135,7 @@ fn recovery_respects_explicit_and_same_input_indices() {
             script_pubkey: opaque_p2tr(bob_pk()),
         },
     ];
-    let tx = a
-        .recover(1)
-        .outputs(outputs.clone())
-        .build_tx(&manager)
-        .unwrap();
+    let tx = a.recover(1).outputs(outputs.clone()).build_tx().unwrap();
     assert_eq!(tx.output, outputs);
     assert!(manager.observe_spend(a.handle(), &tx).unwrap().is_empty());
 }
@@ -156,9 +145,7 @@ fn batched_recoveries_aggregate_without_creating_children() {
     let a = vault(1);
     let b = unvaulting(2);
     let mut manager = offline_manager();
-    let tx = manager
-        .build_batch_tx(&[a.recover(0), b.recover(0)])
-        .unwrap();
+    let tx = mattrs::manager::build_batch_tx(&[a.recover(0), b.recover(0)]).unwrap();
     assert_eq!(
         tx.output,
         vec![TxOut {
@@ -211,13 +198,13 @@ fn payment_amounts_use_the_shared_deduct_and_preserve_rules() {
     let h = split(false);
     let mut manager = offline_manager();
     assert!(matches!(
-        h.spend_clause("split", vec![]).build_tx(&manager),
+        h.spend_clause("split", vec![]).build_tx(),
         Err(ManagerError::MissingDeductAmount { index: 0 })
     ));
     let tx = h
         .spend_clause("split", vec![])
         .output_amount(0, sat(3_000))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert_eq!(
         tx.output.iter().map(|out| out.value).collect::<Vec<_>>(),
@@ -226,14 +213,14 @@ fn payment_amounts_use_the_shared_deduct_and_preserve_rules() {
     assert!(
         h.spend_clause("split", vec![])
             .output_amount(0, sat(10_001))
-            .build_tx(&manager)
+            .build_tx()
             .is_err()
     );
     assert!(matches!(
         h.spend_clause("split", vec![])
             .output_amount(0, sat(3_000))
             .output_amount(2, sat(1))
-            .build_tx(&manager),
+            .build_tx(),
         Err(ManagerError::UnusedOutputAmount { index: 2 })
     ));
     let mut invalid = tx.clone();
@@ -246,23 +233,22 @@ fn payment_amounts_use_the_shared_deduct_and_preserve_rules() {
 #[test]
 fn ignored_payments_require_an_amount_but_do_not_reduce_the_residual() {
     let h = split(true);
-    let manager = offline_manager();
     assert!(matches!(
-        h.spend_clause("split", vec![]).build_tx(&manager),
+        h.spend_clause("split", vec![]).build_tx(),
         Err(ManagerError::MissingIgnoredAmount { index: 0 })
     ));
     // The builder accounts for CCV only, not external fee/value funding.
     let tx = h
         .spend_clause("split", vec![])
         .output_amount(0, Amount::ZERO)
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert_eq!(tx.output[1].value, sat(10_000));
     assert!(
         h.spend_clause("split", vec![])
             .outputs(tx.output)
             .output_amount(0, sat(1))
-            .build_tx(&manager)
+            .build_tx()
             .is_err()
     );
 }

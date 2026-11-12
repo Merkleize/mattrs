@@ -105,14 +105,13 @@ fn test_merkle_root_and_dup_script_bytes() {
 // ----------------------------------------------------------------------------
 
 use mattrs::contracts::{ContractState, ErasedContract};
-use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use std::sync::Arc;
 use support::game256::{
     Bisect1Handle, Bisect1State, Bisect2Handle, Bisect2State, G256S0Handle, G256S1Handle,
     G256S1State, G256S2Handle, G256S2State, LeafState,
 };
-use support::testkit::{alice_xpriv, bob_xpriv, fund_fake, offline_client, try_handle};
+use support::testkit::{alice_xpriv, bob_xpriv, fund_fake, try_handle};
 
 /// The committed address of `contract` with committed `state`.
 fn addr<S: ContractState + 'static>(
@@ -127,8 +126,6 @@ fn test_game256_state_transitions() {
     let (alice_pk, bob_pk) = keys();
     let p = G256Params { alice_pk, bob_pk };
     let bp = |i, j| BisectParams::new(alice_pk, bob_pk, i, j).unwrap();
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // 1. G256S0.choose(x) -> G256S1 committed to x.
     let s0 = try_handle::<G256S0Handle>(fund_fake(
@@ -140,7 +137,7 @@ fn test_game256_state_transitions() {
     let tx = s0
         .choose(5)
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert_eq!(
         tx.output[0].script_pubkey,
@@ -164,7 +161,7 @@ fn test_game256_state_transitions() {
     let tx = s2
         .start_challenge([7; 32], 10, 5, 11, [8; 32])
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     let commit = |v: i64| mattrs::script_utils::commit_int(v);
     assert_eq!(
@@ -202,7 +199,7 @@ fn test_game256_state_transitions() {
     let tx = b2
         .bob_reveal_left([9; 32], [10; 32], [11; 32])
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert_eq!(
         tx.output[0].script_pubkey,
@@ -237,7 +234,7 @@ fn test_game256_state_transitions() {
     let tx = b2_leaf
         .bob_reveal_left([9; 32], [10; 32], [11; 32])
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert_eq!(
         tx.output[0].script_pubkey,
@@ -261,7 +258,7 @@ fn test_game256_state_transitions() {
     let tx = s1
         .reveal([7; 32], 10, 5)
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert_eq!(
         tx.output[0].script_pubkey,
@@ -291,7 +288,7 @@ fn test_game256_state_transitions() {
     let tx = b1
         .alice_reveal([6; 32], [7; 32], [8; 32])
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert_eq!(
         tx.output[0].script_pubkey,

@@ -206,7 +206,7 @@ fn commitments_are_independent_of_optional_serialization() {
             value: Amount::from_sat(900),
             script_pubkey: mattrs::script_helpers::opaque_p2tr(mattrs::nums_key()),
         }])
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
     assert!(manager.observe_spend(&handle, &tx).unwrap().is_empty());
 }

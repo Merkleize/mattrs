@@ -216,9 +216,7 @@ fn mixed_batch_uses_contract_contributions_not_wallet_value() {
     let parent = contract_yielding(80, vec![ClauseOutput::at(0).to(child).build()]);
     let first = fund_fake(parent.clone(), (), sat(10_000), 1);
     let second = fund_fake(parent, (), sat(20_000), 2);
-    let mut tx = manager
-        .build_batch_tx(&[spend(&first), spend(&second)])
-        .unwrap();
+    let mut tx = crate::manager::build_batch_tx(&[spend(&first), spend(&second)]).unwrap();
     let external = add_wallet_input(&mut tx);
     tx.input[2].witness = bitcoin::Witness::from_slice(&[vec![1; 64], vec![0x50, 1]]);
     tx.input.swap(1, 2); // Passive observation accepts interleaved wallet inputs.
@@ -253,7 +251,7 @@ fn mixed_batch_uses_contract_contributions_not_wallet_value() {
 fn invalid_external_contexts_are_atomic() {
     let mut manager = offline_manager();
     let (handle, builder, _) = signed_spend_fixture(true);
-    let mut tx = builder.build_tx(&manager).unwrap();
+    let mut tx = builder.build_tx().unwrap();
     let external = add_wallet_input(&mut tx);
     tx.input[1].witness = bitcoin::Witness::from_slice(&[vec![1; 64]]);
     for change in 0..7 {
@@ -295,7 +293,7 @@ fn invalid_external_contexts_are_atomic() {
 fn p2wpkh_inputs_require_matching_compressed_pubkeys() {
     let mut manager = offline_manager();
     let (handle, builder, _) = signed_spend_fixture(true);
-    let mut tx = builder.build_tx(&manager).unwrap();
+    let mut tx = builder.build_tx().unwrap();
     let mut external = add_wallet_input(&mut tx);
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let key = bitcoin::secp256k1::PublicKey::from_secret_key(
@@ -328,7 +326,7 @@ fn same_index_outputs_follow_real_input_positions() {
     let child = test_contract(90, None);
     let parent = contract_yielding(80, vec![ClauseOutput::at_same_index().to(child).build()]);
     let handle = fund_fake(parent, (), sat(10_000), 1);
-    let mut tx = spend(&handle).build_tx(&manager).unwrap();
+    let mut tx = spend(&handle).build_tx().unwrap();
     let external = add_wallet_input(&mut tx);
     tx.input[1].witness = bitcoin::Witness::from_slice(&[vec![1; 64]]);
     tx.input.swap(0, 1);
@@ -354,9 +352,7 @@ fn same_index_outputs_follow_real_input_positions() {
 fn join_links_are_atomic_with_interleaved_fee_inputs() {
     let mut manager = offline_manager();
     let (defining, joining) = join_fixture();
-    let mut tx = manager
-        .build_batch_tx(&[spend(&defining), spend(&joining)])
-        .unwrap();
+    let mut tx = crate::manager::build_batch_tx(&[spend(&defining), spend(&joining)]).unwrap();
     let external = add_wallet_input(&mut tx);
     tx.input[2].witness = bitcoin::Witness::from_slice(&[vec![1; 64]]);
     tx.input.swap(1, 2);

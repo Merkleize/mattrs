@@ -24,8 +24,8 @@ use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
 use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, fund_fake, offline_client,
-    offline_manager, try_handle, walk_tip,
+    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, fund_fake, offline_manager, try_handle,
+    walk_tip,
 };
 use support::tictactoe::roles::{
     PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role,
@@ -146,13 +146,12 @@ fn game_rules_match_the_boards() {
 #[test]
 fn moves_commit_the_updated_board() {
     let game = funded_game(TttState::initial());
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     // Alice opens in the center.
     let tx = game
         .make_move(4)
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
 
     // Output 0 is the same contract committing the updated board, whole pot.
@@ -168,7 +167,6 @@ fn moves_commit_the_updated_board() {
 
 #[test]
 fn claims_pay_out_via_their_ctv_templates() {
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
     let pot = Amount::from_sat(POT);
     let stake = Amount::from_sat(DEFAULT_STAKE as u64);
 
@@ -177,7 +175,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("XXX OO. ..."),
     });
-    let tx = won.claim_win(MARK_ALICE).build_tx(&manager).unwrap();
+    let tx = won.claim_win(MARK_ALICE).build_tx().unwrap();
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[0].value, pot);
@@ -188,7 +186,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("XOX XOO OXX"),
     });
-    let tx = tied.claim_tie().build_tx(&manager).unwrap();
+    let tx = tied.claim_tie().build_tx().unwrap();
     assert_eq!(tx.output.len(), 2);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[1].script_pubkey, p2tr(bob_pk()));
@@ -200,7 +198,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("X.. ... ..."),
     });
-    let tx = idle.timeout_bob_idle().build_tx(&manager).unwrap();
+    let tx = idle.timeout_bob_idle().build_tx().unwrap();
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[0].value, pot);
@@ -209,14 +207,12 @@ fn claims_pay_out_via_their_ctv_templates() {
 
 #[test]
 fn illegal_moves_are_rejected_when_building() {
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
-
     // Out of turn: it is Alice's move, Bob tries to play.
     let game = funded_game(TttState::initial());
     let err = game
         .move_bob(vec![], vec![EMPTY; 8])
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager);
+        .build_tx();
     assert!(err.is_err(), "out-of-turn move must not build");
 
     // Occupied cell: the center is already taken.
@@ -227,7 +223,7 @@ fn illegal_moves_are_rejected_when_building() {
     let err = game
         .move_bob(board("... .X. ...")[..4].to_vec(), vec![EMPTY; 4])
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager);
+        .build_tx();
     assert!(err.is_err(), "a move onto a taken cell must not build");
 
     // A move whose revealed board contradicts the committed one.
@@ -238,7 +234,7 @@ fn illegal_moves_are_rejected_when_building() {
     let err = game
         .move_alice(vec![], vec![EMPTY; 8])
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&manager);
+        .build_tx();
     assert!(err.is_err(), "a fabricated board must not build");
 }
 

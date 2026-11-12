@@ -457,8 +457,6 @@ fn test_derived_state_roundtrip() {
 #[test]
 fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
     use bitcoin::{Address, Amount, Sequence, TxOut};
-    use bitcoincore_rpc::{Auth, Client};
-    use mattrs::manager::ContractManager;
 
     // The exact outputs + input sequence the clause commits to.
     let dest = Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")
@@ -498,15 +496,9 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
     // Fake a funded instance (building the tx does no RPC).
     let handle = mattrs::testutil::fund_fake(erased, (), Amount::from_sat(100_000), 0);
 
-    let client = Client::new("http://127.0.0.1:1", Auth::None).unwrap();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
-
     let witness =
         <TriggerArgs as ClauseArgs>::encode_to_witness(&TriggerArgs { withdraw_amount: 1 });
-    let tx = handle
-        .spend_clause("pay", witness)
-        .build_tx(&manager)
-        .unwrap();
+    let tx = handle.spend_clause("pay", witness).build_tx().unwrap();
 
     // The template fixes the outputs and the input sequence.
     assert_eq!(tx.output, template_outputs);

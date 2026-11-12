@@ -78,7 +78,7 @@ use bitcoin::{Amount, ScriptBuf, Sequence, TxOut};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use support::rps::{RpsGameS0Handle, RpsGameS1Handle, RpsGameS1State};
-use support::testkit::{bob_xpriv, fund_fake, offline_client, try_handle};
+use support::testkit::{bob_xpriv, fund_fake, try_handle};
 
 #[test]
 fn test_rps_bob_move_commits_s1_state() {
@@ -91,14 +91,11 @@ fn test_rps_bob_move_commits_s1_state() {
         0,
     ));
 
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
-
     // Bob plays paper (m_b = 1), signing with his key.
     let tx = handle
         .bob_move(1)
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
 
     // Output 0 commits RpsGameS1 with state sha256(m_b), preserving the amount.
@@ -127,11 +124,8 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
         0,
     ));
 
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
-
     // The bob_wins clause pays out the whole pot to Bob via a CTV template.
-    let tx = handle.bob_wins(1, 0, [0u8; 32]).build_tx(&manager).unwrap();
+    let tx = handle.bob_wins(1, 0, [0u8; 32]).build_tx().unwrap();
 
     let secp = Secp256k1::new();
     let bob_spk = ScriptBuf::new_p2tr(&secp, bob_pk, None);

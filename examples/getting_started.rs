@@ -14,9 +14,8 @@ use std::str::FromStr;
 use bitcoin::bip32::Xpriv;
 use bitcoin::{Amount, ScriptBuf, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
-use mattrs::testutil::{fund_fake, offline_client};
+use mattrs::testutil::fund_fake;
 use mattrs::{Signature, contract};
 
 define_pushable!();
@@ -118,7 +117,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Build the withdraw spend. The signature argument is filled automatically
     //    from the registered signer — no placeholder is ever written by hand.
     //    Building performs no RPC, so an unreachable client works offline.
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     let dest = bitcoin::Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?
         .assume_checked();
@@ -129,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             script_pubkey: dest.script_pubkey(),
             value: Amount::from_sat(99_000),
         }])
-        .build_tx(&manager)?;
+        .build_tx()?;
 
     println!(
         "withdraw tx: {}",
