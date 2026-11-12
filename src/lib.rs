@@ -72,11 +72,13 @@ pub mod macros;
 pub mod manager;
 pub mod merkle;
 pub mod protocol;
+#[cfg(any(test, feature = "test-util"))]
 pub mod report;
 pub mod script_helpers;
 pub mod script_utils;
 pub mod signer;
 pub mod stack;
+#[cfg(any(test, feature = "test-util"))]
 pub mod testutil;
 pub mod timelock;
 pub use timelock::BlockDelay;

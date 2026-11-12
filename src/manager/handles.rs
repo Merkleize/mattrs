@@ -37,7 +37,8 @@ impl PartialEq for InstanceHandle {
 impl Eq for InstanceHandle {}
 
 impl InstanceHandle {
-    /// Wrap a raw instance pointer.
+    /// Wrap a raw instance pointer (the fake-funding test utilities).
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn new(instance: Rc<RefCell<ContractInstance>>) -> Self {
         Self { instance }
     }

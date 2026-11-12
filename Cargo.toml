@@ -14,6 +14,10 @@ default = []
 # Live-inspection support: a TCP server pushing JSON manager snapshots on every
 # state change (see `mattrs::inspector` and the `mattrs-inspector` TUI client).
 inspector = ["dep:serde"]
+# Helpers for tests and demos, not for production code: fake-funded instances
+# and offline batch application (`mattrs::testutil`), and markdown transaction
+# reports (`mattrs::report`).
+test-util = []
 
 [dependencies]
 bitcoin = "0.32.2"
@@ -23,3 +27,7 @@ serde_json = "1"
 bitcoin-script = { path = "./bitcoin-script"}
 mattrs-derive = { path = "./mattrs-derive" }
 hex = "0.4"
+
+[dev-dependencies]
+# The crate's own tests and examples use the test utilities.
+mattrs = { path = ".", features = ["test-util"] }

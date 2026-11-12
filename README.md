@@ -423,7 +423,8 @@ bare-key payout and burn outputs (the `ClauseOutput::pay_key` /
 for parsing raw-args witnesses sequentially, the `opaque_merkle_state!` macro
 for expanded states committed as a Merkle root, and `fund_fake(..)` /
 `apply_batch(..)` for building and applying spends without a node
-(`mattrs::testutil`, used by the examples and fixtures, together with
+(`mattrs::testutil`, behind the `test-util` feature; used by the examples and
+fixtures, together with
 `ContractManager::offline(network)`).
 
 ## Demos
