@@ -1,5 +1,6 @@
 //! Manager behavior and integration boundaries, tested without a Bitcoin node.
-use super::{chain::poll_until, validation::parse_script_path_witness};
+use super::validation::parse_script_path_witness;
+use crate::chain::poll_until;
 use crate::contracts::{
     ContractError, ErasedContract, InstanceStatus, NextOutputs, StateCommitment,
 };
@@ -1056,11 +1057,11 @@ fn parses_script_path_witness() {
 #[test]
 fn poll_until_returns_hit_or_times_out() {
     // An immediate hit is returned without waiting for the window.
-    let hit = poll_until(Some(Duration::ZERO), || Ok(Some(42))).unwrap();
+    let hit = poll_until(Some(Duration::ZERO), || Ok::<_, ManagerError>(Some(42))).unwrap();
     assert_eq!(hit, Some(42));
 
     // A never-satisfied check times out with Ok(None).
-    let miss = poll_until(Some(Duration::ZERO), || Ok(None::<i32>)).unwrap();
+    let miss = poll_until(Some(Duration::ZERO), || Ok::<_, ManagerError>(None::<i32>)).unwrap();
     assert_eq!(miss, None);
 
     // Errors from the check propagate immediately.

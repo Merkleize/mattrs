@@ -27,7 +27,6 @@
 //! future extension — say an `Action::SendWith(primary, companions)` driving
 //! [`spend_batch`](crate::manager::ContractManager::spend_batch).
 
-pub mod chain;
 mod runner;
 
 use std::any::TypeId;
@@ -37,7 +36,9 @@ use std::rc::Rc;
 use crate::contracts::WitnessError;
 use crate::manager::{InstanceHandle, ManagerError, SpendBuilder, WrongContractType};
 
-pub use chain::{ChainError, ChainView, LocalChain, RpcChain};
+#[cfg(feature = "rpc")]
+pub use crate::chain::RpcChain;
+pub use crate::chain::{ChainError, ChainView, LocalChain};
 pub use runner::{Progress, Runner, RunnerState};
 
 /// Bridge from a `contract!`-generated contract type to its typed handle and
@@ -585,6 +586,9 @@ mod tests {
             Err(ChainError::Other("no chain".into()))
         }
         fn find_spending_tx(&self, _outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+            Ok(None)
+        }
+        fn transaction(&self, _txid: Txid) -> Result<Option<Transaction>, ChainError> {
             Ok(None)
         }
         fn height(&self) -> Result<u32, ChainError> {

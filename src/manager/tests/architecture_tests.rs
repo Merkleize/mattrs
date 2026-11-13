@@ -50,7 +50,7 @@ fn rejected_broadcast_discards_all_staged_changes() {
     let (handle, builder, calls) = signed_spend_fixture(true);
     assert!(matches!(
         builder.exec(&mut manager),
-        Err(ManagerError::RpcError(_))
+        Err(ManagerError::Chain(crate::chain::ChainError::Rpc(_)))
     ));
     let submitted = server.join().unwrap();
     assert!(!submitted.input[0].witness.is_empty());
@@ -63,7 +63,7 @@ fn rejected_broadcast_discards_all_staged_changes() {
 
 #[test]
 fn late_registry_conflict_is_rejected_before_broadcast() {
-    let mut manager = offline_manager(); // Any attempted broadcast would fail with RpcError.
+    let mut manager = offline_manager(); // Any attempted broadcast would fail with NoNode.
     let child = test_contract(90, None);
     let first = fund_fake(
         contract_yielding(1, vec![ClauseOutput::at(0).to(child.clone()).build()]),

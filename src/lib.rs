@@ -62,6 +62,7 @@ pub use contracts::{StateCodec, StateCommitment};
 
 pub mod argtypes;
 pub mod ccv;
+pub mod chain;
 pub mod contracts;
 pub mod ctv;
 pub mod fraud;

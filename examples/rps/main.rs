@@ -41,7 +41,6 @@ mod contracts;
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::rc::Rc;
 use std::str::FromStr;
 
 use bitcoin::bip32::Xpriv;
@@ -49,7 +48,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{ProtocolError, RpcChain, Runner};
+use mattrs::protocol::{ProtocolError, Runner};
 
 use contracts::roles::{AliceData, BobData, alice_role, bob_role, clause_of};
 use contracts::{DEFAULT_STAKE, RpsGameS0, RpsParams, alice_move_commitment};
@@ -184,9 +183,8 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppR
                 .map_err(|e| ProtocolError::Other(format!("failed to read confirmation: {e}")))
         })),
     };
-    let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
     // Run with no time limit: a human counterparty takes their time.
-    let outcome = Runner::new(manager, chain, alice_role(), data, entry).run_one()?;
+    let outcome = Runner::new(manager, alice_role(), data, entry).run_one()?;
     println!(
         "Game over: {} (pot: {} sats)",
         clause_of(outcome.result).name(),
@@ -242,8 +240,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
     println!("Bob plays {} — broadcasting the move", move_str(m_b));
     println!("Then waiting for Alice's adjudication on-chain...");
     let data = BobData { m_b, c_a, xpriv };
-    let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
-    let outcome = Runner::new(manager, chain, bob_role(), data, entry).run_one()?;
+    let outcome = Runner::new(manager, bob_role(), data, entry).run_one()?;
     println!("Alice played {}", move_str(outcome.m_a));
     println!(
         "Game over: {} (pot: {} sats)",

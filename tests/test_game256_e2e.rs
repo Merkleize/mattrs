@@ -17,13 +17,12 @@
 
 mod support;
 
-use std::rc::Rc;
 use std::time::Duration;
 
 use bitcoin::Amount;
 use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{RpcChain, Runner};
+use mattrs::protocol::Runner;
 use mattrs::report::Report;
 use mattrs::script_helpers::key_path_p2tr as p2tr;
 
@@ -75,20 +74,8 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         xpriv: bob_xpriv(),
     };
 
-    let mut alice = Runner::new(
-        alice_manager,
-        Rc::new(RpcChain::new(regtest_client("testwallet"))),
-        alice_game_role(),
-        alice_data,
-        alice_entry,
-    );
-    let mut bob = Runner::new(
-        bob_manager,
-        Rc::new(RpcChain::new(regtest_client("testwallet"))),
-        bob_game_role(),
-        bob_data,
-        bob_entry.clone(),
-    );
+    let mut alice = Runner::new(alice_manager, alice_game_role(), alice_data, alice_entry);
+    let mut bob = Runner::new(bob_manager, bob_game_role(), bob_data, bob_entry.clone());
 
     // Interleave the two parties until both resolve (the happy path lives in
     // the mempool; nothing needs mining).

@@ -560,7 +560,7 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
 #[test]
 fn test_offline_manager_reports_node_operations() {
     let mut manager = ContractManager::offline(bitcoin::Network::Regtest);
-    assert!(matches!(manager.rpc(), Err(ManagerError::NoNode)));
+    assert!(matches!(manager.chain(), Err(ManagerError::NoNode)));
     let vault = Vault::new(VaultParams {
         alternate_pk: None,
         spend_delay: 10,
@@ -572,4 +572,60 @@ fn test_offline_manager_reports_node_operations() {
         vault.fund(&mut manager, Amount::from_sat(1_000)),
         Err(ManagerError::NoNode)
     ));
+}
+
+/// The whole funded → spent lifecycle on the in-memory chain: one party funds
+/// and spends with the ordinary `fund` / `exec` API, another tracks the same
+/// outpoint and follows the spend, and both end with the same child.
+#[test]
+fn test_fund_exec_and_follow_on_a_local_chain() {
+    use mattrs::chain::{ChainView, LocalChain};
+    use mattrs::signer::HotSigner;
+    use std::rc::Rc;
+    use support::testkit::alice_xpriv;
+
+    let chain = Rc::new(LocalChain::new());
+    let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let mut observer = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+
+    let vault = Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })
+    .unwrap();
+    let funded = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
+    let outpoint = funded.handle().outpoint();
+    actor.mine_blocks(1).unwrap();
+    assert_eq!(chain.confirmation_height(outpoint.txid).unwrap(), Some(1));
+
+    let watched = Vault::track(&vault, &mut observer, outpoint).unwrap();
+
+    let children = funded
+        .trigger([9; 32], 0)
+        .sign(HotSigner::new(alice_xpriv()))
+        .exec(&mut actor)
+        .unwrap();
+    assert_eq!(children.len(), 1);
+
+    let seen = observer.wait_for_spend(watched.handle()).unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].outpoint(), children[0].outpoint());
+
+    // The chain refuses a second spend of the same output, and the manager
+    // records nothing for it.
+    let again = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
+    let first = again
+        .trigger([1; 32], 0)
+        .sign(HotSigner::new(alice_xpriv()));
+    let tx = first.build_tx().unwrap();
+    let mut conflicting = tx.clone();
+    conflicting.lock_time = bitcoin::absolute::LockTime::from_consensus(7);
+    chain.broadcast(&conflicting).unwrap();
+    assert!(matches!(
+        first.exec(&mut actor),
+        Err(ManagerError::Chain(mattrs::chain::ChainError::Rejected(_)))
+    ));
+    assert_eq!(again.handle().status(), InstanceStatus::Funded);
 }

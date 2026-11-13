@@ -3,7 +3,8 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::manager::{ContractManager, InstanceHandle, ManagerError, POLL_INTERVAL};
+use crate::chain::POLL_INTERVAL;
+use crate::manager::{ContractManager, InstanceHandle, ManagerError};
 
 use super::{Action, ChainView, ContractKey, ProtocolError, Role, StepCtx, TimeoutAction};
 
@@ -79,14 +80,14 @@ enum TokenStep<O> {
 /// resolves an outcome. The protocol is done when no token is left.
 ///
 /// The runner owns the party's [`ContractManager`] (its local model of every
-/// instance) and performs all chain I/O through a shared [`ChainView`], so the
-/// same role runs unchanged against a regtest node or the in-memory
-/// [`LocalChain`](super::chain::LocalChain).
+/// instance) and performs all chain I/O through that manager's [`ChainView`],
+/// so the same role runs unchanged against a regtest node or the in-memory
+/// [`LocalChain`](crate::chain::LocalChain). The manager must therefore be on
+/// a chain ([`ContractManager::on`] / `new`), not offline.
 pub struct Runner<D, O> {
     role: Role<D, O>,
     data: D,
     manager: ContractManager,
-    chain: Rc<dyn ChainView>,
     /// Live, not-yet-failed tokens.
     tokens: Vec<TokenState<O>>,
     outcomes: Vec<O>,
@@ -97,18 +98,11 @@ pub struct Runner<D, O> {
 impl<D: 'static, O: 'static> Runner<D, O> {
     /// A runner for `role` (with the party's private `data`), starting at the
     /// funded or tracked `entry` instance.
-    pub fn new(
-        manager: ContractManager,
-        chain: Rc<dyn ChainView>,
-        role: Role<D, O>,
-        data: D,
-        entry: InstanceHandle,
-    ) -> Self {
+    pub fn new(manager: ContractManager, role: Role<D, O>, data: D, entry: InstanceHandle) -> Self {
         Runner {
             role,
             data,
             manager,
-            chain,
             tokens: vec![TokenState {
                 current: entry,
                 parent: None,
@@ -280,10 +274,11 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 let handler = self.role.arrival(&key).ok_or(ProtocolError::NoHandler {
                     contract: key.name.to_string(),
                 })?;
+                let chain = self.chain()?;
                 let action = {
                     let cx = StepCtx {
                         parent: parent.as_ref(),
-                        chain: self.chain.as_ref(),
+                        chain: chain.as_ref(),
                     };
                     handler(&mut self.data, current.clone(), &cx)?
                 };
@@ -293,18 +288,9 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         }
     }
 
-    /// Sign, validate and stage a spend, then broadcast it on the runner's
-    /// chain, recording it only once the broadcast succeeded. A spend the
-    /// manager could not record never reaches the chain.
-    fn send(
-        &mut self,
-        builder: crate::manager::SpendBuilder,
-    ) -> Result<crate::manager::Children, ProtocolError> {
-        let chain = &self.chain;
-        self.manager
-            .spend_batch_with(std::slice::from_ref(&builder), |tx| {
-                chain.broadcast(tx).map_err(ProtocolError::from)
-            })
+    /// The manager's chain backend, which is also the runner's.
+    fn chain(&self) -> Result<Rc<dyn ChainView>, ProtocolError> {
+        Ok(self.manager.chain()?.clone())
     }
 
     /// Carry out a handler's decision for the token at `current`.
@@ -321,7 +307,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                         "role returned a spend builder for a different instance".to_string(),
                     ));
                 }
-                let children = self.send(builder)?;
+                let children = self.manager.spend_batch(std::slice::from_ref(&builder))?;
                 self.follow_spend(children, current, parent)
             }
             Action::SendFinal(builder, outcome) => {
@@ -330,7 +316,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                         "role returned a final spend builder for a different instance".to_string(),
                     ));
                 }
-                self.send(builder)?;
+                self.manager.spend_batch(std::slice::from_ref(&builder))?;
                 Ok(TokenStep::Resolved(Some(outcome)))
             }
             // Poll right away: the spend may already be there (e.g. an
@@ -357,15 +343,15 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         timeout: Option<Timeout<O>>,
     ) -> Result<TokenStep<O>, ProtocolError> {
         let outpoint = current.outpoint();
+        let chain = self.chain()?;
 
-        if let Some(tx) = self.chain.find_spending_tx(outpoint)? {
+        if let Some(tx) = chain.find_spending_tx(outpoint)? {
             let children = self.manager.observe_spend(&current, &tx)?;
             return self.follow_spend(children, current, parent);
         }
 
         if let Some(t) = &timeout {
-            let deadline = self
-                .chain
+            let deadline = chain
                 .confirmation_height(outpoint.txid)?
                 .map(|confirmed| {
                     confirmed
@@ -374,7 +360,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 })
                 .transpose()?;
             if let Some(deadline) = deadline
-                && self.chain.height()? >= deadline
+                && chain.height()? >= deadline
             {
                 let t = timeout.expect("checked above");
                 return self.execute_action(t.on_timeout.into(), current, parent);
@@ -405,9 +391,10 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             let settler = self.role.settlement(&key).ok_or(ProtocolError::NoHandler {
                 contract: format!("{} (settlement)", key.name),
             })?;
+            let chain = self.chain()?;
             let cx = StepCtx {
                 parent: parent.as_ref(),
-                chain: self.chain.as_ref(),
+                chain: chain.as_ref(),
             };
             let outcome = settler(&mut self.data, current.clone(), &cx)?;
             return Ok(TokenStep::Resolved(Some(outcome)));

@@ -31,7 +31,7 @@ use support::game256_roles::{
     fill_fraud_data, game_fraud_data, honest_vals,
 };
 use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, offline_manager, walk_tip,
+    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, manager_on, walk_tip,
 };
 
 const AMOUNT: u64 = 20_000;
@@ -84,15 +84,13 @@ fn setup(
     };
 
     let alice = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         alice_game_role(),
         alice_data,
         alice_entry.clone(),
     );
     let bob_runner = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         bob_game_role(),
         bob_data,
         bob_entry.clone(),

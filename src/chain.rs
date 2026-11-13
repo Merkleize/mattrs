@@ -1,21 +1,42 @@
-//! Chain access for protocol runners.
+//! Chain access: the one seam between mattrs and a Bitcoin node.
 //!
-//! Everything a runner does against the chain goes through [`ChainView`], so
-//! the same role logic runs identically against a real node ([`RpcChain`]) and
-//! against the in-memory chain used by deterministic offline tests
-//! ([`LocalChain`]).
+//! Everything the [`ContractManager`](crate::manager::ContractManager) and the
+//! protocol [`Runner`](crate::protocol::Runner) do against the chain goes
+//! through [`ChainView`], so the same contract and role logic runs identically
+//! against a real node (`RpcChain`, with the `rpc` feature) and against the
+//! in-memory chain used by deterministic offline tests ([`LocalChain`]).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::time::Duration;
 
-use bitcoin::{OutPoint, Transaction, Txid};
-use bitcoincore_rpc::{Client, RpcApi};
+use bitcoin::{Amount, OutPoint, Script, Transaction, TxOut, Txid};
 
-use crate::manager::{
-    BlockCache, ManagerError, find_spending_tx_once, is_tx_not_found, spend_scan_start,
-    tx_confirmation_height,
-};
+#[cfg(feature = "rpc")]
+mod rpc;
+#[cfg(feature = "rpc")]
+pub use rpc::{RpcChain, regtest_rpc_client};
+
+/// The interval between chain polls.
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Poll `check` every [`POLL_INTERVAL`] until it yields a value or `window`
+/// elapses (`None` = poll forever). Returns `Ok(None)` on timeout.
+pub(crate) fn poll_until<T, E>(
+    window: Option<Duration>,
+    mut check: impl FnMut() -> Result<Option<T>, E>,
+) -> Result<Option<T>, E> {
+    let deadline = window.map(|w| std::time::Instant::now() + w);
+    loop {
+        if let Some(value) = check()? {
+            return Ok(Some(value));
+        }
+        if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+            return Ok(None);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
 
 /// Why a [`ChainView`] operation failed. Deliberately independent of the
 /// protocol and manager layers, so a chain backend can be implemented (and
@@ -23,9 +44,13 @@ use crate::manager::{
 #[derive(Debug)]
 pub enum ChainError {
     /// The node could not be reached, or answered with an error.
+    #[cfg(feature = "rpc")]
     Rpc(bitcoincore_rpc::Error),
     /// The chain refused a broadcast transaction (e.g. a double spend).
     Rejected(String),
+    /// This backend does not provide the operation (e.g. a read-only view
+    /// asked to fund an output).
+    Unsupported(&'static str),
     /// Any other backend failure.
     Other(String),
 }
@@ -33,8 +58,10 @@ pub enum ChainError {
 impl std::fmt::Display for ChainError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "rpc")]
             ChainError::Rpc(e) => write!(f, "RPC error: {e}"),
             ChainError::Rejected(msg) => write!(f, "transaction rejected: {msg}"),
+            ChainError::Unsupported(op) => write!(f, "this chain backend cannot {op}"),
             ChainError::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -43,32 +70,16 @@ impl std::fmt::Display for ChainError {
 impl std::error::Error for ChainError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "rpc")]
             ChainError::Rpc(e) => Some(e),
             _ => None,
         }
     }
 }
 
-impl From<bitcoincore_rpc::Error> for ChainError {
-    fn from(e: bitcoincore_rpc::Error) -> Self {
-        ChainError::Rpc(e)
-    }
-}
-
-/// The manager's node-scanning helpers report [`ManagerError`]; only its RPC
-/// variant can actually occur there.
-impl From<ManagerError> for ChainError {
-    fn from(e: ManagerError) -> Self {
-        match e {
-            ManagerError::RpcError(e) => ChainError::Rpc(e),
-            other => ChainError::Other(other.to_string()),
-        }
-    }
-}
-
-/// The chain operations a protocol runner performs. Methods take `&self`
+/// The chain operations mattrs performs. Methods take `&self`
 /// (implementations use interior mutability) so one chain can be shared —
-/// e.g. by two parties' runners interleaved in a test.
+/// e.g. by two parties' managers interleaved in a test.
 pub trait ChainView {
     /// Broadcast a transaction.
     fn broadcast(&self, tx: &Transaction) -> Result<(), ChainError>;
@@ -77,99 +88,31 @@ pub trait ChainView {
     /// (mempool or block), if one exists.
     fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError>;
 
+    /// The transaction `txid`, if this chain knows it (mempool or block).
+    fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError>;
+
     /// The current tip height.
     fn height(&self) -> Result<u32, ChainError>;
 
     /// The height `txid` confirmed at (`None` while unconfirmed or unknown).
     fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ChainError>;
-}
 
-/// A [`ChainView`] over a real Bitcoin node's RPC interface (the same watching
-/// strategy as [`ContractManager::wait_for_spend`]: the mempool via
-/// `gettxspendingprevout`, plus a per-outpoint block scan from the funding
-/// transaction's height onward).
-///
-/// [`ContractManager::wait_for_spend`]: crate::manager::ContractManager::wait_for_spend
-pub struct RpcChain {
-    client: Client,
-    scan: RefCell<ScanState>,
-}
-
-#[derive(Default)]
-struct ScanState {
-    /// Per-outpoint cursor of the next block height to scan for a spend.
-    cursors: HashMap<OutPoint, u64>,
-    /// Blocks fetched by one outpoint's scan and not yet passed by all the
-    /// others, so concurrent tokens download each new block once.
-    blocks: BlockCache,
-}
-
-impl ScanState {
-    /// Bookkeeping after one look for a spend of `outpoint`. A found spend is
-    /// final for this scan, so its cursor is dropped: a cursor left behind
-    /// would pin the eviction floor at its height and retain every block
-    /// fetched afterwards. Blocks below every remaining cursor are evicted.
-    fn settle(&mut self, outpoint: OutPoint, found: bool) {
-        if found {
-            self.cursors.remove(&outpoint);
-        }
-        match self.cursors.values().copied().min() {
-            Some(min) => self.blocks.retain_from(min),
-            None => self.blocks.clear(),
-        }
-    }
-}
-
-impl RpcChain {
-    /// Wrap an RPC client (e.g. from
-    /// [`regtest_rpc_client`](crate::manager::regtest_rpc_client)).
-    pub fn new(client: Client) -> Self {
-        RpcChain {
-            client,
-            scan: RefCell::new(ScanState::default()),
-        }
-    }
-}
-
-impl ChainView for RpcChain {
-    fn broadcast(&self, tx: &Transaction) -> Result<(), ChainError> {
-        self.client.send_raw_transaction(tx)?;
-        Ok(())
+    /// Pay `amount` to `script_pubkey` from the backend's own funds (a node
+    /// wallet, or thin air on a test chain) and return the funding
+    /// transaction. Backends without funds keep the default, which refuses.
+    fn fund_output(
+        &self,
+        script_pubkey: &Script,
+        amount: Amount,
+    ) -> Result<Transaction, ChainError> {
+        let _ = (script_pubkey, amount);
+        Err(ChainError::Unsupported("fund outputs"))
     }
 
-    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
-        let mut scan = self.scan.borrow_mut();
-        let ScanState { cursors, blocks } = &mut *scan;
-        let cursor = match cursors.entry(outpoint) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(spend_scan_start(&self.client, outpoint)?),
-        };
-        let found = find_spending_tx_once(&self.client, outpoint, cursor, blocks)?;
-        scan.settle(outpoint, found.is_some());
-        Ok(found)
-    }
-
-    fn height(&self) -> Result<u32, ChainError> {
-        let height = self.client.get_block_count()?;
-        u32::try_from(height)
-            .map_err(|_| ChainError::Other(format!("block height {height} exceeds u32::MAX")))
-    }
-
-    fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ChainError> {
-        match tx_confirmation_height(&self.client, &txid) {
-            Ok(height) => height
-                .map(|h| {
-                    u32::try_from(h).map_err(|_| {
-                        ChainError::Other(format!("confirmation height {h} exceeds u32::MAX"))
-                    })
-                })
-                .transpose(),
-            // A transaction the node does not know (yet) is *unknown*, not a
-            // failure — the same answer `LocalChain` gives, so a role behaves
-            // identically on both chain views.
-            Err(ManagerError::RpcError(e)) if is_tx_not_found(&e) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+    /// Mine `n` blocks (regtest and test chains). The default refuses.
+    fn mine_blocks(&self, n: u32) -> Result<(), ChainError> {
+        let _ = n;
+        Err(ChainError::Unsupported("mine blocks"))
     }
 }
 
@@ -178,7 +121,7 @@ impl ChainView for RpcChain {
 /// order, routing, timeouts) — consensus validity stays with the regtest
 /// end-to-end tests.
 ///
-/// Share one instance between the parties' runners (`Rc<LocalChain>`) and
+/// Share one instance between the parties' managers (`Rc<LocalChain>`) and
 /// advance time explicitly with [`mine`](LocalChain::mine) to exercise
 /// timeout paths.
 #[derive(Default)]
@@ -197,6 +140,9 @@ struct LocalChainInner {
     txs: HashMap<Txid, Transaction>,
     /// Which transaction spends each outpoint (mempool and blocks alike).
     spends: HashMap<OutPoint, Txid>,
+    /// How many outputs [`fund_output`](ChainView::fund_output) created, so
+    /// each funding transaction is distinct.
+    funded: u32,
 }
 
 impl LocalChain {
@@ -257,12 +203,48 @@ impl ChainView for LocalChain {
             .map(|txid| inner.txs[txid].clone()))
     }
 
+    fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError> {
+        Ok(self.inner.borrow().txs.get(&txid).cloned())
+    }
+
     fn height(&self) -> Result<u32, ChainError> {
         Ok(self.inner.borrow().height)
     }
 
     fn confirmation_height(&self, txid: Txid) -> Result<Option<u32>, ChainError> {
         Ok(self.inner.borrow().confirmed.get(&txid).copied())
+    }
+
+    /// Mint the output out of thin air: an input-less transaction, placed in
+    /// the mempool like any other.
+    fn fund_output(
+        &self,
+        script_pubkey: &Script,
+        amount: Amount,
+    ) -> Result<Transaction, ChainError> {
+        let mut inner = self.inner.borrow_mut();
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            // Distinct lock times give distinct txids for equal outputs.
+            lock_time: bitcoin::absolute::LockTime::from_consensus(inner.funded),
+            input: vec![],
+            output: vec![TxOut {
+                script_pubkey: script_pubkey.to_owned(),
+                value: amount,
+            }],
+        };
+        inner.funded += 1;
+        let txid = tx.compute_txid();
+        inner.txs.insert(txid, tx.clone());
+        inner.mempool.push(txid);
+        Ok(tx)
+    }
+
+    fn mine_blocks(&self, n: u32) -> Result<(), ChainError> {
+        if n > 0 {
+            self.mine(n);
+        }
+        Ok(())
     }
 }
 
@@ -293,32 +275,6 @@ mod tests {
             txid: Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([seed; 32])),
             vout: 0,
         }
-    }
-
-    #[test]
-    fn a_found_spend_releases_its_cursor_and_blocks() {
-        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
-        let mut scan = ScanState::default();
-        scan.cursors.insert(outpoint(1), 10);
-        scan.cursors.insert(outpoint(2), 12);
-        for height in 10..=14 {
-            scan.blocks.insert(height, block.clone());
-        }
-
-        // Still waiting on both: everything from the lowest cursor is kept.
-        scan.settle(outpoint(2), false);
-        assert_eq!(scan.blocks.len(), 5);
-
-        // The lagging outpoint's spend is found: its cursor must not keep
-        // pinning the blocks only it still needed.
-        scan.settle(outpoint(1), true);
-        assert!(!scan.cursors.contains_key(&outpoint(1)));
-        assert_eq!(scan.blocks.len(), 3);
-
-        // Nothing left to watch: nothing left to cache.
-        scan.settle(outpoint(2), true);
-        assert!(scan.cursors.is_empty());
-        assert_eq!(scan.blocks.len(), 0);
     }
 
     #[test]
@@ -359,5 +315,24 @@ mod tests {
         chain.assume_confirmed(txid, 5);
         assert_eq!(chain.confirmation_height(txid).unwrap(), Some(5));
         assert_eq!(chain.height().unwrap(), 5);
+    }
+
+    #[test]
+    fn funding_mints_distinct_known_outputs() {
+        let chain = LocalChain::new();
+        let spk = bitcoin::ScriptBuf::new();
+        let a = chain.fund_output(&spk, Amount::from_sat(5)).unwrap();
+        let b = chain.fund_output(&spk, Amount::from_sat(5)).unwrap();
+        assert_ne!(a.compute_txid(), b.compute_txid());
+        assert_eq!(
+            chain.transaction(a.compute_txid()).unwrap(),
+            Some(a.clone())
+        );
+        assert_eq!(chain.confirmation_height(a.compute_txid()).unwrap(), None);
+        chain.mine_blocks(1).unwrap();
+        assert_eq!(
+            chain.confirmation_height(a.compute_txid()).unwrap(),
+            Some(1)
+        );
     }
 }

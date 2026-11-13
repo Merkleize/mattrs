@@ -23,7 +23,7 @@ use support::rps::roles::{
     AliceData, BobData, RpsOutcome, RpsResult, alice_role, bob_role, outcome_of,
 };
 use support::rps::{DEFAULT_STAKE, RpsGameS0, RpsGameS0Handle, RpsParams, alice_move_commitment};
-use support::testkit::{alice_pk, bob_pk, bob_xpriv, drive_both, offline_manager, walk_tip};
+use support::testkit::{alice_pk, bob_pk, bob_xpriv, drive_both, manager_on, walk_tip};
 
 const SEED: u8 = 21;
 
@@ -58,8 +58,7 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
     );
 
     let mut alice = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         alice_role(),
         AliceData {
             m_a,
@@ -69,8 +68,7 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
         alice_entry,
     );
     let mut bob = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         bob_role(),
         BobData {
             m_b,
@@ -117,8 +115,7 @@ fn missing_handler_is_reported() {
     let truncated: Role<(), RpsOutcome> =
         Role::new().on::<RpsGameS0, _>(|_d: &mut (), _h: RpsGameS0Handle, _cx| Ok(Action::Wait));
     let mut watcher = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         truncated,
         (),
         fund_fake(
@@ -130,8 +127,7 @@ fn missing_handler_is_reported() {
     );
 
     let mut bob = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         bob_role(),
         BobData {
             m_b: 1,
@@ -186,7 +182,7 @@ fn action_cannot_spend_a_different_token() {
     let wrong = other.clone();
     let role: Role<(), ()> =
         Role::new().on::<RpsGameS0, _>(move |_d, _h, _cx| Ok(Action::Send(wrong.bob_move(1))));
-    let mut runner = Runner::new(offline_manager(), chain.clone(), role, (), entry.clone());
+    let mut runner = Runner::new(manager_on(chain.clone()), role, (), entry.clone());
 
     let err = runner.step().unwrap_err();
     assert!(matches!(&err, ProtocolError::Other(msg) if msg.contains("different instance")));
@@ -213,8 +209,7 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
         })
     });
     let mut zero = Runner::new(
-        offline_manager(),
-        Rc::new(LocalChain::new()),
+        manager_on(Rc::new(LocalChain::new())),
         zero_role,
         (),
         zero_entry,
@@ -243,7 +238,7 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
             on_timeout: TimeoutAction::Finish(()),
         })
     });
-    let mut runner = Runner::new(offline_manager(), chain.clone(), role, (), entry);
+    let mut runner = Runner::new(manager_on(chain.clone()), role, (), entry);
     assert!(matches!(runner.step().unwrap(), Progress::Waiting));
 
     // Simulate a reorg moving the funding transaction much later. A cached

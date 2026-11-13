@@ -258,12 +258,10 @@ pub(super) fn validate_output_constraints(
             txid: spending_tx.compute_txid(),
             vout: index,
         };
-        let actual = spending_tx.output.get(index as usize).ok_or_else(|| {
-            if payment {
-                ManagerError::PaymentOutputMismatch { index }
-            } else {
-                ManagerError::MissingContractOutput(outpoint)
-            }
+        let actual = spending_tx.output.get(index as usize).ok_or(if payment {
+            ManagerError::PaymentOutputMismatch { index }
+        } else {
+            ManagerError::MissingContractOutput(outpoint)
         })?;
         if actual.script_pubkey != output.script_pubkey {
             return Err(if payment {

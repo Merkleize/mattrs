@@ -54,6 +54,14 @@ pub fn offline_manager() -> mattrs::manager::ContractManager {
     mattrs::manager::ContractManager::offline(bitcoin::Network::Regtest)
 }
 
+/// A manager on `chain`, for tests driving protocols on a `LocalChain` shared
+/// between the parties.
+pub fn manager_on(
+    chain: std::rc::Rc<mattrs::chain::LocalChain>,
+) -> mattrs::manager::ContractManager {
+    mattrs::manager::ContractManager::on(chain, bitcoin::Network::Regtest)
+}
+
 /// Interleave two parties' runners — one step each per round — until both
 /// resolve their (single) outcome, or `max_steps` rounds run out (an
 /// unresolved side stays `None`). `pace` idles between rounds:

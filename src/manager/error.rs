@@ -8,7 +8,8 @@ pub enum ManagerError {
     /// The operation needs a node, but this manager was created
     /// [`offline`](super::ContractManager::offline).
     NoNode,
-    RpcError(bitcoincore_rpc::Error),
+    /// The chain backend failed (node unreachable, transaction rejected, ...).
+    Chain(crate::chain::ChainError),
     ClauseError(ClauseError),
     ContractError(ContractError),
     InvalidInstance(String),
@@ -136,7 +137,7 @@ impl std::fmt::Display for ManagerError {
             ManagerError::NoNode => {
                 write!(f, "this manager is offline: the operation needs a node")
             }
-            ManagerError::RpcError(e) => write!(f, "RPC error: {}", e),
+            ManagerError::Chain(e) => write!(f, "chain error: {}", e),
             ManagerError::ClauseError(e) => write!(f, "Clause error: {}", e),
             ManagerError::ContractError(e) => write!(f, "Contract error: {}", e),
             ManagerError::InvalidInstance(msg) => write!(f, "Invalid instance: {}", msg),
@@ -275,9 +276,9 @@ impl std::fmt::Display for ManagerError {
 
 impl std::error::Error for ManagerError {}
 
-impl From<bitcoincore_rpc::Error> for ManagerError {
-    fn from(e: bitcoincore_rpc::Error) -> Self {
-        ManagerError::RpcError(e)
+impl From<crate::chain::ChainError> for ManagerError {
+    fn from(e: crate::chain::ChainError) -> Self {
+        ManagerError::Chain(e)
     }
 }
 

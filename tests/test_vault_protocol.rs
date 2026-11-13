@@ -18,14 +18,12 @@ use std::time::Duration;
 use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{Action, LocalChain, Progress, ProtocolError, Role, RpcChain, Runner};
+use mattrs::protocol::{Action, LocalChain, Progress, ProtocolError, Role, Runner};
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 use mattrs::testutil::fund_fake;
 
-use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, drive_both, offline_manager, regtest_client,
-};
+use support::testkit::{alice_pk, alice_xpriv, bob_pk, drive_both, manager_on, regtest_client};
 use support::vault::{Unvaulting, Vault, VaultHandle, VaultParams};
 use support::vault_roles::{
     OwnerData, TriggerStep, VaultOutcome, WatchtowerData, owner_role, watchtower_role,
@@ -95,8 +93,7 @@ fn revault_forks_and_both_branches_withdraw() {
     ];
     let entry = fake_vault(SEED);
     let mut owner = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         owner_role(),
         OwnerData::new(alice_xpriv(), plan),
         entry.clone(),
@@ -167,8 +164,7 @@ fn identical_templates_on_both_branches_withdraw() {
         },
     ];
     let mut owner = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         owner_role(),
         OwnerData::new(alice_xpriv(), plan),
         fake_vault(SEED),
@@ -196,8 +192,7 @@ fn watchtower_recovers_an_unauthorized_unvaulting() {
     // The owner's key is compromised: the thief triggers a withdrawal whose
     // CTV hash the watchtower was never told about.
     let mut thief = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         owner_role(),
         OwnerData::new(
             alice_xpriv(),
@@ -210,8 +205,7 @@ fn watchtower_recovers_an_unauthorized_unvaulting() {
     );
     let tower_entry = fake_vault(SEED);
     let mut tower = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         watchtower_role(),
         WatchtowerData {
             authorized: HashSet::new(),
@@ -247,8 +241,7 @@ fn watchtower_keeps_watching_the_revaulted_branch() {
     // The thief splits the vault, stealing the larger branch (and leaving the
     // revaulted remainder alone — for now).
     let mut thief = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         owner_role(),
         OwnerData::new(
             alice_xpriv(),
@@ -260,8 +253,7 @@ fn watchtower_keeps_watching_the_revaulted_branch() {
         fake_vault(SEED),
     );
     let mut tower = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         watchtower_role(),
         WatchtowerData {
             authorized: HashSet::new(),
@@ -326,8 +318,7 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
 
     // Handling Vault but not Unvaulting: the spend's child is a loud error...
     let mut runner = Runner::new(
-        offline_manager(),
-        Rc::new(LocalChain::new()),
+        manager_on(Rc::new(LocalChain::new())),
         trigger_only(),
         OwnerData::new(alice_xpriv(), plan()),
         fake_vault(SEED),
@@ -343,8 +334,7 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
     // ...unless the role explicitly ignores it: then every branch of the spend
     // is somebody else's business and the token resolves silently.
     let mut runner = Runner::new(
-        offline_manager(),
-        Rc::new(LocalChain::new()),
+        manager_on(Rc::new(LocalChain::new())),
         trigger_only().ignore::<Unvaulting>(),
         OwnerData::new(alice_xpriv(), plan()),
         fake_vault(SEED),
@@ -378,7 +368,6 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let mut owner = Runner::new(
         manager,
-        Rc::new(RpcChain::new(regtest_client("testwallet"))),
         owner_role(),
         OwnerData::new(alice_xpriv(), plan),
         entry.clone(),

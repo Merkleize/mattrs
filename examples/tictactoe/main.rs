@@ -33,7 +33,6 @@ mod contracts;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::rc::Rc;
 use std::str::FromStr;
 
 use bitcoin::bip32::Xpriv;
@@ -41,7 +40,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{ProtocolError, RpcChain, Runner};
+use mattrs::protocol::{ProtocolError, Runner};
 
 use contracts::roles::{PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role};
 use contracts::{
@@ -228,8 +227,7 @@ fn run_alice(
         xpriv,
         strategy: prompt_strategy(),
     };
-    let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
-    let outcome = Runner::new(manager, chain, alice_role(), data, entry).run_one()?;
+    let outcome = Runner::new(manager, alice_role(), data, entry).run_one()?;
     print_outcome(&outcome, stake);
     Ok(())
 }
@@ -289,8 +287,7 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
         xpriv,
         strategy: prompt_strategy(),
     };
-    let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
-    let outcome = Runner::new(manager, chain, bob_role(), data, entry).run_one()?;
+    let outcome = Runner::new(manager, bob_role(), data, entry).run_one()?;
     print_outcome(&outcome, stake);
     Ok(())
 }

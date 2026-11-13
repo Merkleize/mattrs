@@ -24,7 +24,7 @@ use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
 use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, fund_fake, offline_manager, try_handle,
+    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, fund_fake, manager_on, try_handle,
     walk_tip,
 };
 use support::tictactoe::roles::{
@@ -253,8 +253,7 @@ fn strategy_errors_propagate_from_the_role() {
     let chain = Rc::new(LocalChain::new());
     let entry = funded_game(TttState::initial());
     let mut runner = Runner::new(
-        offline_manager(),
-        chain,
+        manager_on(chain),
         alice_role(),
         PlayerData {
             xpriv: alice_xpriv(),
@@ -296,8 +295,7 @@ fn setup(
     );
 
     let alice = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         alice_role(),
         PlayerData {
             xpriv: alice_xpriv(),
@@ -306,8 +304,7 @@ fn setup(
         alice_entry.clone(),
     );
     let bob = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         bob_role(),
         PlayerData {
             xpriv: bob_xpriv(),

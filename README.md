@@ -510,6 +510,35 @@ cargo run -p mattrs-inspector       # or: nc localhost 34443
   typed arguments and materializes the child instances
   (see `tests/test_observe.rs`).
 
+## Chain backends and features
+
+The manager and the protocol runner reach the chain through one trait,
+`mattrs::chain::ChainView`:
+
+```rust
+// A Bitcoin Core node over RPC (the `rpc` feature, on by default).
+let mut manager = ContractManager::new(client, Network::Regtest);
+
+// The deterministic in-memory chain: no node, no scripts executed.
+let chain = Rc::new(LocalChain::new());
+let mut manager = ContractManager::on(chain.clone(), Network::Regtest);
+
+// No chain at all: build, sign and observe only.
+let mut manager = ContractManager::offline(Network::Regtest);
+```
+
+`fund`, `exec`, `track`, `wait_for_spend` and `mine_blocks` behave the same on
+every backend, so a contract's tests can run its real spend path on a
+`LocalChain` and reserve the node for consensus checks. Several managers on one
+shared `Rc` are several parties on the same chain. A `Runner` uses its
+manager's chain.
+
+| Feature | Default | Adds |
+|---|---|---|
+| `rpc` | yes | `RpcChain`, `ContractManager::new`, `regtest_rpc_client` (pulls in `bitcoincore-rpc`) |
+| `inspector` | no | the live JSON snapshot server |
+| `test-util` | no | `mattrs::testutil`, `mattrs::report` |
+
 ## Testing
 
 ```sh
