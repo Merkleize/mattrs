@@ -108,8 +108,23 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
         prepared.sign_funded(&manager, funded, external.clone(), Amount::from_sat(10_000))?;
     let wallet_signed =
         wallet.sign_raw_transaction_with_wallet(signed.transaction(), None, None)?;
-    if !wallet_signed.complete {
-        return Err(format!("wallet signing incomplete: {:?}", wallet_signed.errors).into());
+    // The wallet must sign every input it added. It may still report the
+    // transaction as incomplete: it re-verifies all inputs with its own script
+    // rules and cannot check covenant inputs, which the contract signers
+    // already authorized. Only an error on one of *its* inputs is a failure;
+    // the node's mempool acceptance below is the real validity check.
+    let unsigned_wallet_inputs: Vec<_> = wallet_signed
+        .errors
+        .iter()
+        .flatten()
+        .filter(|e| {
+            external
+                .iter()
+                .any(|x| x.outpoint.txid == e.txid && x.outpoint.vout == e.vout)
+        })
+        .collect();
+    if !unsigned_wallet_inputs.is_empty() {
+        return Err(format!("wallet signing incomplete: {unsigned_wallet_inputs:?}").into());
     }
     let final_tx: Transaction = bitcoin::consensus::deserialize(&wallet_signed.hex)?;
     signed.validate_final(&final_tx)?;
