@@ -99,8 +99,8 @@ impl ContractManager {
     /// spends only a subset of `handles` or has unknown co-inputs, return an
     /// error without observing any parent. Performs node reads but no broadcast.
     ///
-    /// For inputs that may be spent in separate transactions, use
-    /// [`wait_for_spends`](Self::wait_for_spends), which provides per-input checks.
+    /// For inputs that may be spent in separate transactions, call
+    /// [`wait_for_spend`](Self::wait_for_spend) on each.
     pub fn wait_for_batch(
         &mut self,
         handles: &[&InstanceHandle],
@@ -135,35 +135,6 @@ impl ContractManager {
         }
         let spending_tx = self.wait_for_spending_tx(handle.outpoint(), window)?;
         self.observe_spend(handle, &spending_tx)
-    }
-
-    /// [`wait_for_spend`](Self::wait_for_spend) for several instances (possibly
-    /// spent by one batch transaction). Children merged across inputs are
-    /// materialized once and returned once.
-    /// This uses per-input checks, not aggregate accounting. If all handles are
-    /// intended to spend together, use [`wait_for_batch`](Self::wait_for_batch).
-    pub fn wait_for_spends(
-        &mut self,
-        handles: &[InstanceHandle],
-    ) -> Result<Children, ManagerError> {
-        let mut result: Vec<InstanceHandle> = Vec::new();
-        // First discover/observe every spend, then revisit every handle so a
-        // Join seen before its defining input can link to the shared child.
-        for _ in 0..2 {
-            for handle in handles {
-                let children = if let Some(tx) = handle.spending_tx() {
-                    self.observe_spend(handle, &tx)?
-                } else {
-                    self.wait_for_spend(handle)?
-                };
-                for child in children {
-                    if !result.contains(&child) {
-                        result.push(child);
-                    }
-                }
-            }
-        }
-        Ok(Children::new(result))
     }
 
     /// Poll (within `window`; `None` = forever) until the chain reports a

@@ -318,7 +318,7 @@ Children are returned once, in output-index order; joins link in the same call.
 the node and performs that same strict observation. The offline `apply_batch`
 test helper calls `observe_batch` directly, without the node lookup.
 
-`observe_spend` and `wait_for_spends` remain useful for partial views, but only
+`observe_spend` and `wait_for_spend` remain useful for partial views, but only
 check individual inputs. Two independent lower-bound checks are not equivalent
 to checking a combined contribution. For ordinary wallet/fee inputs, use
 `observe_batch_with_external_inputs(&handles, &external_inputs, &tx)` instead.
