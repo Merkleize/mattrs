@@ -244,9 +244,16 @@ script layout:
 | **game256** (`game256.rs`) | the **bisection fraud proof** (`mattrs::fraud`) driven by the `G256S0/1/2` game stages | all taptrees match; full challenge regtest e2e |
 | **minivault** (`minivault.rs`) | CCV-only vault with feature-toggled clauses: a **runtime-shaped taptree** via the `StandardClause`/`ClauseTree` escape hatch | all 4 feature combos regtest e2e |
 
+Written for this crate rather than ported: `examples/getting_started.rs` and
+`examples/counter.rs` (the two introductory steps above), **tictactoe**
+(`examples/tictactoe/contracts.rs`: the board lives in the UTXO, every move
+re-commits it, and a forfait clause covers an idle player),
+`examples/wallet_funding.rs` (a contract spend whose fee comes from the node's
+wallet), and the aggregate-exits experiment described below.
+
 ## Demos
 
-Both demos run against a regtest node with a funded `testwallet` (cookie auth
+The demos run against a regtest node with a funded `testwallet` (cookie auth
 or `BITCOIN_RPC_*` env vars).
 
 **Two-player RPS** (`examples/rps/`) plays a Rock-Paper-Scissors game between
@@ -262,6 +269,17 @@ cargo run --example rps -- --bob --paper
 
 Omit the move flag to be prompted for one; `--addr host:port` and
 `--wallet name` override the defaults.
+
+**Two-player tic-tac-toe** (`examples/tictactoe/`) is set up the same way:
+the two processes agree on the game over a socket, then alternate moves
+on-chain, each a covenant spend re-committing the board. The runner of
+whoever benefits broadcasts the win or tie claim, or the forfait once the
+opponent idles past the timeout (mine blocks for that clock to run):
+
+```sh
+cargo run --example tictactoe -- --alice
+cargo run --example tictactoe -- --bob
+```
 
 **Vault REPL** (`examples/vault/`) drives the two-stage vault interactively:
 fund vaults, trigger several at once towards a CTV withdrawal template (with
@@ -292,7 +310,7 @@ cargo run --example aggregate_exits                          # all scenarios
 cargo run --example aggregate_exits -- --scenario fraud
 ```
 
-**Live inspector** — the rps and vault demos take `--inspector` (or `--inspector-port <P>`)
+**Live inspector** — the rps, tictactoe and vault demos take `--inspector` (or `--inspector-port <P>`)
 when built with the `inspector` feature: the manager then serves a JSON snapshot
 of every tracked instance over TCP on each state change, and the
 `mattrs-inspector` workspace crate renders it as a live TUI (instance table +

@@ -30,7 +30,7 @@ pub struct InstanceSnapshot {
     /// Position in the manager's instance list.
     pub index: usize,
     pub contract_name: String,
-    /// `Unfunded` / `Funded` / `Spent`.
+    /// `Funded` / `Spent`.
     pub status: String,
     /// The committed state bytes (hex), empty for stateless contracts.
     pub data_hex: String,
