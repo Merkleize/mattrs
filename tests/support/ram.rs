@@ -62,10 +62,10 @@ contract! {
                 let index = a
                     .proof
                     .leaf_index()
-                    .map_err(|e| ClauseError::Other(e.to_string()))?;
+                    .map_err(ClauseError::other)?;
                 let mut leaves = state.leaves.clone();
                 if index >= leaves.len() {
-                    return Err(ClauseError::Other("leaf index out of range".to_string()));
+                    return Err(ClauseError::other("leaf index out of range"));
                 }
                 leaves[index] = a.new_value;
                 Ok(vec![Ram::new(p.clone())?.output(CcvIndex::CURRENT, RamState { leaves })])

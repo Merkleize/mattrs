@@ -148,9 +148,7 @@ fn hash_only_templates_cannot_be_batched_by_the_builder() {
             builder
         };
         let err = mattrs::manager::build_batch_tx(&[builder, other.withdraw()]).unwrap_err();
-        assert!(
-            matches!(err, ManagerError::TransactionBuildError(ref message)
-            if message.contains("template-hash clauses are single-input only"))
-        );
+        assert!(matches!(err, ManagerError::InvalidSpend(ref message)
+            if message.contains("template-hash clauses are single-input only")));
     }
 }

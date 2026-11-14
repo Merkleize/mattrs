@@ -108,7 +108,7 @@ fn wit_proof_decode_rejects_non_binary_directions() {
     for direction in [-1, 2, 256] {
         let stack = vec![[0u8; 32].to_vec(), bn2vch(direction), [1u8; 32].to_vec()];
         let err = WitProof::<1>::decode_from_witness(&stack).unwrap_err();
-        assert!(matches!(err, WitnessError::InvalidValue(_)));
+        assert!(matches!(err, WitnessError::Invalid(_)));
     }
 }
 

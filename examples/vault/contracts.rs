@@ -219,7 +219,7 @@ contract! {
             script Unvaulting::withdraw_script;
             next(_p, a, s) {
                 if a.ctv_hash != s.ctv_hash {
-                    return Err(ClauseError::Other("withdrawal hash does not match committed state".into()));
+                    return Err(ClauseError::other("withdrawal hash does not match committed state"));
                 }
                 Ok(mattrs::contracts::NextOutputs::TemplateHash(s.ctv_hash))
             }

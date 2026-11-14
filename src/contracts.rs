@@ -45,26 +45,19 @@ use bitcoin::{
 /// Errors from encoding/decoding values to and from the witness stack.
 #[derive(Debug)]
 pub enum WitnessError {
-    /// Data has the wrong shape or content for the type being decoded.
-    InvalidData(String),
-    /// The input ended before a complete value could be decoded.
-    InsufficientData,
-    /// A lower-level decoding step failed.
-    DecodingFailed(String),
-    /// The witness stack doesn't have enough elements to deserialize.
-    StackUnderflow,
-    /// A value is invalid for its type (e.g., oversized integer, wrong-length pubkey).
-    InvalidValue(String),
+    /// The witness stack (or a value's bytes) ended before a complete value
+    /// could be decoded.
+    Missing,
+    /// The data is there but is not a valid encoding of the expected type
+    /// (wrong length, a non-minimal integer, an out-of-range value, ...).
+    Invalid(String),
 }
 
 impl fmt::Display for WitnessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            WitnessError::InvalidData(msg) => write!(f, "Invalid data: {}", msg),
-            WitnessError::InsufficientData => write!(f, "Insufficient data in witness"),
-            WitnessError::DecodingFailed(msg) => write!(f, "Decoding failed: {}", msg),
-            WitnessError::StackUnderflow => write!(f, "Witness stack underflow"),
-            WitnessError::InvalidValue(msg) => write!(f, "Invalid value: {}", msg),
+            WitnessError::Missing => write!(f, "the witness ends before the value does"),
+            WitnessError::Invalid(msg) => write!(f, "invalid witness data: {}", msg),
         }
     }
 }
@@ -73,6 +66,7 @@ impl std::error::Error for WitnessError {}
 
 /// Errors from executing a clause (computing its next outputs).
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ClauseError {
     /// The spend's witness stack could not be decoded into the clause's arguments.
     Witness(WitnessError),
@@ -92,7 +86,23 @@ impl fmt::Display for ClauseError {
     }
 }
 
-impl std::error::Error for ClauseError {}
+impl std::error::Error for ClauseError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ClauseError::Witness(e) => Some(e),
+            ClauseError::Contract(e) => Some(e),
+            ClauseError::Other(_) => None,
+        }
+    }
+}
+
+impl ClauseError {
+    /// An [`Other`](ClauseError::Other) failure, from anything printable: the
+    /// way a `next` block rejects arguments its script would reject.
+    pub fn other(message: impl fmt::Display) -> Self {
+        ClauseError::Other(message.to_string())
+    }
+}
 
 impl From<WitnessError> for ClauseError {
     fn from(e: WitnessError) -> Self {
@@ -114,6 +124,7 @@ impl From<ContractError> for ClauseError {
 
 /// Errors from contract address / key-derivation operations.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ContractError {
     /// A block-based CSV delay is outside 1..=65,535.
     InvalidBlockDelay { blocks: u32 },
@@ -173,7 +184,14 @@ impl fmt::Display for ContractError {
     }
 }
 
-impl std::error::Error for ContractError {}
+impl std::error::Error for ContractError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ContractError::StateDecoding(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<WitnessError> for ContractError {
     fn from(e: WitnessError) -> Self {
@@ -341,7 +359,7 @@ pub trait SingleWitnessElement: WitnessEncodable {
     fn encode_single(&self) -> Result<Vec<u8>, WitnessError> {
         let mut elements = self.encode_to_witness();
         if elements.len() != 1 {
-            return Err(WitnessError::InvalidData(format!(
+            return Err(WitnessError::Invalid(format!(
                 "single-element codec produced {} elements",
                 elements.len()
             )));
@@ -356,7 +374,7 @@ pub trait SingleWitnessElement: WitnessEncodable {
     {
         let (value, consumed) = Self::decode_from_witness(&[element])?;
         if consumed != 1 {
-            return Err(WitnessError::InvalidData(format!(
+            return Err(WitnessError::Invalid(format!(
                 "single-element codec consumed {consumed} elements"
             )));
         }
@@ -380,12 +398,12 @@ macro_rules! impl_scriptnum_witness {
 
             fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
                 if witness.is_empty() {
-                    return Err(WitnessError::StackUnderflow);
+                    return Err(WitnessError::Missing);
                 }
                 let val = crate::script::vch2bn(&witness[0])
-                    .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+                    .map_err(|e| WitnessError::Invalid(e.to_string()))?;
                 let value = <$t>::try_from(val).map_err(|_| {
-                    WitnessError::InvalidValue(format!(
+                    WitnessError::Invalid(format!(
                         "Script number {val} is out of range for {}",
                         stringify!($t),
                     ))
@@ -410,10 +428,10 @@ impl<const N: usize> WitnessEncodable for [u8; N] {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
         if witness[0].len() != N {
-            return Err(WitnessError::InvalidValue(format!(
+            return Err(WitnessError::Invalid(format!(
                 "Expected array of length {}, got {}",
                 N,
                 witness[0].len()
@@ -436,7 +454,7 @@ impl WitnessEncodable for Vec<u8> {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
         Ok((witness[0].clone(), 1))
     }
@@ -455,14 +473,10 @@ impl WitnessEncodable for bool {
     }
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        match witness
-            .first()
-            .ok_or(WitnessError::StackUnderflow)?
-            .as_slice()
-        {
+        match witness.first().ok_or(WitnessError::Missing)?.as_slice() {
             [] => Ok((false, 1)),
             [1] => Ok((true, 1)),
-            other => Err(WitnessError::InvalidValue(format!(
+            other => Err(WitnessError::Invalid(format!(
                 "not a canonical bool encoding: {other:02x?}"
             ))),
         }
@@ -480,16 +494,16 @@ impl WitnessEncodable for XOnlyPublicKey {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
         if witness[0].len() != 32 {
-            return Err(WitnessError::InvalidValue(format!(
+            return Err(WitnessError::Invalid(format!(
                 "Expected 32 bytes for XOnlyPublicKey, got {}",
                 witness[0].len()
             )));
         }
         let key = XOnlyPublicKey::from_slice(&witness[0])
-            .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+            .map_err(|e| WitnessError::Invalid(e.to_string()))?;
         Ok((key, 1))
     }
 }
@@ -513,7 +527,7 @@ impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
 
         match witness[0].as_slice() {
@@ -522,7 +536,7 @@ impl<T: WitnessEncodable> WitnessEncodable for Option<T> {
                 let (value, consumed) = T::decode_from_witness(&witness[1..])?;
                 Ok((Some(value), consumed + 1))
             }
-            other => Err(WitnessError::InvalidValue(format!(
+            other => Err(WitnessError::Invalid(format!(
                 "not a canonical option flag: {other:02x?}",
             ))),
         }
@@ -542,7 +556,7 @@ impl Signature {
     /// Wrap raw signature bytes.
     pub fn new(bytes: Vec<u8>) -> Result<Self, WitnessError> {
         if !bytes.is_empty() && !matches!(bytes.len(), 64 | 65) {
-            return Err(WitnessError::InvalidValue(format!(
+            return Err(WitnessError::Invalid(format!(
                 "taproot signature must be 64 or 65 bytes, got {}",
                 bytes.len()
             )));
@@ -577,7 +591,7 @@ impl WitnessEncodable for Signature {
     }
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        let first = witness.first().ok_or(WitnessError::StackUnderflow)?;
+        let first = witness.first().ok_or(WitnessError::Missing)?;
         Ok((Signature::new(first.clone())?, 1))
     }
 }
@@ -754,7 +768,7 @@ impl<'a> WitnessReader<'a> {
 
     fn take(&mut self) -> Result<&'a [u8], WitnessError> {
         let element = self.witness.get(self.pos).ok_or_else(|| {
-            WitnessError::InvalidData(format!(
+            WitnessError::Invalid(format!(
                 "witness element {} requested, but the stack has {}",
                 self.pos,
                 self.witness.len()
@@ -772,23 +786,23 @@ impl<'a> WitnessReader<'a> {
     /// The next element, as exactly 32 bytes.
     pub fn bytes32(&mut self) -> Result<[u8; 32], WitnessError> {
         let pos = self.pos;
-        self.take()?.try_into().map_err(|_| {
-            WitnessError::InvalidValue(format!("witness element {pos} is not 32 bytes"))
-        })
+        self.take()?
+            .try_into()
+            .map_err(|_| WitnessError::Invalid(format!("witness element {pos} is not 32 bytes")))
     }
 
     /// The next element, as a Bitcoin script number.
     pub fn num(&mut self) -> Result<i64, WitnessError> {
         let pos = self.pos;
         crate::script::vch2bn(self.take()?)
-            .map_err(|e| WitnessError::DecodingFailed(format!("witness element {pos}: {e}")))
+            .map_err(|e| WitnessError::Invalid(format!("witness element {pos}: {e}")))
     }
 
     /// The next element, as an x-only public key.
     pub fn xonly(&mut self) -> Result<XOnlyPublicKey, WitnessError> {
         let pos = self.pos;
         XOnlyPublicKey::from_slice(&self.bytes32()?).map_err(|e| {
-            WitnessError::InvalidValue(format!("witness element {pos} is not an x-only key: {e}"))
+            WitnessError::Invalid(format!("witness element {pos} is not an x-only key: {e}"))
         })
     }
 
@@ -808,7 +822,7 @@ impl<'a> WitnessReader<'a> {
     /// Assert every element was consumed.
     pub fn expect_end(&self) -> Result<(), WitnessError> {
         if self.remaining() != 0 {
-            return Err(WitnessError::InvalidData(format!(
+            return Err(WitnessError::Invalid(format!(
                 "{} unread witness elements past position {}",
                 self.remaining(),
                 self.pos
@@ -833,7 +847,7 @@ impl StateCodec for () {
         if bytes.is_empty() {
             Ok(())
         } else {
-            Err(WitnessError::InvalidData(
+            Err(WitnessError::Invalid(
                 "stateless contract has trailing data".to_string(),
             ))
         }

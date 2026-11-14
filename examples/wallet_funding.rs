@@ -155,7 +155,7 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
                 .find(|e| e.outpoint == outpoint)
                 .map(|e| e.prevout.clone())
                 .ok_or_else(|| {
-                    mattrs::manager::ManagerError::Other(format!(
+                    mattrs::manager::ManagerError::other(format!(
                         "missing cached prevout {outpoint}"
                     ))
                 })

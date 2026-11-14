@@ -310,7 +310,7 @@ fn expand_clause_args(input: &DeriveInput) -> syn::Result<TokenStream2> {
             {
                 let (args, consumed) = <Self as ::mattrs::contracts::WitnessEncodable>::decode_from_witness(witness)?;
                 if consumed != witness.len() {
-                    return Err(::mattrs::contracts::WitnessError::InvalidData(
+                    return Err(::mattrs::contracts::WitnessError::Invalid(
                         format!(
                             "{} decoded {} of {} witness element(s)",
                             ::core::stringify!(#name),

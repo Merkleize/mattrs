@@ -535,7 +535,7 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
     let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
     let handle = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
     let refused = actor.spend_batch_with(&[spend(&handle)], |_| {
-        Err(ManagerError::Other("the relay refused it".into()))
+        Err(ManagerError::other("the relay refused it"))
     });
     assert!(matches!(refused, Err(ManagerError::Other(_))));
     assert_eq!(handle.status(), InstanceStatus::Funded);

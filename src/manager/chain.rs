@@ -45,7 +45,7 @@ impl ContractManager {
     /// Mine blocks (regtest and test chains).
     pub fn mine_blocks(&self, n: u64) -> Result<(), ManagerError> {
         let n = u32::try_from(n)
-            .map_err(|_| ManagerError::Other(format!("cannot mine {n} blocks at once")))?;
+            .map_err(|_| ManagerError::other(format!("cannot mine {n} blocks at once")))?;
         Ok(self.chain()?.mine_blocks(n)?)
     }
 
@@ -114,7 +114,7 @@ impl ContractManager {
         handles: &[&InstanceHandle],
     ) -> Result<Transaction, ManagerError> {
         let first = handles.first().ok_or_else(|| {
-            ManagerError::InvalidInstance("cannot wait for an empty batch".into())
+            ManagerError::InvalidObservation("cannot wait for an empty batch".into())
         })?;
         match first.spending_tx() {
             Some(tx) => Ok(Transaction::clone(&tx)),

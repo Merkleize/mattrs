@@ -171,7 +171,7 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     assert!(matches!(
         zero.step(),
         Err(ProtocolError::Manager(
-            mattrs::manager::ManagerError::ContractError(
+            mattrs::manager::ManagerError::Contract(
                 mattrs::contracts::ContractError::InvalidBlockDelay { blocks: 0 }
             )
         ))

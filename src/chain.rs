@@ -42,6 +42,7 @@ pub(crate) fn poll_until<T, E>(
 /// protocol and manager layers, so a chain backend can be implemented (and
 /// used) without either.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ChainError {
     /// The node could not be reached, or answered with an error.
     #[cfg(feature = "rpc")]

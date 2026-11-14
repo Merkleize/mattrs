@@ -574,7 +574,7 @@ fn second_preserve_in_one_input_errors() {
 
     let err = crate::manager::build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(
-        matches!(&err, ManagerError::TransactionBuildError(msg) if msg.contains("PreserveOutput")),
+        matches!(&err, ManagerError::InvalidSpend(msg) if msg.contains("PreserveOutput")),
         "unexpected error: {err:?}"
     );
 }
@@ -701,7 +701,7 @@ fn child_state_must_match_the_destination_contract() {
     let err = spend(&handle).build_tx().unwrap_err();
     assert!(matches!(
         err,
-        ManagerError::ContractError(ContractError::WrongStateType)
+        ManagerError::Contract(ContractError::WrongStateType)
     ));
 }
 
@@ -869,7 +869,7 @@ fn template_fixes_outputs_and_sequence() {
 
     // ...or the build is rejected.
     let err = spend(&h).sequence(6).build_tx().unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -889,7 +889,7 @@ fn template_in_batch_errors() {
     let h2 = fund_fake(preserving, (), sat(60_000), 2);
 
     let err = crate::manager::build_batch_tx(&[spend(&h1), spend(&h2)]).unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -916,7 +916,7 @@ fn explicit_outputs_in_batch_error() {
 
     let err =
         crate::manager::build_batch_tx(&[spend(&h1).outputs(outputs), spend(&h2)]).unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -930,7 +930,7 @@ fn explicit_outputs_cannot_override_a_template() {
         value: sat(40_000),
     }])])
     .unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -952,7 +952,7 @@ fn explicit_outputs_cannot_override_contract_outputs() {
         value: sat(1),
     }])])
     .unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -989,7 +989,7 @@ fn raw_witness_layout_is_checked_when_no_signer_exists() {
         }])
         .build_tx()
         .unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::Witness(_)));
 }
 
 #[test]
@@ -1003,7 +1003,7 @@ fn duplicate_instance_in_batch_errors() {
 
     let err = crate::manager::build_batch_tx(&[spend(&h), spend(&h)]).unwrap_err();
     assert!(
-        matches!(&err, ManagerError::TransactionBuildError(msg) if msg.contains("duplicate")),
+        matches!(&err, ManagerError::InvalidSpend(msg) if msg.contains("duplicate")),
         "unexpected error: {err:?}"
     );
 }

@@ -381,12 +381,12 @@ impl<const N: usize> WitnessEncodable for WitProof<N> {
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
         let needed = 2 * N + 1;
         if witness.len() < needed {
-            return Err(WitnessError::InsufficientData);
+            return Err(WitnessError::Missing);
         }
         let as_hash = |bytes: &[u8]| -> Result<[u8; 32], WitnessError> {
             bytes
                 .try_into()
-                .map_err(|_| WitnessError::InvalidValue("proof element must be 32 bytes".into()))
+                .map_err(|_| WitnessError::Invalid("proof element must be 32 bytes".into()))
         };
         let mut hashes = [[0u8; 32]; N];
         let mut directions = [0u8; N];
@@ -396,7 +396,7 @@ impl<const N: usize> WitnessEncodable for WitProof<N> {
             directions[i] = match direction {
                 0 | 1 => direction as u8,
                 other => {
-                    return Err(WitnessError::InvalidValue(format!(
+                    return Err(WitnessError::Invalid(format!(
                         "proof direction must be 0 or 1, got {other}"
                     )));
                 }
@@ -435,29 +435,27 @@ impl ArgType for MerkleProofType {
             .depth
             .checked_mul(2)
             .and_then(|n| n.checked_add(1))
-            .ok_or_else(|| WitnessError::InvalidValue("proof depth is too large".into()))?;
+            .ok_or_else(|| WitnessError::Invalid("proof depth is too large".into()))?;
         if witness.len() < needed {
-            return Err(WitnessError::InsufficientData);
+            return Err(WitnessError::Missing);
         }
         for level in 0..self.depth {
             if witness[2 * level].len() != 32 {
-                return Err(WitnessError::InvalidValue(format!(
+                return Err(WitnessError::Invalid(format!(
                     "proof hash at level {level} must be 32 bytes"
                 )));
             }
             match vch2bn(&witness[2 * level + 1])? {
                 0 | 1 => {}
                 direction => {
-                    return Err(WitnessError::InvalidValue(format!(
+                    return Err(WitnessError::Invalid(format!(
                         "proof direction at level {level} must be 0 or 1, got {direction}"
                     )));
                 }
             }
         }
         if witness[needed - 1].len() != 32 {
-            return Err(WitnessError::InvalidValue(
-                "proof leaf must be 32 bytes".into(),
-            ));
+            return Err(WitnessError::Invalid("proof leaf must be 32 bytes".into()));
         }
         Ok(needed)
     }

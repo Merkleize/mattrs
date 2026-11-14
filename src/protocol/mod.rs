@@ -260,6 +260,7 @@ impl StepCtx<'_> {
 
 /// An error raised while declaring or driving a protocol role.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ProtocolError {
     /// An underlying manager operation failed.
     Manager(ManagerError),
@@ -331,7 +332,17 @@ impl std::fmt::Display for ProtocolError {
     }
 }
 
-impl std::error::Error for ProtocolError {}
+impl std::error::Error for ProtocolError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ProtocolError::Manager(e) => Some(e),
+            ProtocolError::Chain(e) => Some(e),
+            ProtocolError::Witness(e) => Some(e),
+            ProtocolError::WrongContract(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<ManagerError> for ProtocolError {
     fn from(e: ManagerError) -> Self {

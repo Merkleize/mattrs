@@ -162,12 +162,12 @@ impl StateCodec for TttState {
 
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
         let bytes: &[u8; 10] = bytes.try_into().map_err(|_| {
-            WitnessError::InvalidData("a TttState serialization is exactly 10 bytes".to_string())
+            WitnessError::Invalid("a TttState serialization is exactly 10 bytes".to_string())
         })?;
         let turn = bytes[0];
         let board: [u8; 9] = bytes[1..].try_into().expect("9 bytes");
         if turn != TURN_ALICE && turn != TURN_BOB {
-            return Err(WitnessError::InvalidData(format!(
+            return Err(WitnessError::Invalid(format!(
                 "invalid turn byte {turn:#04x}"
             )));
         }
@@ -175,7 +175,7 @@ impl StateCodec for TttState {
             .iter()
             .find(|&&c| c != EMPTY && c != MARK_ALICE && c != MARK_BOB)
         {
-            return Err(WitnessError::InvalidData(format!(
+            return Err(WitnessError::Invalid(format!(
                 "invalid cell byte {cell:#04x}"
             )));
         }
@@ -310,21 +310,19 @@ impl TicTacToe {
         let state = s;
         let cell = prefix.len();
         if cell >= 9 || suffix.len() != 8 - cell {
-            return Err(ClauseError::Other(
-                "malformed move: the prefix and suffix must split 8 cells".to_string(),
+            return Err(ClauseError::other(
+                "malformed move: the prefix and suffix must split 8 cells",
             ));
         }
         if state.turn != turn {
-            return Err(ClauseError::Other(
-                "it is not this player's turn".to_string(),
-            ));
+            return Err(ClauseError::other("it is not this player's turn"));
         }
         if state.board[cell] != EMPTY {
-            return Err(ClauseError::Other(format!("cell {cell} is already taken")));
+            return Err(ClauseError::other(format!("cell {cell} is already taken")));
         }
         if prefix != &state.board[..cell] || suffix != &state.board[cell + 1..] {
-            return Err(ClauseError::Other(
-                "the revealed board does not match the state".to_string(),
+            return Err(ClauseError::other(
+                "the revealed board does not match the state",
             ));
         }
         Ok(vec![

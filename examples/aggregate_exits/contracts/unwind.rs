@@ -143,7 +143,7 @@ impl Unwind {
             match direction {
                 0 | 1 => directions.push(direction as u8),
                 other => {
-                    return Err(ClauseError::Other(format!(
+                    return Err(ClauseError::other(format!(
                         "withdraw_direct: proof direction must be 0 or 1, got {other}"
                     )));
                 }
@@ -153,10 +153,10 @@ impl Unwind {
         w.expect_end()?;
 
         let proof = MerkleProof::new(hashes, directions, super::balance_leaf(&pk, bal))
-            .map_err(|e| ClauseError::Other(format!("withdraw_direct: {e}")))?;
+            .map_err(|e| ClauseError::other(format!("withdraw_direct: {e}")))?;
         if proof.get_new_root_after_update(proof.leaf()) != root {
-            return Err(ClauseError::Other(
-                "withdraw_direct: invalid membership proof".to_string(),
+            return Err(ClauseError::other(
+                "withdraw_direct: invalid membership proof",
             ));
         }
         let new_root = proof.get_new_root_after_update(NIL);

@@ -37,7 +37,7 @@ impl StateCodec for VaultState {
 
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
         if bytes.len() != 8 {
-            return Err(WitnessError::InvalidValue(format!(
+            return Err(WitnessError::Invalid(format!(
                 "Expected 8 bytes for amount, got {}",
                 bytes.len()
             )));
@@ -62,10 +62,10 @@ impl ClauseArgs for TriggerArgs {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
         let withdraw_amount =
-            script::vch2bn(&witness[0]).map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+            script::vch2bn(&witness[0]).map_err(|e| WitnessError::Invalid(e.to_string()))?;
         Ok(TriggerArgs { withdraw_amount })
     }
 }
@@ -530,7 +530,7 @@ fn test_expanded_state_flows_to_next_outputs() {
         Some(Arc::new(
             |_p: &(), _a: &SampleArgs, s: &CounterState| match s {
                 st if st.secret == 42 => Ok(NextOutputs::Outputs(vec![])),
-                other => Err(ClauseError::Other(format!("unexpected state: {:?}", other))),
+                other => Err(ClauseError::other(format!("unexpected state: {:?}", other))),
             },
         )),
     );

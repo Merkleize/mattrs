@@ -99,10 +99,10 @@ pub(super) fn validate_clause_witness(
     for spec in clause.arg_specs() {
         let tail = witness
             .get(offset..)
-            .ok_or(crate::contracts::WitnessError::StackUnderflow)?;
+            .ok_or(crate::contracts::WitnessError::Missing)?;
         let consumed = spec.arg_type.consume(tail)?;
         if consumed == 0 {
-            return Err(crate::contracts::WitnessError::InvalidData(format!(
+            return Err(crate::contracts::WitnessError::Invalid(format!(
                 "argument '{}' consumes no witness elements",
                 spec.name
             )));
@@ -110,16 +110,16 @@ pub(super) fn validate_clause_witness(
         if spec.arg_type.signer_pubkey().is_some() {
             let signature = witness
                 .get(offset)
-                .ok_or(crate::contracts::WitnessError::StackUnderflow)?;
+                .ok_or(crate::contracts::WitnessError::Missing)?;
             if signature.is_empty() {
                 if !allow_empty_signatures {
-                    return Err(crate::contracts::WitnessError::InvalidValue(format!(
+                    return Err(crate::contracts::WitnessError::Invalid(format!(
                         "signature argument '{}' is empty",
                         spec.name
                     )));
                 }
             } else if !matches!(signature.len(), 64 | 65) {
-                return Err(crate::contracts::WitnessError::InvalidValue(format!(
+                return Err(crate::contracts::WitnessError::Invalid(format!(
                     "signature argument '{}' is {} bytes; expected 64 or 65",
                     spec.name,
                     signature.len()
@@ -127,13 +127,11 @@ pub(super) fn validate_clause_witness(
             }
         }
         offset = offset.checked_add(consumed).ok_or_else(|| {
-            crate::contracts::WitnessError::InvalidData(
-                "witness element count overflow".to_string(),
-            )
+            crate::contracts::WitnessError::Invalid("witness element count overflow".to_string())
         })?;
     }
     if offset != witness.len() {
-        return Err(crate::contracts::WitnessError::InvalidData(format!(
+        return Err(crate::contracts::WitnessError::Invalid(format!(
             "clause '{}' consumes {} witness elements, but {} were supplied",
             clause.name(),
             offset,

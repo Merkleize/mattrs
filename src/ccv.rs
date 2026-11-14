@@ -155,7 +155,7 @@ impl WitnessEncodable for CcvIndex {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
         let (value, consumed) = i64::decode_from_witness(witness)?;
-        let index = Self::try_from(value).map_err(|e| WitnessError::InvalidValue(e.to_string()))?;
+        let index = Self::try_from(value).map_err(|e| WitnessError::Invalid(e.to_string()))?;
         Ok((index, consumed))
     }
 }

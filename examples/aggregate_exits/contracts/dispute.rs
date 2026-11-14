@@ -186,7 +186,7 @@ pub enum DisputeWinner {
 
 fn xonly(bytes: &[u8; 32]) -> Result<bitcoin::XOnlyPublicKey, ClauseError> {
     bitcoin::XOnlyPublicKey::from_slice(bytes)
-        .map_err(|e| ClauseError::Other(format!("invalid x-only key in state: {e}")))
+        .map_err(|e| ClauseError::other(format!("invalid x-only key in state: {e}")))
 }
 
 /// The three settlement outputs: the winner's slash payout, the burn, and the
