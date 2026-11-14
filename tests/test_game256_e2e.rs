@@ -21,10 +21,11 @@ use std::time::Duration;
 
 use bitcoin::Amount;
 use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
-use mattrs::manager::ContractManager;
+use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::protocol::Runner;
 use mattrs::report::Report;
-use mattrs::script_helpers::key_path_p2tr as p2tr;
+use mattrs::script::key_path_p2tr as p2tr;
+use mattrs::signer::HotSigner;
 
 use support::game256::{G256Params, G256S0};
 use support::game256_roles::{
@@ -47,32 +48,30 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
 
     // Alice funds the game with the pot...
     let mut alice_manager =
-        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+            .with_signer(HotSigner::new(alice_xpriv()));
     let s0 = G256S0::new(params.clone())?.fund(&mut alice_manager, Amount::from_sat(AMOUNT))?;
     let alice_entry = s0.handle().clone();
     let outpoint = alice_entry.outpoint();
 
     // ...and Bob, given the outpoint out-of-band, verifies and tracks it.
     let mut bob_manager =
-        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let bob_entry = bob_manager.track_instance(G256S0::new(params)?.as_erased(), (), outpoint)?;
+        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+            .with_signer(HotSigner::new(bob_xpriv()));
+    let bob_entry: InstanceHandle = G256S0::new(params)?
+        .track(&mut bob_manager, outpoint)?
+        .into();
 
     // The parties: Alice will cheat at step 5, Bob doubles honestly.
     let alice_data = AliceGameData {
         claim: Box::new(cheating_vals),
-        fraud: game_fraud_data(alice_xpriv(), p2tr(alice_pk())),
-        xpriv: alice_xpriv(),
+        fraud: game_fraud_data(p2tr(alice_pk())),
     };
     let x = 2;
     let vals = honest_vals(x);
-    let mut fraud = game_fraud_data(bob_xpriv(), p2tr(bob_pk()));
+    let mut fraud = game_fraud_data(p2tr(bob_pk()));
     fill_fraud_data(&mut fraud, &vals);
-    let bob_data = BobGameData {
-        x,
-        vals,
-        fraud,
-        xpriv: bob_xpriv(),
-    };
+    let bob_data = BobGameData { x, vals, fraud };
 
     let mut alice = Runner::new(alice_manager, alice_game_role(), alice_data, alice_entry);
     let mut bob = Runner::new(bob_manager, bob_game_role(), bob_data, bob_entry.clone());

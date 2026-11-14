@@ -15,13 +15,12 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
-use bitcoin::{Amount, Sequence, TxOut};
+use bitcoin::{Amount, OutPoint, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
-use mattrs::manager::ContractManager;
+use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::protocol::{Action, LocalChain, Progress, ProtocolError, Role, Runner};
-use mattrs::script_helpers::opaque_p2tr;
+use mattrs::script::opaque_p2tr;
 use mattrs::signer::HotSigner;
-use mattrs::testutil::fund_fake;
 
 use support::testkit::{alice_pk, alice_xpriv, bob_pk, drive_both, manager_on, regtest_client};
 use support::vault::{Unvaulting, Vault, VaultHandle, VaultParams};
@@ -31,7 +30,6 @@ use support::vault_roles::{
 
 const AMOUNT: u64 = 100_000;
 const SPEND_DELAY: u32 = 10;
-const SEED: u8 = 51;
 
 fn params() -> VaultParams {
     VaultParams {
@@ -42,13 +40,25 @@ fn params() -> VaultParams {
     }
 }
 
-fn fake_vault(seed: u8) -> mattrs::manager::InstanceHandle {
-    fund_fake(
-        Vault::new(params()).unwrap().as_erased(),
-        (),
-        Amount::from_sat(AMOUNT),
-        seed,
-    )
+/// A manager on `chain` holding the owner's key, and the vault it funded.
+fn funded_vault(chain: &Rc<LocalChain>) -> (ContractManager, InstanceHandle) {
+    let mut manager = manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv()));
+    let vault = Vault::new(params())
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(AMOUNT))
+        .unwrap();
+    (manager, vault.into())
+}
+
+/// A keyless manager on `chain` tracking the vault at `outpoint`: the
+/// watchtower's view of the owner's vault.
+fn tracked_vault(chain: &Rc<LocalChain>, outpoint: OutPoint) -> (ContractManager, InstanceHandle) {
+    let mut manager = manager_on(chain.clone());
+    let vault = Vault::new(params())
+        .unwrap()
+        .track(&mut manager, outpoint)
+        .unwrap();
+    (manager, vault.into())
 }
 
 /// A single-output CTV withdrawal template paying `amount` to the owner.
@@ -91,13 +101,8 @@ fn revault_forks_and_both_branches_withdraw() {
             revault: None,
         },
     ];
-    let entry = fake_vault(SEED);
-    let mut owner = Runner::new(
-        manager_on(chain.clone()),
-        owner_role(),
-        OwnerData::new(alice_xpriv(), plan),
-        entry.clone(),
-    );
+    let (manager, entry) = funded_vault(&chain);
+    let mut owner = Runner::new(manager, owner_role(), OwnerData::new(plan), entry.clone());
 
     // The runner triggers both plan steps by itself: the first spend forks the
     // token (Unvaulting + revaulted Vault), the Vault child re-arrives and
@@ -163,12 +168,8 @@ fn identical_templates_on_both_branches_withdraw() {
             revault: None,
         },
     ];
-    let mut owner = Runner::new(
-        manager_on(chain.clone()),
-        owner_role(),
-        OwnerData::new(alice_xpriv(), plan),
-        fake_vault(SEED),
-    );
+    let (manager, entry) = funded_vault(&chain);
+    let mut owner = Runner::new(manager, owner_role(), OwnerData::new(plan), entry);
 
     step_until_all_wait(&mut owner);
     assert_eq!(owner.tokens().len(), 2, "the trigger_and_revault forked");
@@ -191,21 +192,19 @@ fn watchtower_recovers_an_unauthorized_unvaulting() {
 
     // The owner's key is compromised: the thief triggers a withdrawal whose
     // CTV hash the watchtower was never told about.
+    let (manager, entry) = funded_vault(&chain);
+    let (tower_manager, tower_entry) = tracked_vault(&chain, entry.outpoint());
     let mut thief = Runner::new(
-        manager_on(chain.clone()),
+        manager,
         owner_role(),
-        OwnerData::new(
-            alice_xpriv(),
-            vec![TriggerStep {
-                outputs: withdrawal(amount),
-                revault: None,
-            }],
-        ),
-        fake_vault(SEED),
+        OwnerData::new(vec![TriggerStep {
+            outputs: withdrawal(amount),
+            revault: None,
+        }]),
+        entry,
     );
-    let tower_entry = fake_vault(SEED);
     let mut tower = Runner::new(
-        manager_on(chain.clone()),
+        tower_manager,
         watchtower_role(),
         WatchtowerData {
             authorized: HashSet::new(),
@@ -240,25 +239,24 @@ fn watchtower_keeps_watching_the_revaulted_branch() {
 
     // The thief splits the vault, stealing the larger branch (and leaving the
     // revaulted remainder alone — for now).
+    let (manager, entry) = funded_vault(&chain);
+    let (tower_manager, tower_entry) = tracked_vault(&chain, entry.outpoint());
     let mut thief = Runner::new(
-        manager_on(chain.clone()),
+        manager,
         owner_role(),
-        OwnerData::new(
-            alice_xpriv(),
-            vec![TriggerStep {
-                outputs: withdrawal(rest),
-                revault: Some(revault),
-            }],
-        ),
-        fake_vault(SEED),
+        OwnerData::new(vec![TriggerStep {
+            outputs: withdrawal(rest),
+            revault: Some(revault),
+        }]),
+        entry,
     );
     let mut tower = Runner::new(
-        manager_on(chain.clone()),
+        tower_manager,
         watchtower_role(),
         WatchtowerData {
             authorized: HashSet::new(),
         },
-        fake_vault(SEED),
+        tower_entry,
     );
 
     // Drive until the watchtower has swept the unauthorized branch.
@@ -301,9 +299,7 @@ fn trigger_only() -> Role<OwnerData, VaultOutcome> {
         let step = d.plan.remove(0);
         let p = h.params();
         let ctv_hash = compute_ctv_hash(&step.outputs, Sequence(p.spend_delay));
-        Ok(Action::Send(
-            h.trigger(ctv_hash, 0).sign(HotSigner::new(d.xpriv)),
-        ))
+        Ok(Action::Send(h.trigger(ctv_hash, 0)))
     })
 }
 
@@ -317,12 +313,8 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
     };
 
     // Handling Vault but not Unvaulting: the spend's child is a loud error...
-    let mut runner = Runner::new(
-        manager_on(Rc::new(LocalChain::new())),
-        trigger_only(),
-        OwnerData::new(alice_xpriv(), plan()),
-        fake_vault(SEED),
-    );
+    let (manager, entry) = funded_vault(&Rc::new(LocalChain::new()));
+    let mut runner = Runner::new(manager, trigger_only(), OwnerData::new(plan()), entry);
     let err = runner
         .step()
         .expect_err("the Unvaulting child is unhandled");
@@ -333,11 +325,12 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
 
     // ...unless the role explicitly ignores it: then every branch of the spend
     // is somebody else's business and the token resolves silently.
+    let (manager, entry) = funded_vault(&Rc::new(LocalChain::new()));
     let mut runner = Runner::new(
-        manager_on(Rc::new(LocalChain::new())),
+        manager,
         trigger_only().ignore::<Unvaulting>(),
-        OwnerData::new(alice_xpriv(), plan()),
-        fake_vault(SEED),
+        OwnerData::new(plan()),
+        entry,
     );
     match runner.step().expect("steps") {
         Progress::Done(outcomes) => assert!(outcomes.is_empty(), "every branch was ignored"),
@@ -367,9 +360,9 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
     let mut owner = Runner::new(
-        manager,
+        manager.with_signer(HotSigner::new(alice_xpriv())),
         owner_role(),
-        OwnerData::new(alice_xpriv(), plan),
+        OwnerData::new(plan),
         entry.clone(),
     );
 
@@ -419,14 +412,13 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
 fn timeout_deadline_comes_from_the_clause_timelock() {
     let unvaulting = Unvaulting::new(mattrs_unvaulting_params()).unwrap();
     let state = support::vault::UnvaultingState { ctv_hash: [1; 32] };
-    let handle: support::vault::UnvaultingHandle = fund_fake(
-        unvaulting.as_erased(),
-        state,
-        Amount::from_sat(AMOUNT),
-        SEED,
-    )
-    .try_into()
-    .unwrap();
+    let handle = unvaulting
+        .fund(
+            &mut mattrs::testutil::local_manager(),
+            Amount::from_sat(AMOUNT),
+            state,
+        )
+        .unwrap();
 
     // `withdraw` declares `timelock |p| p.spend_delay`.
     assert_eq!(handle.withdraw().csv_blocks(), Some(SPEND_DELAY));

@@ -1,18 +1,30 @@
 //! Errors shared by the manager facade and its components.
-use crate::contracts::{ClauseError, ContractError};
+use crate::contracts::{ClauseError, ContractError, WitnessError};
+use crate::signer::SignerError;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 
 /// Error type for manager operations.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ManagerError {
     /// The operation needs a node, but this manager was created
     /// [`offline`](super::ContractManager::offline).
     NoNode,
     /// The chain backend failed (node unreachable, transaction rejected, ...).
     Chain(crate::chain::ChainError),
-    ClauseError(ClauseError),
-    ContractError(ContractError),
-    InvalidInstance(String),
+    /// A clause could not compute its outputs.
+    Clause(ClauseError),
+    /// A contract could not be built, or its state did not fit it.
+    Contract(ContractError),
+    /// A spend's witness does not match the clause's declared arguments.
+    Witness(WitnessError),
+    /// A signer refused or failed to sign.
+    Signer(SignerError),
+    /// The inputs handed to an observation are unusable as a set (empty,
+    /// duplicated, not inputs of the transaction, or already spent
+    /// elsewhere).
+    InvalidObservation(String),
+    /// The funding transaction has no output at the given index.
     OutputNotFound,
     /// The instance at this outpoint was already spent, so it cannot be spent
     /// (or awaited) again.
@@ -21,18 +33,12 @@ pub enum ManagerError {
     ClauseNotFound(String),
     /// A deduct output at this index needs an amount, supplied via
     /// [`SpendBuilder::output_amount`](super::SpendBuilder::output_amount).
-    MissingDeductAmount {
-        index: u32,
-    },
+    MissingDeductAmount { index: u32 },
     /// An ignore-amount output needs an explicit amount; silently using zero would
     /// donate the input value to fees.
-    MissingIgnoredAmount {
-        index: u32,
-    },
+    MissingIgnoredAmount { index: u32 },
     /// The merged clause outputs skip a transaction output index.
-    NonContiguousOutputs {
-        missing_index: u32,
-    },
+    NonContiguousOutputs { missing_index: u32 },
     /// Deducted output amounts exceed the input amount.
     DeductExceedsInput,
     /// An observed spending transaction could not be decoded back into a clause
@@ -46,32 +52,22 @@ pub enum ManagerError {
     /// the contract's expected script (wrong contract, params, or state).
     WrongFundingScript(OutPoint),
     /// The transaction does not satisfy the clause's declared CTV commitment.
-    CtvTemplateMismatch {
-        input_index: usize,
-    },
+    CtvTemplateMismatch { input_index: usize },
     /// The spend produces no transaction outputs. Childless clauses without a
     /// full template need outputs supplied with [`SpendBuilder::outputs`](super::SpendBuilder::outputs).
     NoOutputs,
     /// Two spends of a batch set a different amount for the same output index.
-    ConflictingOutputAmount {
-        index: u32,
-    },
+    ConflictingOutputAmount { index: u32 },
     /// An output index receives both preserve and deduct
     /// contributions (from the same or different inputs); the two amount
     /// semantics cannot hold for one output.
-    MixedOutputSemantics {
-        index: u32,
-    },
+    MixedOutputSemantics { index: u32 },
     /// An amount was supplied via [`SpendBuilder::output_amount`](super::SpendBuilder::output_amount) for an output
     /// index that no deduct output uses.
-    UnusedOutputAmount {
-        index: u32,
-    },
+    UnusedOutputAmount { index: u32 },
     /// Contributions merged at one output index disagree on their destination
     /// or tracking identity (contract type/params/state, or untracked payment).
-    ConflictingOutputContract {
-        index: u32,
-    },
+    ConflictingOutputContract { index: u32 },
     /// A clause describes a child at an output that the observed transaction
     /// does not contain.
     MissingContractOutput(OutPoint),
@@ -79,13 +75,9 @@ pub enum ManagerError {
     /// in the observed transaction.
     WrongContractOutput(OutPoint),
     /// An untracked payment output is missing or has the wrong script.
-    PaymentOutputMismatch {
-        index: u32,
-    },
+    PaymentOutputMismatch { index: u32 },
     /// Strict batch observation lacks contract or external context for these inputs.
-    IncompleteObservation {
-        missing: Vec<OutPoint>,
-    },
+    IncompleteObservation { missing: Vec<OutPoint> },
     /// An output holds less than the preserve/join contributions it must carry
     /// (one input's residual, or several inputs' combined).
     InsufficientOutputAmount {
@@ -96,9 +88,7 @@ pub enum ManagerError {
     /// Amount accounting overflowed instead of representing a valid sum.
     AmountOverflow,
     /// An external input is not a supported native wallet spend.
-    UnsupportedExternalInput {
-        outpoint: OutPoint,
-    },
+    UnsupportedExternalInput { outpoint: OutPoint },
     /// Supplied input contexts are duplicated, unrelated, or contradictory.
     InvalidInputContext(String),
     /// The transaction spends more than its supplied prevouts provide.
@@ -106,29 +96,40 @@ pub enum ManagerError {
     /// Wallet funding changed protected transaction fields or input context.
     InvalidWalletFunding(String),
     /// The actual absolute fee exceeds the caller's authorization.
-    FeeTooHigh {
-        fee: Amount,
-        maximum: Amount,
-    },
-    TransactionBuildError(String),
+    FeeTooHigh { fee: Amount, maximum: Amount },
+    /// The requested spend cannot be turned into a transaction (an empty or
+    /// duplicated batch, outputs the clause does not allow, a sequence that
+    /// contradicts the clause, ...). The message says which rule it breaks.
+    InvalidSpend(String),
     /// A clause requires a signature from this key, but no signer was registered
     /// and no signature was pre-filled.
     MissingSigner(XOnlyPublicKey),
     /// A spend produced a different number of child instances than the caller
-    /// asserted via `exec_one` / `exec_none`.
-    UnexpectedOutputCount {
-        expected: usize,
-        got: usize,
-    },
+    /// asserted via `exec_one` / `exec_none` / [`Children::one`](super::Children::one).
+    UnexpectedOutputCount { expected: usize, got: usize },
     /// A child instance was not of the requested contract type
-    /// ([`Children::typed`](super::Children::typed) / [`Children::one`](super::Children::one)).
+    /// ([`Children::at`](super::Children::at) / [`Children::one`](super::Children::one)).
     WrongContract(WrongContractType),
-    /// A `NextOutputs::Join` contribution targets an output index no other
-    /// input's clause defines.
-    JoinWithoutTarget {
+    /// The spend created no tracked contract instance at this output index
+    /// (the output is a plain payment, or the clause does not produce it).
+    NoChildAtOutput {
+        /// The transaction output index asked for.
         index: u32,
     },
+    /// A `NextOutputs::Join` contribution targets an output index no other
+    /// input's clause defines.
+    JoinWithoutTarget { index: u32 },
+    /// A failure reported by caller-supplied code (a funding or broadcast
+    /// callback), or one with no more specific variant.
     Other(String),
+}
+
+impl ManagerError {
+    /// An [`Other`](ManagerError::Other) failure, from anything printable:
+    /// `.map_err(ManagerError::other)`.
+    pub fn other(message: impl std::fmt::Display) -> Self {
+        ManagerError::Other(message.to_string())
+    }
 }
 
 impl std::fmt::Display for ManagerError {
@@ -138,9 +139,11 @@ impl std::fmt::Display for ManagerError {
                 write!(f, "this manager is offline: the operation needs a node")
             }
             ManagerError::Chain(e) => write!(f, "chain error: {}", e),
-            ManagerError::ClauseError(e) => write!(f, "Clause error: {}", e),
-            ManagerError::ContractError(e) => write!(f, "Contract error: {}", e),
-            ManagerError::InvalidInstance(msg) => write!(f, "Invalid instance: {}", msg),
+            ManagerError::Clause(e) => write!(f, "Clause error: {}", e),
+            ManagerError::Contract(e) => write!(f, "Contract error: {}", e),
+            ManagerError::Witness(e) => write!(f, "Witness error: {}", e),
+            ManagerError::Signer(e) => write!(f, "Signer error: {}", e),
+            ManagerError::InvalidObservation(msg) => write!(f, "Invalid observation: {}", msg),
             ManagerError::OutputNotFound => write!(f, "Output not found on blockchain"),
             ManagerError::AlreadySpent(outpoint) => {
                 write!(f, "The instance at {outpoint} was already spent")
@@ -252,9 +255,7 @@ impl std::fmt::Display for ManagerError {
                 f,
                 "Transaction fee {fee} exceeds authorized maximum {maximum}"
             ),
-            ManagerError::TransactionBuildError(msg) => {
-                write!(f, "Transaction build error: {}", msg)
-            }
+            ManagerError::InvalidSpend(msg) => write!(f, "Invalid spend: {}", msg),
             ManagerError::MissingSigner(pk) => {
                 write!(f, "No signer registered for required key {}", pk)
             }
@@ -264,6 +265,12 @@ impl std::fmt::Display for ManagerError {
                 expected, got
             ),
             ManagerError::WrongContract(e) => write!(f, "{}", e),
+            ManagerError::NoChildAtOutput { index } => {
+                write!(
+                    f,
+                    "the spend created no contract instance at output {index}"
+                )
+            }
             ManagerError::JoinWithoutTarget { index } => write!(
                 f,
                 "a Join contribution targets output index {}, which no other input defines",
@@ -274,7 +281,39 @@ impl std::fmt::Display for ManagerError {
     }
 }
 
-impl std::error::Error for ManagerError {}
+impl std::error::Error for ManagerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ManagerError::Chain(e) => Some(e),
+            ManagerError::Clause(e) => Some(e),
+            ManagerError::Contract(e) => Some(e),
+            ManagerError::Witness(e) => Some(e),
+            ManagerError::Signer(e) => Some(e),
+            ManagerError::WrongContract(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+/// Converting a handle to itself cannot fail; this lets the typed-child
+/// accessors also return the untyped handle.
+impl From<std::convert::Infallible> for ManagerError {
+    fn from(never: std::convert::Infallible) -> Self {
+        match never {}
+    }
+}
+
+impl From<WitnessError> for ManagerError {
+    fn from(e: WitnessError) -> Self {
+        ManagerError::Witness(e)
+    }
+}
+
+impl From<SignerError> for ManagerError {
+    fn from(e: SignerError) -> Self {
+        ManagerError::Signer(e)
+    }
+}
 
 impl From<crate::chain::ChainError> for ManagerError {
     fn from(e: crate::chain::ChainError) -> Self {
@@ -284,13 +323,13 @@ impl From<crate::chain::ChainError> for ManagerError {
 
 impl From<ClauseError> for ManagerError {
     fn from(e: ClauseError) -> Self {
-        ManagerError::ClauseError(e)
+        ManagerError::Clause(e)
     }
 }
 
 impl From<ContractError> for ManagerError {
     fn from(e: ContractError) -> Self {
-        ManagerError::ContractError(e)
+        ManagerError::Contract(e)
     }
 }
 

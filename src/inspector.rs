@@ -66,11 +66,10 @@ pub fn snapshot_instance(
     let outpoint = Some(format!("{}:{}", outpoint.txid, outpoint.vout));
     let funding_txid = Some(inst.funding_tx().compute_txid().to_string());
     let funding_amount_sat = Some(inst.amount().to_sat());
-    let spending_txid = inst.spent_in_tx().map(|txid| txid.to_string());
-    let spending_clause = inst.clause_name().map(|s| s.to_string());
-    let spending_args = inst
-        .spending_args()
-        .map(|args| args.iter().map(hex::encode).collect());
+    let spend = inst.spend();
+    let spending_txid = spend.map(|spend| spend.txid().to_string());
+    let spending_clause = spend.map(|spend| spend.clause_name().to_string());
+    let spending_args = spend.map(|spend| spend.args().iter().map(hex::encode).collect());
 
     InstanceSnapshot {
         index,

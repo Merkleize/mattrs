@@ -50,9 +50,9 @@ pub mod roles;
 use std::sync::Arc;
 
 use crate::ccv::CcvIndex;
+use crate::script;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 
 use crate::Signature;
 use crate::argtypes::{BytesType, SignerType};
@@ -60,13 +60,10 @@ use crate::contracts::ContractError;
 use crate::contracts::{ArgSpec, ClauseError, ClauseOutput};
 use crate::manager::SpendBuilder;
 use crate::merkle::is_power_of_2;
-use crate::script_helpers::{
+use crate::script::{
     check_input_contract, check_output_contract, concat, drop as script_drop, dup, merkle_root,
-    timeout_sig_script,
 };
 use mattrs_derive::{ContractState, contract};
-
-define_pushable!();
 
 /// Invalid public input to the generic fraud-proof construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,7 +465,8 @@ contract! {
                 #[signer(p.bob_pk)]
                 bob_sig: Signature,
             }
-            script |p, c| timeout_sig_script(c.forfait_timeout(), p.bob_pk);
+            timelock |_p, c| c.forfait_timeout();
+            script |p, _c| script! { { p.bob_pk } OP_CHECKSIG };
         }
 
         tree [alice_reveal, forfait];
@@ -633,7 +631,8 @@ contract! {
                 #[signer(p.alice_pk)]
                 alice_sig: Signature,
             }
-            script |p, c| timeout_sig_script(c.forfait_timeout(), p.alice_pk);
+            timelock |_p, c| c.forfait_timeout();
+            script |p, _c| script! { { p.alice_pk } OP_CHECKSIG };
         }
 
         tree [[bob_reveal_left, bob_reveal_right], forfait];

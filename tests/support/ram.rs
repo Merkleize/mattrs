@@ -12,15 +12,13 @@
 //! Fixed to a depth-2 tree (`size = 4`) via the const `WitProof<2>` proof arg.
 
 use bitcoin::ScriptBuf;
-use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::ClauseError;
+use mattrs::script;
 use mattrs::{ContractState, contract};
 
 use mattrs::merkle::{WitProof, floor_lg};
-use mattrs::script_helpers::{check_input_contract, concat};
-
-define_pushable!();
+use mattrs::script::{check_input_contract, check_output_same_contract, concat};
 
 #[derive(Debug, Clone)]
 pub struct RamParams {
@@ -64,10 +62,10 @@ contract! {
                 let index = a
                     .proof
                     .leaf_index()
-                    .map_err(|e| ClauseError::Other(e.to_string()))?;
+                    .map_err(ClauseError::other)?;
                 let mut leaves = state.leaves.clone();
                 if index >= leaves.len() {
-                    return Err(ClauseError::Other("leaf index out of range".to_string()));
+                    return Err(ClauseError::other("leaf index out of range"));
                 }
                 leaves[index] = a.new_value;
                 Ok(vec![Ram::new(p.clone())?.output(CcvIndex::CURRENT, RamState { leaves })])
@@ -137,7 +135,7 @@ impl Ram {
             OP_EQUALVERIFY
 
             // commit the new root to the same contract at the same output index
-            -1 0 -1 0 CHECKCONTRACTVERIFY
+            { check_output_same_contract(CcvIndex::CURRENT, None) }
 
             OP_TRUE
         };

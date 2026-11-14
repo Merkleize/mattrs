@@ -41,12 +41,13 @@ struct ScanState {
 }
 
 impl ScanState {
-    /// Bookkeeping after one look for a spend of `outpoint`. A found spend is
-    /// final for this scan, so its cursor is dropped: a cursor left behind
-    /// would pin the eviction floor at its height and retain every block
-    /// fetched afterwards. Blocks below every remaining cursor are evicted.
-    fn settle(&mut self, outpoint: OutPoint, found: bool) {
-        if found {
+    /// Bookkeeping after one look for a spend of `outpoint`. A scan that is
+    /// `done` (its spend was found, or its caller stopped looking) drops its
+    /// cursor: a cursor left behind would pin the eviction floor at its
+    /// height and retain every block fetched afterwards. Blocks below every
+    /// remaining cursor are evicted.
+    fn settle(&mut self, outpoint: OutPoint, done: bool) {
+        if done {
             self.cursors.remove(&outpoint);
         }
         match self.cursors.values().copied().min() {
@@ -83,6 +84,10 @@ impl ChainView for RpcChain {
         let found = find_spending_tx_once(&self.client, outpoint, cursor, blocks)?;
         scan.settle(outpoint, found.is_some());
         Ok(found)
+    }
+
+    fn stop_watching(&self, outpoint: OutPoint) {
+        self.scan.borrow_mut().settle(outpoint, true);
     }
 
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError> {
@@ -299,6 +304,28 @@ mod tests {
             txid: Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([seed; 32])),
             vout: 0,
         }
+    }
+
+    #[test]
+    fn an_abandoned_wait_releases_its_cursor_and_blocks() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let chain = RpcChain::new(
+            Client::new("http://127.0.0.1:1", bitcoincore_rpc::Auth::None).expect("no I/O yet"),
+        );
+        {
+            let mut scan = chain.scan.borrow_mut();
+            scan.cursors.insert(outpoint(1), 10);
+            scan.cursors.insert(outpoint(2), 12);
+            for height in 10..=14 {
+                scan.blocks.insert(height, block.clone());
+            }
+        }
+
+        // The caller waiting on the lagging outpoint gives up.
+        chain.stop_watching(outpoint(1));
+        let scan = chain.scan.borrow();
+        assert!(!scan.cursors.contains_key(&outpoint(1)));
+        assert_eq!(scan.blocks.len(), 3);
     }
 
     #[test]

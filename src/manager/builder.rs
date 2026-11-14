@@ -40,21 +40,11 @@ impl SpendBuilder {
             .and_then(|clause| clause.csv_blocks())
     }
 
-    fn exec_with_child_count(
-        self,
-        manager: &mut ContractManager,
-        expected: usize,
-    ) -> Result<Children, ManagerError> {
-        let builders = std::slice::from_ref(&self);
-        let prepared = super::transaction::prepare(builders)?;
-        let got = prepared.child_count();
-        if got != expected {
-            return Err(ManagerError::UnexpectedOutputCount { expected, got });
-        }
-        manager.execute_prepared(builders, prepared, ContractManager::send_to_node)
-    }
-
-    /// Register a signer (matched to the clause's signature args by public key).
+    /// Register a signer for this spend (matched to the clause's signature
+    /// args by public key). It takes precedence over a standing signer the
+    /// executing manager holds for the same key
+    /// ([`ContractManager::add_signer`]); with standing signers registered,
+    /// most spends need no `sign` call at all.
     /// A `Box<dyn Signer>` works too, via the blanket [`Signer`] impl for boxes.
     pub fn sign(mut self, signer: impl Signer + 'static) -> Self {
         self.signers.insert(signer.public_key(), Box::new(signer));
@@ -99,28 +89,49 @@ impl SpendBuilder {
         manager.spend_batch(std::slice::from_ref(&self))
     }
 
-    /// Like [`exec`](Self::exec) but asserts exactly one child instance is produced.
-    pub fn exec_one(self, manager: &mut ContractManager) -> Result<InstanceHandle, ManagerError> {
-        let mut outputs = self.exec_with_child_count(manager, 1)?.into_vec();
-        if outputs.len() != 1 {
-            return Err(ManagerError::UnexpectedOutputCount {
-                expected: 1,
-                got: outputs.len(),
-            });
+    /// Like [`exec`](Self::exec) for a spend producing exactly one child
+    /// instance, returned as its typed handle:
+    ///
+    /// ```ignore
+    /// let unvaulting: UnvaultingHandle = vault.trigger(ctv_hash, 0).exec_one(&mut manager)?;
+    /// ```
+    ///
+    /// The child count and the requested handle type are both checked before
+    /// anything is broadcast: asking for the wrong contract's handle fails
+    /// with the instance still unspent. Ask for an [`InstanceHandle`] to get
+    /// the child untyped.
+    pub fn exec_one<H>(self, manager: &mut ContractManager) -> Result<H, ManagerError>
+    where
+        H: TryFrom<InstanceHandle>,
+        ManagerError: From<H::Error>,
+    {
+        let builders = std::slice::from_ref(&self);
+        let prepared = super::transaction::prepare(builders)?;
+        let got = prepared.child_count();
+        if got != 1 {
+            return Err(ManagerError::UnexpectedOutputCount { expected: 1, got });
         }
-        Ok(outputs.pop().expect("length checked"))
+        let (child, _) = manager.execute_prepared_checked(
+            builders,
+            prepared,
+            // The staged child is the instance the commit registers, so its
+            // typed handle is the one to return.
+            |staged| Children::new(staged).one::<H>(),
+            ContractManager::send_to_node,
+        )?;
+        Ok(child)
     }
 
     /// Like [`exec`](Self::exec) but asserts no tracked children are produced.
     /// Output constraints (including CTV commitments) are still checked.
     pub fn exec_none(self, manager: &mut ContractManager) -> Result<(), ManagerError> {
-        let outputs = self.exec_with_child_count(manager, 0)?;
-        if !outputs.is_empty() {
-            return Err(ManagerError::UnexpectedOutputCount {
-                expected: 0,
-                got: outputs.len(),
-            });
+        let builders = std::slice::from_ref(&self);
+        let prepared = super::transaction::prepare(builders)?;
+        let got = prepared.child_count();
+        if got != 0 {
+            return Err(ManagerError::UnexpectedOutputCount { expected: 0, got });
         }
+        manager.execute_prepared(builders, prepared, ContractManager::send_to_node)?;
         Ok(())
     }
 }

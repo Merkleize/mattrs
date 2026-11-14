@@ -36,6 +36,9 @@ jobs:
       - name: Test
         run: cargo test --all-targets --all-features
 
+      - name: Run the offline example
+        run: cargo run --all-features --example getting_started
+
   # The #[ignore]d end-to-end tests, against a MATT-enabled regtest node.
   regtest:
     runs-on: ubuntu-24.04

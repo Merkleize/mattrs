@@ -5,10 +5,10 @@ mod support;
 use bitcoin::{Amount, ScriptBuf, Sequence, Transaction, TxOut};
 use mattrs::contracts::{CtvTemplate, InstanceStatus};
 use mattrs::manager::ManagerError;
-use support::testkit::{bob_pk, offline_manager};
+use support::testkit::bob_pk;
 use support::vault::{Unvaulting, UnvaultingHandle, UnvaultingParams, UnvaultingState};
 
-fn fixture() -> (UnvaultingHandle, CtvTemplate) {
+fn fixture(manager: &mut mattrs::manager::ContractManager) -> (UnvaultingHandle, CtvTemplate) {
     let template = CtvTemplate::new(
         vec![TxOut {
             value: Amount::from_sat(9_000),
@@ -22,22 +22,22 @@ fn fixture() -> (UnvaultingHandle, CtvTemplate) {
         recover_pk: bob_pk(),
     })
     .unwrap();
-    let handle = mattrs::testutil::fund_fake(
-        contract.as_erased(),
-        UnvaultingState {
-            ctv_hash: template.ctv_hash(),
-        },
-        Amount::from_sat(10_000),
-        1,
-    )
-    .try_into()
-    .unwrap();
+    let handle = contract
+        .fund(
+            manager,
+            Amount::from_sat(10_000),
+            UnvaultingState {
+                ctv_hash: template.ctv_hash(),
+            },
+        )
+        .unwrap();
     (handle, template)
 }
 
 #[test]
 fn construction_checks_the_committed_outputs_and_sequence() {
-    let (handle, template) = fixture();
+    let mut manager = mattrs::testutil::local_manager();
+    let (handle, template) = fixture(&mut manager);
     assert!(handle.withdraw().build_tx().is_err());
     let tx = handle
         .withdraw()
@@ -65,13 +65,13 @@ fn construction_checks_the_committed_outputs_and_sequence() {
             .build_tx(),
         Err(ManagerError::CtvTemplateMismatch { input_index: 0 })
     ));
-    assert_eq!(handle.handle().status(), InstanceStatus::Funded);
+    assert_eq!(handle.status(), InstanceStatus::Funded);
 }
 
 #[test]
 fn observation_checks_every_committed_transaction_field_before_marking_spent() {
-    let (handle, template) = fixture();
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
+    let (handle, template) = fixture(&mut manager);
     let tx = handle
         .withdraw()
         .outputs(template.outputs)
@@ -93,33 +93,27 @@ fn observation_checks_every_committed_transaction_field_before_marking_spent() {
         let mut invalid = tx.clone();
         mutate(&mut invalid);
         assert!(matches!(
-            manager.observe_spend(handle.handle(), &invalid),
+            manager.observe_spend(&handle, &invalid),
             Err(ManagerError::CtvTemplateMismatch { .. })
         ));
-        assert_eq!(handle.handle().status(), InstanceStatus::Funded);
-        assert!(handle.handle().spending_args().is_none());
-        assert!(handle.handle().outputs().is_empty());
+        assert_eq!(handle.status(), InstanceStatus::Funded);
+        assert!(handle.spend_record().is_none());
+        assert!(handle.outputs().is_empty());
     }
-    assert!(
-        manager
-            .observe_spend(handle.handle(), &tx)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(handle.handle().status(), InstanceStatus::Spent);
+    assert!(manager.observe_spend(&handle, &tx).unwrap().is_empty());
+    assert_eq!(handle.status(), InstanceStatus::Spent);
     assert_eq!(
-        handle.handle().spending_args().unwrap()[0],
+        handle.spend_record().unwrap().args()[0],
         tx.input[0].witness.to_vec()[0]
     );
 }
 
 #[test]
 fn withdrawal_cannot_replace_the_hash_revealed_from_state() {
-    let (handle, template) = fixture();
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
+    let (handle, template) = fixture(&mut manager);
     assert!(
         handle
-            .handle()
             .spend_clause("withdraw", vec![vec![42; 32]])
             .outputs(template.outputs.clone())
             .build_tx()
@@ -133,21 +127,18 @@ fn withdrawal_cannot_replace_the_hash_revealed_from_state() {
     let mut witness = tx.input[0].witness.to_vec();
     witness[0] = vec![42; 32];
     tx.input[0].witness = bitcoin::Witness::from_slice(&witness);
-    assert!(manager.observe_spend(handle.handle(), &tx).is_err());
-    assert_eq!(handle.handle().status(), InstanceStatus::Funded);
+    assert!(manager.observe_spend(&handle, &tx).is_err());
+    assert_eq!(handle.status(), InstanceStatus::Funded);
 }
 
 #[test]
 fn hash_only_templates_cannot_be_batched_by_the_builder() {
-    let (handle, template) = fixture();
-    let other: UnvaultingHandle = mattrs::testutil::fund_fake(
-        Unvaulting::new(handle.params()).unwrap().as_erased(),
-        handle.state(),
-        Amount::from_sat(10_000),
-        2,
-    )
-    .try_into()
-    .unwrap();
+    let mut manager = mattrs::testutil::local_manager();
+    let (handle, template) = fixture(&mut manager);
+    let other: UnvaultingHandle = Unvaulting::new(handle.params())
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(10_000), handle.state())
+        .unwrap();
     // Check both with and without explicit outputs on the hash-only input.
     for explicit in [false, true] {
         let builder = handle.withdraw();
@@ -157,9 +148,7 @@ fn hash_only_templates_cannot_be_batched_by_the_builder() {
             builder
         };
         let err = mattrs::manager::build_batch_tx(&[builder, other.withdraw()]).unwrap_err();
-        assert!(
-            matches!(err, ManagerError::TransactionBuildError(ref message)
-            if message.contains("template-hash clauses are single-input only"))
-        );
+        assert!(matches!(err, ManagerError::InvalidSpend(ref message)
+            if message.contains("template-hash clauses are single-input only")));
     }
 }

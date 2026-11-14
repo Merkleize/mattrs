@@ -7,7 +7,6 @@ use mattrs::contracts::{
     StandardP2TR, StateCodec, StateCommitment,
 };
 use mattrs::manager::ContractManager;
-use mattrs::testutil::fund_fake;
 
 #[derive(Debug, Clone, mattrs::ContractState)]
 #[commit(identity)]
@@ -131,6 +130,7 @@ fn empty_data_omits_the_tweak_and_is_not_sha256_of_empty() {
 
 #[test]
 fn merkle_commitments_keep_expanded_state_without_a_codec() {
+    let mut manager = mattrs::testutil::local_manager();
     let state = MerkleState {
         first: [1; 32],
         number: 42,
@@ -138,18 +138,19 @@ fn merkle_commitments_keep_expanded_state_without_a_codec() {
     };
     let root = mattrs::merkle::MerkleTree::new(vec![
         state.first,
-        mattrs::script_utils::commit_int(state.number),
+        mattrs::script::commit_int(state.number),
         [2; 32],
         [3; 32],
     ])
     .root();
     assert_eq!(state.commitment().as_bytes(), root);
-    let handle = fund_fake(
-        Arc::new(contract::<MerkleState>()),
-        state,
-        Amount::from_sat(1_000),
-        0,
-    );
+    let handle = manager
+        .fund_instance(
+            Arc::new(contract::<MerkleState>()),
+            state,
+            Amount::from_sat(1_000),
+        )
+        .unwrap();
     let recovered = handle.state::<MerkleState>().unwrap();
     assert_eq!(recovered.number, 42);
     assert_eq!(recovered.rest, [[2; 32], [3; 32]]);
@@ -157,15 +158,17 @@ fn merkle_commitments_keep_expanded_state_without_a_codec() {
 
 #[test]
 fn commitments_never_recover_a_different_logical_state_type() {
+    let mut manager = mattrs::testutil::local_manager();
     let state = RawState {
         bytes: vec![0x42; 32],
     };
-    let handle = fund_fake(
-        Arc::new(contract::<RawState>()),
-        state.clone(),
-        Amount::from_sat(1_000),
-        0,
-    );
+    let handle = manager
+        .fund_instance(
+            Arc::new(contract::<RawState>()),
+            state.clone(),
+            Amount::from_sat(1_000),
+        )
+        .unwrap();
     // HashedState's codec could decode these bytes, but the logical type differs.
     assert!(HashedState::decode(&state.encode()).is_ok());
     assert!(handle.state::<HashedState>().is_none());
@@ -179,6 +182,7 @@ fn commitments_never_recover_a_different_logical_state_type() {
 
 #[test]
 fn commitments_are_independent_of_optional_serialization() {
+    let mut manager = mattrs::testutil::local_manager();
     #[derive(Debug, Clone)]
     struct NoCodecAccess;
     impl ContractState for NoCodecAccess {
@@ -197,14 +201,16 @@ fn commitments_are_independent_of_optional_serialization() {
     let contract = Arc::new(contract::<NoCodecAccess>());
     let state = NoCodecAccess;
     assert_eq!(state.commitment().as_bytes(), [7; 32]);
-    let handle = fund_fake(contract, state, Amount::from_sat(1_000), 0);
+    let handle = manager
+        .fund_instance(contract, state, Amount::from_sat(1_000))
+        .unwrap();
     assert!(handle.state::<NoCodecAccess>().is_some());
     let mut manager = ContractManager::offline(Network::Regtest);
     let tx = handle
         .spend_clause("spend", vec![])
         .outputs(vec![TxOut {
             value: Amount::from_sat(900),
-            script_pubkey: mattrs::script_helpers::opaque_p2tr(mattrs::nums_key()),
+            script_pubkey: mattrs::script::opaque_p2tr(mattrs::nums_key()),
         }])
         .build_tx()
         .unwrap();
@@ -214,10 +220,9 @@ fn commitments_are_independent_of_optional_serialization() {
 #[test]
 #[ignore = "requires a running MATT-enabled regtest bitcoind"]
 fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin_script::{define_pushable, script};
     use mattrs::ccv::CcvIndex;
     use mattrs::contracts::ArgSpec;
-    define_pushable!();
+    use mattrs::script;
     let contract = Arc::new(StandardP2TR::<(), RawState>::new(
         "RawData",
         mattrs::nums_key(),
@@ -225,7 +230,7 @@ fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error:
         ClauseTree::leaf(Arc::new(StandardClause::<(), RawState, RawArgs>::new(
             "reveal".into(),
             script! {
-                { mattrs::script_helpers::check_input_contract(CcvIndex::CURRENT, None) } OP_TRUE
+                { mattrs::script::check_input_contract(CcvIndex::CURRENT, None) } OP_TRUE
             },
             vec![ArgSpec {
                 name: "data".into(),
@@ -252,7 +257,7 @@ fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error:
             .spend_clause("reveal", vec![bytes])
             .outputs(vec![TxOut {
                 value: Amount::from_sat(9_000),
-                script_pubkey: mattrs::script_helpers::opaque_p2tr(mattrs::nums_key()),
+                script_pubkey: mattrs::script::opaque_p2tr(mattrs::nums_key()),
             }])
             .exec_none(&mut manager)?;
     }

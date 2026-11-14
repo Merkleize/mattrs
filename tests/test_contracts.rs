@@ -1,7 +1,7 @@
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use mattrs::argtypes::IntType;
 use mattrs::contracts::*;
-use mattrs::script_utils;
+use mattrs::script;
 use mattrs::{ClauseArgs as DeriveClauseArgs, ContractState as DeriveContractState};
 use std::fmt::Debug;
 use std::str::FromStr;
@@ -37,7 +37,7 @@ impl StateCodec for VaultState {
 
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
         if bytes.len() != 8 {
-            return Err(WitnessError::InvalidValue(format!(
+            return Err(WitnessError::Invalid(format!(
                 "Expected 8 bytes for amount, got {}",
                 bytes.len()
             )));
@@ -57,15 +57,15 @@ struct TriggerArgs {
 
 impl ClauseArgs for TriggerArgs {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![script_utils::bn2vch(self.withdraw_amount)]
+        vec![script::bn2vch(self.withdraw_amount)]
     }
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
-        let withdraw_amount = script_utils::vch2bn(&witness[0])
-            .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+        let withdraw_amount =
+            script::vch2bn(&witness[0]).map_err(|e| WitnessError::Invalid(e.to_string()))?;
         Ok(TriggerArgs { withdraw_amount })
     }
 }
@@ -456,6 +456,7 @@ fn test_derived_state_roundtrip() {
 
 #[test]
 fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
+    let mut manager = mattrs::testutil::local_manager();
     use bitcoin::{Address, Amount, Sequence, TxOut};
 
     // The exact outputs + input sequence the clause commits to.
@@ -494,7 +495,9 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
             .expect("contract definition is valid"),
     );
     // Fake a funded instance (building the tx does no RPC).
-    let handle = mattrs::testutil::fund_fake(erased, (), Amount::from_sat(100_000), 0);
+    let handle = manager
+        .fund_instance(erased, (), Amount::from_sat(100_000))
+        .unwrap();
 
     let witness =
         <TriggerArgs as ClauseArgs>::encode_to_witness(&TriggerArgs { withdraw_amount: 1 });
@@ -515,7 +518,7 @@ fn test_expanded_state_flows_to_next_outputs() {
     }
     impl ContractState for CounterState {
         fn commitment(&self) -> StateCommitment {
-            StateCommitment::identity(script_utils::commit_int(self.secret).to_vec())
+            StateCommitment::identity(script::commit_int(self.secret).to_vec())
         }
     }
 
@@ -527,7 +530,7 @@ fn test_expanded_state_flows_to_next_outputs() {
         Some(Arc::new(
             |_p: &(), _a: &SampleArgs, s: &CounterState| match s {
                 st if st.secret == 42 => Ok(NextOutputs::Outputs(vec![])),
-                other => Err(ClauseError::Other(format!("unexpected state: {:?}", other))),
+                other => Err(ClauseError::other(format!("unexpected state: {:?}", other))),
             },
         )),
     );
@@ -635,6 +638,6 @@ fn test_canonical_option_flags_and_checked_script_numbers() {
     assert!(<Option<i64> as WitnessEncodable>::decode_from_witness(&[vec![0]]).is_err());
     assert!(<Option<i64> as WitnessEncodable>::decode_from_witness(&[vec![2]]).is_err());
 
-    let too_large = script_utils::bn2vch(i64::from(i32::MAX) + 1);
+    let too_large = script::bn2vch(i64::from(i32::MAX) + 1);
     assert!(<i32 as WitnessEncodable>::decode_from_witness(&[too_large]).is_err());
 }

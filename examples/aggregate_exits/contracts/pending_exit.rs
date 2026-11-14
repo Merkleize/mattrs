@@ -1,12 +1,11 @@
 //! [`PendingExit`]: Ingrid's aggregate-exit claim under its challenge period.
 
 use bitcoin::ScriptBuf;
-use bitcoin_script::define_pushable;
 use mattrs::ContractState;
 use mattrs::contract;
 use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
-use mattrs::script_utils::{bn2vch, commit_int};
+use mattrs::script::{bn2vch, commit_int};
 
 use super::delegation::{DelegationChallenge, DelegationChallengeState};
 use super::dispute::{BisectRangeParams, ExitBisect1, ExitBisect1State};
@@ -16,8 +15,6 @@ use super::{
 };
 use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
 use mattrs::stack::StackScript;
-
-define_pushable!();
 
 /// The claim's committed state (Merkle root of the seven leaves, in field
 /// order). `unwind_taptree` is carried as data because [`Unwind`]'s scripts
@@ -190,7 +187,7 @@ impl PendingExit {
         // sats — the claimed aggregate plus Ingrid's returned bond.
         s.ccv(
             CcvData::Empty,
-            CcvIndex::at(0).expect("valid output index"),
+            0,
             CcvKey::Item("ingrid_pk"),
             CcvTaptree::None,
             CcvMode::DeductAmount,
@@ -198,7 +195,7 @@ impl PendingExit {
         // Output 1 continues the pool at the claimed post-exit root.
         s.ccv(
             CcvData::Item("r_prime"),
-            CcvIndex::at(1).expect("valid output index"),
+            1,
             CcvKey::Nums,
             CcvTaptree::Item("unwind_taptree"),
             CcvMode::Preserve,
@@ -260,7 +257,7 @@ impl PendingExit {
         let b1_root = ExitBisect1::new(BisectRangeParams::entry(p))?.taptree_root();
         s.ccv(
             CcvData::Item("b1_state"),
-            CcvIndex::at(0).expect("valid output index"),
+            0,
             CcvKey::Nums,
             CcvTaptree::Const(b1_root),
             CcvMode::Preserve,
@@ -348,7 +345,7 @@ impl PendingExit {
         let dc_root = DelegationChallenge::new(p.clone())?.taptree_root();
         s.ccv(
             CcvData::Item("dc_state"),
-            CcvIndex::at(0).expect("valid output index"),
+            0,
             CcvKey::Nums,
             CcvTaptree::Const(dc_root),
             CcvMode::Preserve,

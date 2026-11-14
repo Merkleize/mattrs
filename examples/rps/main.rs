@@ -49,6 +49,7 @@ use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{ProtocolError, Runner};
+use mattrs::signer::HotSigner;
 
 use contracts::roles::{AliceData, BobData, alice_role, bob_role, clause_of};
 use contracts::{DEFAULT_STAKE, RpsGameS0, RpsParams, alice_move_commitment};
@@ -180,7 +181,7 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppR
             println!("Bob played {}", move_str(m_b));
             println!("Outcome: {}", clause_of(result).name());
             wait_for_enter("Press ENTER to broadcast the adjudication transaction...")
-                .map_err(|e| ProtocolError::Other(format!("failed to read confirmation: {e}")))
+                .map_err(|e| ProtocolError::other(format!("failed to read confirmation: {e}")))
         })),
     };
     // Run with no time limit: a human counterparty takes their time.
@@ -231,7 +232,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector)?;
-    let entry = manager.track_instance(RpsGameS0::new(params)?.as_erased(), (), outpoint)?;
+    let entry = RpsGameS0::new(params)?.track(&mut manager, outpoint)?;
     println!("Tracking the game at {outpoint}");
 
     // Bob's role does the rest: reveal the move on-chain (signed), then follow
@@ -239,7 +240,8 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
     // and the outcome against the game rule.
     println!("Bob plays {} — broadcasting the move", move_str(m_b));
     println!("Then waiting for Alice's adjudication on-chain...");
-    let data = BobData { m_b, c_a, xpriv };
+    manager.add_signer(HotSigner::new(xpriv));
+    let data = BobData { m_b, c_a };
     let outcome = Runner::new(manager, bob_role(), data, entry).run_one()?;
     println!("Alice played {}", move_str(outcome.m_a));
     println!(

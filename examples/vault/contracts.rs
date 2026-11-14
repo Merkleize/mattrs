@@ -19,20 +19,19 @@
 //! ```
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, ClauseOutput};
+use mattrs::script;
+use mattrs::script::{check_output_pays_key, optional_key_script};
 use mattrs::{
     ContractState, Signature,
     ccv::{CcvIndex, CcvMode},
-    contract, internal_key_or_nums, optional_key_script,
+    contract, internal_key_or_nums,
 };
 
-define_pushable!();
-
-fn recovery_output(index: i64, key: XOnlyPublicKey) -> Result<ClauseOutput, ClauseError> {
+fn recovery_output(index: CcvIndex, key: XOnlyPublicKey) -> Result<ClauseOutput, ClauseError> {
     // CCV with empty data and taptree pays the output key without a tweak.
-    let script = mattrs::script_helpers::opaque_p2tr(key);
-    Ok(ClauseOutput::at(CcvIndex::try_from(index)?).pay(script))
+    let script = mattrs::script::opaque_p2tr(key);
+    Ok(ClauseOutput::at(index).pay(script))
 }
 
 // ============================================================================
@@ -67,7 +66,6 @@ pub struct UnvaultingState {
 contract! {
     contract Vault {
         params VaultParams;
-        validate |p| mattrs::BlockDelay::new(p.spend_delay).map(|_| ());
         internal_key |p| internal_key_or_nums(p.alternate_pk);
 
         // witness: <sig> <ctv-hash> <out_i>
@@ -76,13 +74,13 @@ contract! {
                 #[signer(p.unvault_pk)]
                 sig: Signature,
                 ctv_hash: [u8; 32],
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script Vault::trigger_script;
             next(p, a) {
                 Vault::new(p.clone())?.trigger_outputs(
                     a.ctv_hash,
-                    CcvIndex::try_from(a.out_i)?,
+                    a.out_i,
                 )
             }
         }
@@ -93,15 +91,15 @@ contract! {
                 #[signer(p.unvault_pk)]
                 sig: Signature,
                 ctv_hash: [u8; 32],
-                out_i: i64,
-                revault_out_i: i64,
+                out_i: CcvIndex,
+                revault_out_i: CcvIndex,
             }
             script Vault::trigger_and_revault_script;
             next(p, a) {
                 Vault::new(p.clone())?.trigger_and_revault_outputs(
                     a.ctv_hash,
-                    CcvIndex::try_from(a.out_i)?,
-                    CcvIndex::try_from(a.revault_out_i)?,
+                    a.out_i,
+                    a.revault_out_i,
                 )
             }
         }
@@ -109,7 +107,7 @@ contract! {
         // witness: <out_i> — terminal (spends to recover_pk)
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script Vault::recover_script;
             next(p, a) { recovery_output(a.out_i, p.recover_pk) }
@@ -194,12 +192,7 @@ impl Vault {
 
     fn recover_script(params: &VaultParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }
@@ -225,7 +218,7 @@ contract! {
             script Unvaulting::withdraw_script;
             next(_p, a, s) {
                 if a.ctv_hash != s.ctv_hash {
-                    return Err(ClauseError::Other("withdrawal hash does not match committed state".into()));
+                    return Err(ClauseError::other("withdrawal hash does not match committed state"));
                 }
                 Ok(mattrs::contracts::NextOutputs::TemplateHash(s.ctv_hash))
             }
@@ -234,7 +227,7 @@ contract! {
         // witness: <out_i> — terminal (spends to recover_pk)
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script Unvaulting::recover_script;
             next(p, a) { recovery_output(a.out_i, p.recover_pk) }
@@ -259,12 +252,7 @@ impl Unvaulting {
 
     fn recover_script(params: &UnvaultingParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }

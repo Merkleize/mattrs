@@ -1,7 +1,4 @@
-//! Bitcoin Script encoding utilities.
-//!
-//! This module provides functions for encoding and decoding values to/from
-//! Bitcoin Script format, particularly for witness stack manipulation.
+//! Script-number encoding, for values that travel on the witness stack.
 
 use crate::contracts::WitnessError;
 
@@ -13,7 +10,7 @@ use crate::contracts::WitnessError;
 /// # Examples
 ///
 /// ```
-/// use mattrs::script_utils::bn2vch;
+/// use mattrs::script::bn2vch;
 ///
 /// // Small positive numbers
 /// assert_eq!(bn2vch(0), Vec::<u8>::new());
@@ -55,14 +52,14 @@ pub fn bn2vch(value: i64) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// Returns `WitnessError::InvalidValue` if:
+/// Returns `WitnessError::Invalid` if:
 /// - The byte array is too long to fit in an i64
 /// - The encoding is malformed
 ///
 /// # Examples
 ///
 /// ```
-/// use mattrs::script_utils::vch2bn;
+/// use mattrs::script::vch2bn;
 ///
 /// assert_eq!(vch2bn(&[]).unwrap(), 0);
 /// assert_eq!(vch2bn(&[0x01]).unwrap(), 1);
@@ -78,7 +75,7 @@ pub fn vch2bn(vch: &[u8]) -> Result<i64, WitnessError> {
     // Zero has exactly one minimal encoding: the empty vector. A sign bit with
     // no magnitude is "negative zero" and is non-minimal for the same reason.
     if vch.len() == 1 && matches!(vch[0], 0x00 | 0x80) {
-        return Err(WitnessError::InvalidValue(
+        return Err(WitnessError::Invalid(
             "Non-minimal integer encoding".to_string(),
         ));
     }
@@ -86,7 +83,7 @@ pub fn vch2bn(vch: &[u8]) -> Result<i64, WitnessError> {
     // Bitcoin script integers can be at most 4 bytes for standard operations,
     // but we allow up to 8 bytes for i64, plus one extra byte for the sign bit if needed
     if vch.len() > 9 {
-        return Err(WitnessError::InvalidValue(
+        return Err(WitnessError::Invalid(
             "Integer value too large for i64".to_string(),
         ));
     }
@@ -99,13 +96,13 @@ pub fn vch2bn(vch: &[u8]) -> Result<i64, WitnessError> {
 
         // If last byte is 0x00 and second-to-last doesn't have high bit set, non-minimal
         if last_byte == 0x00 && (second_last_byte & 0x80) == 0 {
-            return Err(WitnessError::InvalidValue(
+            return Err(WitnessError::Invalid(
                 "Non-minimal integer encoding".to_string(),
             ));
         }
         // If last byte is 0x80 and second-to-last doesn't have high bit set, non-minimal
         if last_byte == 0x80 && (second_last_byte & 0x80) == 0 {
-            return Err(WitnessError::InvalidValue(
+            return Err(WitnessError::Invalid(
                 "Non-minimal integer encoding".to_string(),
             ));
         }
@@ -128,7 +125,7 @@ pub fn vch2bn(vch: &[u8]) -> Result<i64, WitnessError> {
                 continue;
             } else {
                 // Too much data
-                return Err(WitnessError::InvalidValue(
+                return Err(WitnessError::Invalid(
                     "Integer value too large for i64".to_string(),
                 ));
             }
@@ -146,7 +143,7 @@ pub fn vch2bn(vch: &[u8]) -> Result<i64, WitnessError> {
     if negative {
         // For negative numbers, result should be <= i64::MAX + 1 (which is i64::MIN's absolute value)
         if result > (i64::MAX as u64) + 1 {
-            return Err(WitnessError::InvalidValue(
+            return Err(WitnessError::Invalid(
                 "Negative integer value too large for i64".to_string(),
             ));
         }
@@ -158,7 +155,7 @@ pub fn vch2bn(vch: &[u8]) -> Result<i64, WitnessError> {
         }
     } else {
         if result > i64::MAX as u64 {
-            return Err(WitnessError::InvalidValue(
+            return Err(WitnessError::Invalid(
                 "Positive integer value too large for i64".to_string(),
             ));
         }

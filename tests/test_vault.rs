@@ -10,7 +10,7 @@ use bitcoin::{
 };
 
 use mattrs::{
-    contracts::{CcvIndex, ClauseError, InstanceStatus},
+    contracts::{CcvIndex, InstanceStatus},
     ctv::create_ctv_template,
     manager::{ContractManager, ManagerError},
     signer::HotSigner,
@@ -109,9 +109,6 @@ fn test_vault_trigger_outputs() {
 
 #[test]
 fn test_vault_output_indices_follow_ccv_semantics() {
-    use support::testkit::{fund_fake, try_handle};
-    use support::vault::VaultHandle;
-
     let vault = Vault::new(VaultParams {
         alternate_pk: None,
         spend_delay: 10,
@@ -119,18 +116,21 @@ fn test_vault_output_indices_follow_ccv_semantics() {
         unvault_pk: alice_pk(),
     })
     .unwrap();
-    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 9));
+    let handle = vault
+        .fund(
+            &mut mattrs::testutil::local_manager(),
+            Amount::from_sat(100_000),
+        )
+        .unwrap();
 
-    let err = handle.trigger([0; 32], -2).build_tx().unwrap_err();
-    assert!(matches!(
-        err,
-        ManagerError::ClauseError(ClauseError::Other(message))
-            if message.contains("CCV index -2")
-    ));
-
-    // `-1` is CCV's "same index as this input", exactly as the script reads it.
-    // The clause accepts it; the spend only lacks its (unprovided) signer.
-    let err = handle.trigger([0; 32], -1).build_tx().unwrap_err();
+    // The index argument is a `CcvIndex`, so an undefined one (`-2`) cannot be
+    // written. `CURRENT` is CCV's `-1`, "same index as this input", exactly as
+    // the script reads it: the clause accepts it, and the spend only lacks its
+    // (unprovided) signer.
+    let err = handle
+        .trigger([0; 32], CcvIndex::CURRENT)
+        .build_tx()
+        .unwrap_err();
     assert!(matches!(err, ManagerError::MissingSigner(_)));
 }
 
@@ -179,8 +179,6 @@ fn test_trigger_without_signer_errors() {
     // must fail loudly (MissingSigner) rather than broadcast an unsigned witness.
     // This builds the tx locally and does no RPC.
     use mattrs::manager::ManagerError;
-    use support::testkit::{fund_fake, try_handle};
-    use support::vault::VaultHandle;
 
     let params = VaultParams {
         alternate_pk: None,
@@ -191,7 +189,12 @@ fn test_trigger_without_signer_errors() {
     let vault = Vault::new(params).unwrap();
 
     // Fake a funded instance so the tx can be built (and a prevout exists).
-    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 0));
+    let handle = vault
+        .fund(
+            &mut mattrs::testutil::local_manager(),
+            Amount::from_sat(100_000),
+        )
+        .unwrap();
 
     let err = handle.trigger([7u8; 32], 0).build_tx().unwrap_err();
 
@@ -209,8 +212,6 @@ fn test_batch_merges_and_deducts_outputs() {
     // merge into a single output; the revault is a separate deducted output at
     // index 1. Mirrors pymatt's trigger_with_revault batch. Builds locally, no RPC.
     use mattrs::signer::HotSigner;
-    use support::testkit::{fund_fake, try_handle};
-    use support::vault::VaultHandle;
 
     let unvault_privkey = alice_xpriv();
     let recover_pubkey = XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap();
@@ -224,11 +225,11 @@ fn test_batch_merges_and_deducts_outputs() {
     let vault = Vault::new(params).unwrap();
 
     // Fund three vault instances of 100_000 sat each (same address, distinct txids).
-    let funded =
-        |seed: u8| try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, seed));
-    let h1 = funded(1);
-    let h2 = funded(2);
-    let h3 = funded(3);
+    let mut manager = mattrs::testutil::local_manager();
+    let mut funded = || vault.fund(&mut manager, Amount::from_sat(100_000)).unwrap();
+    let h1 = funded();
+    let h2 = funded();
+    let h3 = funded();
 
     let ctv_hash = [7u8; 32];
     let revault_amount = Amount::from_sat(30_000);
@@ -319,11 +320,10 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let unvaulting: UnvaultingHandle = vault
         .trigger(ctv_hash, 0)
         .sign(HotSigner::new(unvault_privkey))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
 
     // The child Unvaulting instance is funded and carries the ctv_hash as its state.
-    assert_eq!(unvaulting.handle().status(), InstanceStatus::Funded);
+    assert_eq!(unvaulting.status(), InstanceStatus::Funded);
     let state = unvaulting.state();
     assert_eq!(state.ctv_hash, ctv_hash);
 
@@ -372,7 +372,7 @@ fn test_observe_spend_decodes_clause_and_children() {
     // tapscript, witness args recorded (and typed-decodable), and the child
     // instance materialized with its logical state. No node involved.
     use mattrs::signer::HotSigner;
-    use support::testkit::{alice_xpriv, fund_fake};
+    use support::testkit::alice_xpriv;
     use support::vault::{VaultClause, VaultSpend};
 
     let params = VaultParams {
@@ -385,18 +385,22 @@ fn test_observe_spend_decodes_clause_and_children() {
     let ctv_hash = [0xabu8; 32];
 
     // The actor builds (but does not broadcast) a trigger spend.
-    let actor_handle: support::vault::VaultHandle = fund_fake(vault.as_erased(), (), 100_000, 7)
-        .try_into()
-        .unwrap();
+    let chain = std::rc::Rc::new(mattrs::chain::LocalChain::new());
+    let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let actor_handle = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
     let tx = actor_handle
         .trigger(ctv_hash, 0)
         .sign(HotSigner::new(alice_xpriv()))
         .build_tx()
         .unwrap();
 
-    // The observer holds its own instance of the same (deterministic) funding.
-    let mut observer = ContractManager::offline(bitcoin::Network::Regtest);
-    let observed = fund_fake(vault.as_erased(), (), 100_000, 7);
+    // The observer tracks the same outpoint in its own manager.
+    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let observed = vault
+        .track(&mut observer, actor_handle.outpoint())
+        .unwrap()
+        .handle()
+        .clone();
 
     assert!(actor_handle.spent().is_none());
     let children = observer.observe_spend(&observed, &tx).unwrap();
@@ -410,7 +414,7 @@ fn test_observe_spend_decodes_clause_and_children() {
     };
     assert_eq!(typed.spent().unwrap().clause(), VaultClause::Trigger);
     assert_eq!(args.ctv_hash, ctv_hash);
-    assert_eq!(args.out_i, 0);
+    assert_eq!(args.out_i, CcvIndex::from(0));
     assert!(!args.sig.is_empty());
 
     // The child is the Unvaulting instance, carrying the ctv_hash as its state.
@@ -439,7 +443,7 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     // instances decodes each input's clause — including at vin > 0 — and
     // materializes the merged child once, shared between both parents.
     use mattrs::signer::HotSigner;
-    use support::testkit::{alice_xpriv, fund_fake, try_handle};
+    use support::testkit::alice_xpriv;
     use support::vault::VaultHandle;
 
     let params = VaultParams {
@@ -452,10 +456,10 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     let ctv_hash = [7u8; 32];
     let revault_amount = Amount::from_sat(30_000);
 
-    let funded =
-        |seed: u8| try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, seed));
-    let h1 = funded(1);
-    let h2 = funded(2);
+    let chain = std::rc::Rc::new(mattrs::chain::LocalChain::new());
+    let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let h1 = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
+    let h2 = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
 
     let tx = mattrs::manager::build_batch_tx(&[
         h1.trigger_and_revault(ctv_hash, 0, 1)
@@ -465,10 +469,16 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     ])
     .unwrap();
 
-    // The observer holds its own twin instances (same deterministic outpoints).
-    let mut observer = ContractManager::offline(bitcoin::Network::Regtest);
-    let o1 = fund_fake(vault.as_erased(), (), 100_000, 1);
-    let o2 = fund_fake(vault.as_erased(), (), 100_000, 2);
+    // The observer tracks the same two outpoints in its own manager.
+    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let mut track = |h: &VaultHandle| {
+        vault
+            .track(&mut observer, h.outpoint())
+            .unwrap()
+            .handle()
+            .clone()
+    };
+    let (o1, o2) = (track(&h1), track(&h2));
 
     let children1 = observer.observe_spend(&o1, &tx).unwrap();
     let children2 = observer.observe_spend(&o2, &tx).unwrap();
@@ -476,8 +486,8 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     // Each input decodes to its own clause, at its own input index.
     assert_eq!(o1.clause_name().as_deref(), Some("trigger_and_revault"));
     assert_eq!(o2.clause_name().as_deref(), Some("trigger"));
-    assert_eq!(o1.spending_vin(), Some(0));
-    assert_eq!(o2.spending_vin(), Some(1));
+    assert_eq!(o1.spend_record().unwrap().vin(), 0);
+    assert_eq!(o2.spend_record().unwrap().vin(), 1);
     assert_eq!(o1.spending_tx().unwrap().compute_txid(), tx.compute_txid());
 
     // Input 0 yields the unvaulting (index 0) and the revault (index 1); input
@@ -500,7 +510,7 @@ fn observer_instances_count(handle: &mattrs::manager::InstanceHandle) -> usize {
 #[test]
 fn test_external_broadcast_is_staged_first_and_orders_children_like_observation() {
     use mattrs::signer::HotSigner;
-    use support::testkit::{alice_xpriv, fund_fake, offline_manager, try_handle};
+    use support::testkit::alice_xpriv;
     use support::vault::VaultHandle;
 
     let vault = Vault::new(VaultParams {
@@ -520,14 +530,15 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
     };
 
     // A refused broadcast leaves the instance untouched.
-    let mut actor = offline_manager();
-    let handle = try_handle::<VaultHandle>(fund_fake(vault.as_erased(), (), 100_000, 11));
+    let chain = std::rc::Rc::new(mattrs::chain::LocalChain::new());
+    let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let handle = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
     let refused = actor.spend_batch_with(&[spend(&handle)], |_| {
-        Err(ManagerError::Other("the relay refused it".into()))
+        Err(ManagerError::other("the relay refused it"))
     });
     assert!(matches!(refused, Err(ManagerError::Other(_))));
-    assert_eq!(handle.handle().status(), InstanceStatus::Funded);
-    assert!(handle.handle().outputs().is_empty());
+    assert_eq!(handle.status(), InstanceStatus::Funded);
+    assert!(handle.outputs().is_empty());
 
     // An accepted one is recorded, with the transaction the broadcaster saw.
     let mut sent = None;
@@ -537,12 +548,16 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
             Ok::<_, ManagerError>(())
         })
         .unwrap();
-    assert_eq!(handle.handle().status(), InstanceStatus::Spent);
+    assert_eq!(handle.status(), InstanceStatus::Spent);
     let sent = sent.expect("the broadcaster ran");
 
     // An observer of that transaction sees the same children, in the same order.
-    let mut observer = offline_manager();
-    let observed = fund_fake(vault.as_erased(), (), 100_000, 11);
+    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let observed = vault
+        .track(&mut observer, handle.outpoint())
+        .unwrap()
+        .handle()
+        .clone();
     let seen = observer.observe_spend(&observed, &sent).unwrap();
     let outpoints = |children: &[mattrs::manager::InstanceHandle]| -> Vec<_> {
         children.iter().map(|child| child.outpoint()).collect()
@@ -553,6 +568,18 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
         seen.iter().map(|c| c.outpoint().vout).collect::<Vec<_>>(),
         [0, 1]
     );
+
+    // Children are addressed by the output they live at, typed.
+    let _: UnvaultingHandle = children.at(0).unwrap();
+    let _: VaultHandle = children.at(1).unwrap();
+    assert!(matches!(
+        children.at::<VaultHandle>(0),
+        Err(ManagerError::WrongContract(_))
+    ));
+    assert!(matches!(
+        children.at::<VaultHandle>(2),
+        Err(ManagerError::NoChildAtOutput { index: 2 })
+    ));
 }
 
 /// An offline manager reports node operations as `NoNode` instead of trying to
@@ -596,7 +623,7 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
     })
     .unwrap();
     let funded = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
-    let outpoint = funded.handle().outpoint();
+    let outpoint = funded.outpoint();
     actor.mine_blocks(1).unwrap();
     assert_eq!(chain.confirmation_height(outpoint.txid).unwrap(), Some(1));
 
@@ -609,7 +636,7 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
         .unwrap();
     assert_eq!(children.len(), 1);
 
-    let seen = observer.wait_for_spend(watched.handle()).unwrap();
+    let seen = observer.wait_for_spend(&watched).unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].outpoint(), children[0].outpoint());
 
@@ -627,5 +654,60 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
         first.exec(&mut actor),
         Err(ManagerError::Chain(mattrs::chain::ChainError::Rejected(_)))
     ));
-    assert_eq!(again.handle().status(), InstanceStatus::Funded);
+    assert_eq!(again.status(), InstanceStatus::Funded);
+}
+
+/// A standing signer on the manager signs every spend it executes; a signer
+/// given to one spend wins for that spend; a key nobody holds is an error.
+#[test]
+fn test_standing_signers_fill_signatures() {
+    use mattrs::chain::LocalChain;
+    use mattrs::signer::{HotSigner, Signer, SignerError};
+    use std::rc::Rc;
+    use support::testkit::alice_xpriv;
+
+    /// Signs for Alice's key, but refuses.
+    struct Refusing;
+    impl Signer for Refusing {
+        fn sign(&self, _: &[u8; 32]) -> Result<mattrs::Signature, SignerError> {
+            Err(SignerError("refused".into()))
+        }
+        fn public_key(&self) -> XOnlyPublicKey {
+            alice_pk()
+        }
+    }
+
+    let vault = Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })
+    .unwrap();
+    let chain = Rc::new(LocalChain::new());
+    let mut manager = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let fund =
+        |manager: &mut ContractManager| vault.fund(manager, Amount::from_sat(100_000)).unwrap();
+
+    // No signer anywhere.
+    assert!(matches!(
+        fund(&mut manager).trigger([1; 32], 0).exec(&mut manager),
+        Err(ManagerError::MissingSigner(key)) if key == alice_pk()
+    ));
+
+    // A standing signer: no `.sign(..)` on the spend.
+    manager.add_signer(HotSigner::new(alice_xpriv()));
+    let spent = fund(&mut manager);
+    spent.trigger([1; 32], 0).exec(&mut manager).unwrap();
+    assert_eq!(spent.status(), InstanceStatus::Spent);
+
+    // A per-spend signer takes precedence over the standing one.
+    let kept = fund(&mut manager);
+    assert!(
+        kept.trigger([1; 32], 0)
+            .sign(Refusing)
+            .exec(&mut manager)
+            .is_err()
+    );
+    assert_eq!(kept.status(), InstanceStatus::Funded);
 }

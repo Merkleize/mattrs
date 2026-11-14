@@ -9,17 +9,12 @@
 mod support;
 
 use bitcoin::{Amount, TxOut, XOnlyPublicKey};
-use mattrs::contracts::ClauseError;
-use mattrs::manager::{ContractManager, ManagerError};
+use mattrs::manager::ContractManager;
 use mattrs::report::Report;
-use mattrs::script_helpers::opaque_p2tr;
+use mattrs::script::opaque_p2tr;
 use mattrs::signer::HotSigner;
-use support::minivault::{
-    MiniUnvaulting, MiniUnvaultingHandle, MiniVault, MiniVaultHandle, MiniVaultParams,
-};
-use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, fund_fake, regtest_client, report_spend, try_handle,
-};
+use support::minivault::{MiniUnvaulting, MiniUnvaultingHandle, MiniVault, MiniVaultParams};
+use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client, report_spend};
 
 const SPEND_DELAY: u32 = 10;
 
@@ -91,17 +86,16 @@ fn test_minivault_combos_have_distinct_taptrees() {
 
 #[test]
 fn test_minivault_trigger_commits_unvaulting_state() {
+    let mut manager = mattrs::testutil::local_manager();
     // Build (no node) a trigger spend and check output 0 commits a
     // MiniUnvaulting carrying the withdrawal key, preserving the amount.
     let params = make_params(false, false);
     let wpk = withdrawal_pk();
 
-    let handle = try_handle::<MiniVaultHandle>(fund_fake(
-        MiniVault::new(params.clone()).unwrap().as_erased(),
-        (),
-        100_000,
-        0,
-    ));
+    let handle = MiniVault::new(params.clone())
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(100_000))
+        .unwrap();
 
     let tx = handle
         .trigger(wpk, 0)
@@ -123,28 +117,6 @@ fn test_minivault_trigger_commits_unvaulting_state() {
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, expected);
     assert_eq!(tx.output[0].value, Amount::from_sat(100_000));
-}
-
-#[test]
-fn test_minivault_rejects_invalid_output_indices() {
-    let params = make_params(true, false);
-    let handle = try_handle::<MiniVaultHandle>(fund_fake(
-        MiniVault::new(params).unwrap().as_erased(),
-        (),
-        100_000,
-        8,
-    ));
-
-    let err = handle
-        .trigger_and_revault(withdrawal_pk(), 0, -2)
-        .build_tx()
-        .unwrap_err();
-    // `-1` is CCV's "same index as this input"; anything below is undefined.
-    assert!(matches!(
-        err,
-        ManagerError::ClauseError(ClauseError::Other(message))
-            if message.contains("CCV index -2")
-    ));
 }
 
 // ----------------------------------------------------------------------------
@@ -201,7 +173,7 @@ fn test_minivault_early_recover_on_regtest() -> Result<(), Box<dyn std::error::E
         &mut report,
         "MiniVault",
         "recover (straight from the vault)",
-        vault.handle(),
+        &vault,
     );
     report.finalize("reports/report_minivault_recover.md")?;
     Ok(())
@@ -223,9 +195,8 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
     let unvaulting: MiniUnvaultingHandle = vault
         .trigger(wpk, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
-    report_spend(&mut report, "MiniVault", "trigger", vault.handle());
+        .exec_one(&mut manager)?;
+    report_spend(&mut report, "MiniVault", "trigger", &vault);
 
     let state = unvaulting.state();
     assert_eq!(state.withdrawal_pk, wpk);
@@ -238,7 +209,7 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
         &mut report,
         "MiniVault",
         "recover (from the unvaulting)",
-        unvaulting.handle(),
+        &unvaulting,
     );
     report.finalize("reports/report_minivault_trigger_recover.md")?;
     Ok(())
@@ -260,9 +231,8 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
     let unvaulting: MiniUnvaultingHandle = vault
         .trigger(wpk, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
-    report_spend(&mut report, "MiniVault", "trigger", vault.handle());
+        .exec_one(&mut manager)?;
+    report_spend(&mut report, "MiniVault", "trigger", &vault);
 
     // Withdrawing before the delay must be rejected as non-BIP68-final.
     let early = unvaulting
@@ -289,7 +259,7 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
         &mut report,
         "MiniVault",
         "withdraw (after the delay)",
-        unvaulting.handle(),
+        &unvaulting,
     );
     report.finalize("reports/report_minivault_trigger_withdraw.md")?;
     Ok(())
@@ -325,7 +295,7 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
         &mut report,
         "MiniVault",
         "trigger_and_revault + 2x trigger (3 vault inputs)",
-        v1.handle(),
+        &v1,
     );
 
     // Two children: the merged MiniUnvaulting (output 0) and the revaulted
@@ -357,7 +327,7 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
         &mut report,
         "MiniVault",
         "withdraw of the merged unvaulting",
-        unvaulting.handle(),
+        &unvaulting,
     );
     report.finalize("reports/report_minivault_revault.md")?;
     Ok(())

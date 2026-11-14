@@ -7,7 +7,7 @@
 //! key must sign them). It mirrors the Python ArgType system from pymatt.
 
 use crate::contracts::{ArgType as ArgTypeTrait, WitnessEncodable, WitnessError};
-use crate::script_utils::vch2bn;
+use crate::script::vch2bn;
 use bitcoin::XOnlyPublicKey;
 use std::marker::PhantomData;
 
@@ -20,7 +20,7 @@ pub struct IntType;
 impl ArgTypeTrait for IntType {
     fn consume(&self, witness: &[Vec<u8>]) -> Result<usize, WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
         vch2bn(&witness[0])?;
         Ok(1)
@@ -36,7 +36,7 @@ pub struct BytesType;
 impl ArgTypeTrait for BytesType {
     fn consume(&self, witness: &[Vec<u8>]) -> Result<usize, WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
         Ok(1)
     }
@@ -98,7 +98,7 @@ impl SignerType {
 impl ArgTypeTrait for SignerType {
     fn consume(&self, witness: &[Vec<u8>]) -> Result<usize, WitnessError> {
         if witness.is_empty() {
-            return Err(WitnessError::StackUnderflow);
+            return Err(WitnessError::Missing);
         }
         Ok(1)
     }
@@ -115,7 +115,7 @@ impl ArgTypeTrait for SignerType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::script_utils::bn2vch;
+    use crate::script::bn2vch;
 
     #[test]
     fn test_int_type_consume() {
@@ -128,10 +128,7 @@ mod tests {
         let bad = vec![vec![0u8; 9]];
         assert!(int_type.consume(&bad).is_err());
 
-        assert!(matches!(
-            int_type.consume(&[]),
-            Err(WitnessError::StackUnderflow)
-        ));
+        assert!(matches!(int_type.consume(&[]), Err(WitnessError::Missing)));
     }
 
     #[test]
@@ -143,7 +140,7 @@ mod tests {
 
         assert!(matches!(
             bytes_type.consume(&[]),
-            Err(WitnessError::StackUnderflow)
+            Err(WitnessError::Missing)
         ));
     }
 

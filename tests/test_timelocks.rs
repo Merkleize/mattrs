@@ -104,14 +104,11 @@ fn low_level_clause_metadata_is_validated_too() {
 
 #[test]
 fn explicit_sequence_may_lengthen_but_not_bypass_the_delay() {
-    let handle: TimedHandle = mattrs::testutil::fund_fake(
-        Timed::new(DelayParams { blocks: 10 }).unwrap().as_erased(),
-        (),
-        Amount::from_sat(10_000),
-        1,
-    )
-    .try_into()
-    .unwrap();
+    let mut manager = mattrs::testutil::local_manager();
+    let handle: TimedHandle = Timed::new(DelayParams { blocks: 10 })
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(10_000))
+        .unwrap();
     let outputs = vec![TxOut {
         value: Amount::from_sat(9_000),
         script_pubkey: ScriptBuf::new(),
@@ -148,6 +145,7 @@ fn explicit_sequence_may_lengthen_but_not_bypass_the_delay() {
 
 #[test]
 fn ctv_sequence_cannot_bypass_declared_csv() {
+    let mut manager = mattrs::testutil::local_manager();
     contract! {
         contract ConflictingTemplate {
             params ();
@@ -161,14 +159,10 @@ fn ctv_sequence_cannot_bypass_declared_csv() {
             tree [spend];
         }
     }
-    let h: ConflictingTemplateHandle = mattrs::testutil::fund_fake(
-        ConflictingTemplate::new(()).unwrap().as_erased(),
-        (),
-        Amount::from_sat(10_000),
-        1,
-    )
-    .try_into()
-    .unwrap();
+    let h: ConflictingTemplateHandle = ConflictingTemplate::new(())
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(10_000))
+        .unwrap();
     // Match the template's sequence explicitly, to exercise CSV validation
     // after template resolution rather than the template/override conflict.
     assert!(h.spend().sequence(5).build_tx().is_err());

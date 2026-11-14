@@ -14,16 +14,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bitcoin::bip32::Xpriv;
 use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
-use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{Action, ProtocolError, Role, StepCtx};
-use mattrs::signer::HotSigner;
 
-use super::vault::{
-    Unvaulting, UnvaultingClause, UnvaultingHandle, Vault, VaultClause, VaultHandle,
-};
+use super::vault::{Unvaulting, UnvaultingHandle, UnvaultingSpend, Vault, VaultHandle, VaultSpend};
 
 /// How one branch (token) of the vault protocol resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +47,6 @@ pub struct TriggerStep {
 
 /// The vault owner's private data.
 pub struct OwnerData {
-    /// The key behind the vault's `unvault_pk`.
-    pub xpriv: Xpriv,
     /// Planned triggers, consumed front to back — one per `Vault` arrival
     /// (with none left, the owner just holds the vault and watches).
     pub plan: Vec<TriggerStep>,
@@ -63,9 +56,8 @@ pub struct OwnerData {
 }
 
 impl OwnerData {
-    pub fn new(xpriv: Xpriv, plan: Vec<TriggerStep>) -> Self {
+    pub fn new(plan: Vec<TriggerStep>) -> Self {
         OwnerData {
-            xpriv,
             plan,
             withdrawals: HashMap::new(),
         }
@@ -83,14 +75,12 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             let p = h.params();
             let ctv_hash = compute_ctv_hash(&step.outputs, Sequence(p.spend_delay));
             d.withdrawals.insert(ctv_hash, step.outputs);
-            let signer = HotSigner::new(d.xpriv);
             Ok(Action::Send(match step.revault {
                 // Output 0 is the unvaulting, output 1 the revaulted remainder.
                 Some(amount) => h
                     .trigger_and_revault(ctv_hash, 0, 1)
-                    .output_amount(1, amount)
-                    .sign(signer),
-                None => h.trigger(ctv_hash, 0).sign(signer),
+                    .output_amount(1, amount),
+                None => h.trigger(ctv_hash, 0),
             }))
         })
         .on::<Unvaulting, _>(|d: &mut OwnerData, h: UnvaultingHandle, _cx| {
@@ -99,16 +89,16 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             // *same* template (equal outputs ⇒ equal CTV hash), and each must
             // still find its withdrawal here.
             let outputs = d.withdrawals.get(&state.ctv_hash).cloned().ok_or_else(|| {
-                ProtocolError::Other("unvaulting with a CTV hash the owner never planned".into())
+                ProtocolError::violation("unvaulting with a CTV hash the owner never planned")
             })?;
-            let amount = h.handle().prevout().value;
+            let amount = h.amount();
             // Nobody should spend this branch before us; the CSV delay is what
             // gates the withdrawal, so it rides the timeout fallback, whose
             // deadline is the delay the `withdraw` clause itself declares.
-            Action::wait_or_final(
+            Action::wait_or((
                 h.withdraw().outputs(outputs),
                 VaultOutcome::Withdrawn { amount },
-            )
+            ))
         })
         .on_settled::<Vault, _>(settled_vault)
         .on_settled::<Unvaulting, _>(settled_unvaulting)
@@ -124,13 +114,13 @@ pub struct WatchtowerData {
 /// owner never sanctioned.
 pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
     Role::new()
-        .on::<Vault, _>(|_d: &mut WatchtowerData, _h: VaultHandle, _cx| Ok(Action::Wait))
+        .watch::<Vault>()
         .on::<Unvaulting, _>(|d: &mut WatchtowerData, h: UnvaultingHandle, _cx| {
             let state = h.state();
             if d.authorized.contains(&state.ctv_hash) {
                 return Ok(Action::Wait);
             }
-            let amount = h.handle().prevout().value;
+            let amount = h.amount();
             Ok(Action::SendFinal(
                 h.recover(0),
                 VaultOutcome::Recovered { amount },
@@ -145,13 +135,15 @@ pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
 fn settled_vault(
     _d: &mut impl Sized,
     h: VaultHandle,
+    spend: VaultSpend,
     _cx: &StepCtx<'_>,
 ) -> Result<VaultOutcome, ProtocolError> {
-    let amount = branch_amount(h.handle())?;
-    match h.spent_clause() {
-        Some(VaultClause::Recover) => Ok(VaultOutcome::Recovered { amount }),
-        other => Err(ProtocolError::Other(format!(
-            "unexpected terminal clause {other:?} on a Vault"
+    let amount = h.amount();
+    match spend {
+        VaultSpend::Recover(_) => Ok(VaultOutcome::Recovered { amount }),
+        other => Err(ProtocolError::internal(format!(
+            "unexpected terminal clause {:?} on a Vault",
+            other.clause()
         ))),
     }
 }
@@ -160,19 +152,12 @@ fn settled_vault(
 fn settled_unvaulting(
     _d: &mut impl Sized,
     h: UnvaultingHandle,
+    spend: UnvaultingSpend,
     _cx: &StepCtx<'_>,
 ) -> Result<VaultOutcome, ProtocolError> {
-    let amount = branch_amount(h.handle())?;
-    match h.spent_clause() {
-        Some(UnvaultingClause::Withdraw) => Ok(VaultOutcome::Withdrawn { amount }),
-        Some(UnvaultingClause::Recover) => Ok(VaultOutcome::Recovered { amount }),
-        other => Err(ProtocolError::Other(format!(
-            "unexpected terminal clause {other:?} on an Unvaulting"
-        ))),
-    }
-}
-
-/// The branch's UTXO value.
-fn branch_amount(handle: &InstanceHandle) -> Result<Amount, ProtocolError> {
-    Ok(handle.prevout().value)
+    let amount = h.amount();
+    Ok(match spend {
+        UnvaultingSpend::Withdraw(_) => VaultOutcome::Withdrawn { amount },
+        UnvaultingSpend::Recover(_) => VaultOutcome::Recovered { amount },
+    })
 }

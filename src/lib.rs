@@ -39,7 +39,11 @@
 //! sub-protocol's roles (e.g. [`fraud::roles`]) inside a larger one, mapping its
 //! outcomes — see `tests/support/game256_roles.rs`.
 //!
-//! Start with `examples/getting_started.rs` (runs offline); `examples/vault/contracts.rs`
+//! `use mattrs::prelude::*;` brings in the names nearly every contract and
+//! protocol file needs.
+//!
+//! Start with `examples/getting_started.rs`, then `examples/counter.rs` (state,
+//! `next` and a protocol role); both run offline. `examples/vault/contracts.rs`
 //! is a complete two-stage vault, and `examples/rps/` a complete two-party
 //! protocol on roles.
 
@@ -48,13 +52,17 @@
 // work identically inside and outside the crate.
 extern crate self as mattrs;
 
-use bitcoin::{ScriptBuf, XOnlyPublicKey};
+use bitcoin::XOnlyPublicKey;
 
 /// Derive macros, re-exported so users can `use mattrs::{ContractState, ..}`.
 pub use mattrs_derive::{ClauseArgs, ContractState};
 
 /// The `contract!` DSL macro, re-exported so users can `use mattrs::contract`.
 pub use mattrs_derive::contract;
+
+/// The proc macro behind [`script!`]; use that instead.
+#[doc(hidden)]
+pub use bitcoin_script::script as __bitcoin_script;
 
 /// A signature witness element, re-exported for use in clause `*Args` structs.
 pub use contracts::Signature;
@@ -72,11 +80,11 @@ pub mod inspector;
 pub mod macros;
 pub mod manager;
 pub mod merkle;
+pub mod prelude;
 pub mod protocol;
 #[cfg(any(test, feature = "test-util"))]
 pub mod report;
-pub mod script_helpers;
-pub mod script_utils;
+pub mod script;
 pub mod signer;
 pub mod stack;
 #[cfg(any(test, feature = "test-util"))]
@@ -100,16 +108,4 @@ pub fn nums_key() -> XOnlyPublicKey {
 /// [`nums_key`] when there is no key-spend path.
 pub fn internal_key_or_nums(maybe_pk: Option<XOnlyPublicKey>) -> XOnlyPublicKey {
     maybe_pk.unwrap_or_else(nums_key)
-}
-
-/// Returns a script fragment that pushes the x-only key if `Some`, or `OP_0` if
-/// `None`. Used inside `script!` blocks for CHECKCONTRACTVERIFY key arguments.
-pub fn optional_key_script(maybe_pk: Option<XOnlyPublicKey>) -> ScriptBuf {
-    let builder = bitcoin::script::Builder::new();
-    let builder = if let Some(pk) = maybe_pk {
-        builder.push_x_only_key(&pk)
-    } else {
-        builder.push_int(0)
-    };
-    builder.into_script()
 }

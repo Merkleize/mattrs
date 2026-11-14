@@ -11,7 +11,7 @@ use mattrs::merkle::{
     MerkleError, MerkleProof, MerkleProofType, MerkleTree, WitProof, ceil_lg, floor_lg,
     get_directions,
 };
-use mattrs::script_utils::bn2vch;
+use mattrs::script::bn2vch;
 use support::ram::{Ram, RamHandle, RamParams, RamState};
 
 fn ref_leaves() -> Vec<[u8; 32]> {
@@ -108,7 +108,7 @@ fn wit_proof_decode_rejects_non_binary_directions() {
     for direction in [-1, 2, 256] {
         let stack = vec![[0u8; 32].to_vec(), bn2vch(direction), [1u8; 32].to_vec()];
         let err = WitProof::<1>::decode_from_witness(&stack).unwrap_err();
-        assert!(matches!(err, WitnessError::InvalidValue(_)));
+        assert!(matches!(err, WitnessError::Invalid(_)));
     }
 }
 
@@ -167,7 +167,7 @@ fn test_merkle_proof_type_arg_consumes_2n_plus_1() {
     assert!(mpt.consume(&bad_hash).is_err());
 
     let mut bad_direction = stack.clone();
-    bad_direction[1] = mattrs::script_utils::bn2vch(2);
+    bad_direction[1] = mattrs::script::bn2vch(2);
     assert!(mpt.consume(&bad_direction).is_err());
 
     let mut bad_leaf = stack;
@@ -177,12 +177,11 @@ fn test_merkle_proof_type_arg_consumes_2n_plus_1() {
 
 #[test]
 fn test_ram_write_commits_updated_root() {
+    let mut manager = mattrs::testutil::local_manager();
     // Spend the `write` clause: it decodes the Merkle proof from the witness
     // (MerkleProofType), reads the cells from the instance's expanded state, updates
     // cell 2, and commits the new Merkle root to the output. Builds locally, no RPC.
     use bitcoin::Amount;
-
-    use support::testkit::{fund_fake, try_handle};
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
     let ram = Ram::new(RamParams { size: 4 }).unwrap();
@@ -190,14 +189,15 @@ fn test_ram_write_commits_updated_root() {
     // The instance commits the initial leaves' Merkle root, and carries the leaves
     // themselves as expanded state.
     let committed = MerkleTree::new(leaves.clone()).root();
-    let handle = try_handle::<RamHandle>(fund_fake(
-        ram.as_erased(),
-        RamState {
-            leaves: leaves.clone(),
-        },
-        100_000,
-        0,
-    ));
+    let handle = ram
+        .fund(
+            &mut manager,
+            Amount::from_sat(100_000),
+            RamState {
+                leaves: leaves.clone(),
+            },
+        )
+        .unwrap();
 
     // Prove cell 2 and write a new value into it.
     let tree = MerkleTree::new(leaves.clone());
@@ -266,9 +266,8 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     let new_value = [0xaa; 32];
     let child: RamHandle = ram
         .write(proof, new_value, tree.root())
-        .exec_one(&mut manager)?
-        .try_into()?;
-    report_spend(&mut report, "RAM", "write (update cell 2)", ram.handle());
+        .exec_one(&mut manager)?;
+    report_spend(&mut report, "RAM", "write (update cell 2)", &ram);
 
     // Withdraw from the updated RAM, proving the freshly written value.
     let mut updated = leaves.clone();
@@ -287,12 +286,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
             value: Amount::from_sat(100_000),
         }])
         .exec_none(&mut manager)?;
-    report_spend(
-        &mut report,
-        "RAM",
-        "withdraw (prove cell 2)",
-        child.handle(),
-    );
+    report_spend(&mut report, "RAM", "withdraw (prove cell 2)", &child);
 
     report.finalize("reports/report_ram.md")?;
     Ok(())

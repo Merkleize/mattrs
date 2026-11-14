@@ -168,7 +168,7 @@ fn signed_spend_seeded(
 fn child_count_errors_do_not_request_signatures() {
     let (_, builder, calls) = signed_spend_fixture(false);
     assert!(matches!(
-        builder.exec_one(&mut offline_manager()),
+        builder.exec_one::<InstanceHandle>(&mut offline_manager()),
         Err(ManagerError::UnexpectedOutputCount {
             expected: 1,
             got: 0
@@ -213,9 +213,46 @@ fn template_hash_is_checked_before_signing_and_executes_without_children() {
     assert_eq!(h.status(), InstanceStatus::Spent);
     assert!(h.outputs().is_empty());
     assert_eq!(
-        h.spending_args().unwrap()[0],
+        h.spend_record().unwrap().args()[0],
         tx.input[0].witness.to_vec()[0]
     );
+}
+
+/// Asking `exec_one` for the wrong contract's handle is refused before the
+/// broadcast (which, with no node behind the manager, would report `NoNode`),
+/// so the error never comes with a spent instance.
+#[test]
+fn exec_one_rejects_a_wrong_handle_type_before_broadcast() {
+    #[derive(Debug)]
+    struct OtherHandle;
+    impl TryFrom<InstanceHandle> for OtherHandle {
+        type Error = crate::manager::WrongContractType;
+        fn try_from(_: InstanceHandle) -> Result<Self, Self::Error> {
+            Err(crate::manager::WrongContractType { expected: "Other" })
+        }
+    }
+
+    let mut manager = offline_manager();
+    let (handle, builder, _) = signed_spend_fixture(true);
+    assert!(matches!(
+        builder.exec_one::<OtherHandle>(&mut manager),
+        Err(ManagerError::WrongContract(_))
+    ));
+    assert_eq!(handle.status(), InstanceStatus::Funded);
+    assert!(handle.outputs().is_empty());
+    assert!(manager.instances.is_empty());
+}
+
+/// The handle `exec_one` returns is the child the manager registered.
+#[test]
+fn exec_one_returns_the_registered_child() {
+    let (handle, builder, _) = signed_spend_fixture(true);
+    let (rpc, server) = broadcast_rpc();
+    let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+    let child: InstanceHandle = builder.exec_one(&mut manager).unwrap();
+    server.join().unwrap();
+    assert_eq!(handle.outputs().into_vec(), vec![child.clone()]);
+    assert!(Rc::ptr_eq(&child.instance, &manager.instances[0]));
 }
 
 #[test]
@@ -225,19 +262,20 @@ fn checked_execution_signs_once_and_records_the_broadcast_witness() {
         let (rpc, server) = broadcast_rpc();
         let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
         if child {
-            builder.exec_one(&mut manager).unwrap();
+            builder.exec_one::<InstanceHandle>(&mut manager).unwrap();
         } else {
             builder.exec_none(&mut manager).unwrap();
         }
         let tx = server.join().unwrap();
         assert_eq!(calls.get(), 1);
-        let recorded = h.spending_args().unwrap();
+        let record = h.spend_record().unwrap();
+        let recorded = record.args();
         assert_eq!(recorded[0], tx.input[0].witness.to_vec()[0]);
         assert_eq!(recorded[0].len(), 64);
 
         let (observer, _, _) = signed_spend_fixture(child);
         offline_manager().observe_spend(&observer, &tx).unwrap();
-        assert_eq!(observer.spending_args(), h.spending_args());
+        assert_eq!(observer.spend_record(), h.spend_record());
     }
 }
 
@@ -272,7 +310,7 @@ fn payment_checks_run_before_signing_and_execution_tracks_no_children() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(observer.spending_args(), h.spending_args());
+    assert_eq!(observer.spend_record(), h.spend_record());
 }
 
 #[test]
@@ -574,7 +612,7 @@ fn second_preserve_in_one_input_errors() {
 
     let err = crate::manager::build_batch_tx(&[spend(&h)]).unwrap_err();
     assert!(
-        matches!(&err, ManagerError::TransactionBuildError(msg) if msg.contains("PreserveOutput")),
+        matches!(&err, ManagerError::InvalidSpend(msg) if msg.contains("PreserveOutput")),
         "unexpected error: {err:?}"
     );
 }
@@ -701,7 +739,7 @@ fn child_state_must_match_the_destination_contract() {
     let err = spend(&handle).build_tx().unwrap_err();
     assert!(matches!(
         err,
-        ManagerError::ContractError(ContractError::WrongStateType)
+        ManagerError::Contract(ContractError::WrongStateType)
     ));
 }
 
@@ -869,7 +907,7 @@ fn template_fixes_outputs_and_sequence() {
 
     // ...or the build is rejected.
     let err = spend(&h).sequence(6).build_tx().unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -889,7 +927,7 @@ fn template_in_batch_errors() {
     let h2 = fund_fake(preserving, (), sat(60_000), 2);
 
     let err = crate::manager::build_batch_tx(&[spend(&h1), spend(&h2)]).unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -916,7 +954,7 @@ fn explicit_outputs_in_batch_error() {
 
     let err =
         crate::manager::build_batch_tx(&[spend(&h1).outputs(outputs), spend(&h2)]).unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -930,7 +968,7 @@ fn explicit_outputs_cannot_override_a_template() {
         value: sat(40_000),
     }])])
     .unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -952,7 +990,7 @@ fn explicit_outputs_cannot_override_contract_outputs() {
         value: sat(1),
     }])])
     .unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::InvalidSpend(_)));
 }
 
 #[test]
@@ -989,7 +1027,7 @@ fn raw_witness_layout_is_checked_when_no_signer_exists() {
         }])
         .build_tx()
         .unwrap_err();
-    assert!(matches!(err, ManagerError::TransactionBuildError(_)));
+    assert!(matches!(err, ManagerError::Witness(_)));
 }
 
 #[test]
@@ -1003,7 +1041,7 @@ fn duplicate_instance_in_batch_errors() {
 
     let err = crate::manager::build_batch_tx(&[spend(&h), spend(&h)]).unwrap_err();
     assert!(
-        matches!(&err, ManagerError::TransactionBuildError(msg) if msg.contains("duplicate")),
+        matches!(&err, ManagerError::InvalidSpend(msg) if msg.contains("duplicate")),
         "unexpected error: {err:?}"
     );
 }

@@ -97,14 +97,20 @@ pub struct Runner<D, O> {
 
 impl<D: 'static, O: 'static> Runner<D, O> {
     /// A runner for `role` (with the party's private `data`), starting at the
-    /// funded or tracked `entry` instance.
-    pub fn new(manager: ContractManager, role: Role<D, O>, data: D, entry: InstanceHandle) -> Self {
+    /// funded or tracked `entry` instance (a typed handle, as returned by a
+    /// contract's `fund` / `track`, or an untyped one).
+    pub fn new(
+        manager: ContractManager,
+        role: Role<D, O>,
+        data: D,
+        entry: impl Into<InstanceHandle>,
+    ) -> Self {
         Runner {
             role,
             data,
             manager,
             tokens: vec![TokenState {
-                current: entry,
+                current: entry.into(),
                 parent: None,
                 phase: Phase::Arrived,
             }],
@@ -248,7 +254,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
     pub fn run_one_within(&mut self, window: Option<Duration>) -> Result<O, ProtocolError> {
         let mut outcomes = self.run_within(window)?;
         if outcomes.len() != 1 {
-            return Err(ProtocolError::Other(format!(
+            return Err(ProtocolError::internal(format!(
                 "the protocol resolved {} outcomes where exactly one was expected",
                 outcomes.len()
             )));
@@ -303,8 +309,8 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         match action {
             Action::Send(builder) => {
                 if !builder.spends(&current) {
-                    return Err(ProtocolError::Other(
-                        "role returned a spend builder for a different instance".to_string(),
+                    return Err(ProtocolError::internal(
+                        "role returned a spend builder for a different instance",
                     ));
                 }
                 let children = self.manager.spend_batch(std::slice::from_ref(&builder))?;
@@ -312,8 +318,8 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             }
             Action::SendFinal(builder, outcome) => {
                 if !builder.spends(&current) {
-                    return Err(ProtocolError::Other(
-                        "role returned a final spend builder for a different instance".to_string(),
+                    return Err(ProtocolError::internal(
+                        "role returned a final spend builder for a different instance",
                     ));
                 }
                 self.manager.spend_batch(std::slice::from_ref(&builder))?;
@@ -356,7 +362,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 .map(|confirmed| {
                     confirmed
                         .checked_add(t.blocks - 1)
-                        .ok_or_else(|| ProtocolError::Other("timeout height overflow".to_string()))
+                        .ok_or_else(|| ProtocolError::internal("timeout height overflow"))
                 })
                 .transpose()?;
             if let Some(deadline) = deadline

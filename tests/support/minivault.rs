@@ -32,13 +32,10 @@
 //! ```
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::{CcvIndex, CcvMode};
-use mattrs::{
-    ContractState, Signature, clause_tree, contract, internal_key_or_nums, optional_key_script,
-};
-
-define_pushable!();
+use mattrs::script;
+use mattrs::script::{check_output_pays_key, optional_key_script};
+use mattrs::{ContractState, Signature, clause_tree, contract, internal_key_or_nums};
 
 // ============================================================================
 // MiniUnvaulting — fixed clause set, so the contract! DSL applies
@@ -74,7 +71,7 @@ contract! {
         // witness: <out_i> — terminal (spends to recover_pk)
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script MiniUnvaulting::recover_script;
         }
@@ -109,12 +106,7 @@ impl MiniUnvaulting {
 
     fn recover_script(params: &MiniUnvaultingParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }
@@ -145,12 +137,12 @@ contract! {
                 #[signer(p.unvault_pk)]
                 sig: Signature,
                 withdrawal_pk: [u8; 32],
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script MiniVault::trigger_script;
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
-                Ok(vec![unvaulting.output(CcvIndex::try_from(a.out_i)?, MiniUnvaultingState {
+                Ok(vec![unvaulting.output(a.out_i, MiniUnvaultingState {
                         withdrawal_pk: a.withdrawal_pk,
                     })])
             }
@@ -162,15 +154,15 @@ contract! {
                 #[signer(p.unvault_pk)]
                 sig: Signature,
                 withdrawal_pk: [u8; 32],
-                out_i: i64,
-                revault_out_i: i64,
+                out_i: CcvIndex,
+                revault_out_i: CcvIndex,
             }
             script MiniVault::trigger_and_revault_script;
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
                 Ok(vec![
-                    MiniVault::new(p.clone())?.output(CcvIndex::try_from(a.revault_out_i)?).deduct_amount(),
-                    unvaulting.output(CcvIndex::try_from(a.out_i)?, MiniUnvaultingState {
+                    MiniVault::new(p.clone())?.output(a.revault_out_i).deduct_amount(),
+                    unvaulting.output(a.out_i, MiniUnvaultingState {
                             withdrawal_pk: a.withdrawal_pk,
                         }),
                 ])
@@ -180,7 +172,7 @@ contract! {
         // witness: <out_i> — terminal (immediate recovery to the recovery key)
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script MiniVault::recover_script;
         }
@@ -244,12 +236,7 @@ impl MiniVault {
 
     fn recover_script(params: &MiniVaultParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }

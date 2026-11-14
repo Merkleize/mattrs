@@ -3,7 +3,7 @@
 //!
 //! Coverage mirrors the other examples:
 //! - state/rules unit tests;
-//! - build-level spend tests against fake-funded instances (no node): a move
+//! - build-level spend tests against instances funded on an in-memory chain (no node): a move
 //!   commits the updated board to the same contract, claims pay out via their
 //!   CTV templates, and `next_outputs` rejects illegal moves;
 //! - the full protocol offline: both players' [`Runner`]s over a shared
@@ -20,12 +20,11 @@ use bitcoin::{Amount, Sequence};
 use mattrs::contracts::{ContractState, StateCodec};
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{LocalChain, ProtocolError, Runner};
-use mattrs::script_helpers::key_path_p2tr as p2tr;
+use mattrs::script::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
 use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, fund_fake, manager_on, try_handle,
-    walk_tip,
+    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, manager_on, walk_tip,
 };
 use support::tictactoe::roles::{
     PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role,
@@ -37,7 +36,6 @@ use support::tictactoe::{
 
 const POT: u64 = (2 * DEFAULT_STAKE) as u64;
 const TIMEOUT: u32 = 10;
-const SEED: u8 = 42;
 
 fn params() -> TttParams {
     TttParams {
@@ -48,14 +46,16 @@ fn params() -> TttParams {
     }
 }
 
-/// A fake-funded game holding the pot, carrying `state` as expanded state.
+/// A game holding the pot on a chain of its own, at board `state`.
 fn funded_game(state: TttState) -> TicTacToeHandle {
-    try_handle(fund_fake(
-        TicTacToe::new(params()).unwrap().as_erased(),
-        state,
-        POT,
-        SEED,
-    ))
+    TicTacToe::new(params())
+        .unwrap()
+        .fund(
+            &mut mattrs::testutil::local_manager(),
+            Amount::from_sat(POT),
+            state,
+        )
+        .unwrap()
 }
 
 /// A board from a compact picture: 'X', 'O', '.' per cell.
@@ -109,7 +109,7 @@ fn explicit_state_hash_preserves_the_previous_address() {
     assert_eq!(state.commitment().as_bytes(), legacy_data);
     let contract = TicTacToe::new(params()).unwrap().as_erased();
     let internal = apply_state_tweak(&mattrs::nums_key(), &legacy_data).unwrap();
-    let expected = mattrs::script_helpers::opaque_p2tr(compute_taproot_output_key(
+    let expected = mattrs::script::opaque_p2tr(compute_taproot_output_key(
         &internal,
         Some(contract.taptree()),
     ));
@@ -250,16 +250,18 @@ fn scripted(moves: &[usize]) -> Strategy {
 
 #[test]
 fn strategy_errors_propagate_from_the_role() {
-    let chain = Rc::new(LocalChain::new());
-    let entry = funded_game(TttState::initial());
+    let mut manager = mattrs::testutil::local_manager().with_signer(HotSigner::new(alice_xpriv()));
+    let entry = TicTacToe::new(params())
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(POT), TttState::initial())
+        .unwrap();
     let mut runner = Runner::new(
-        manager_on(chain),
+        manager,
         alice_role(),
         PlayerData {
-            xpriv: alice_xpriv(),
             strategy: Box::new(|_| Err(ProtocolError::Other("input closed".to_string()))),
         },
-        entry.handle().clone(),
+        entry,
     );
 
     let err = runner.step().unwrap_err();
@@ -269,8 +271,9 @@ fn strategy_errors_propagate_from_the_role() {
     ));
 }
 
-/// Twin runners over the same fake-funded game and a shared chain. The two
-/// entry handles are each party's own view of the spend chain.
+/// Both parties' runners over one game on a shared chain: Alice funds it, Bob
+/// tracks it. The two entry handles are each party's own view of the spend
+/// chain.
 fn setup(
     chain: &Rc<LocalChain>,
     alice_moves: &[usize],
@@ -281,38 +284,41 @@ fn setup(
     TicTacToeHandle,
     TicTacToeHandle,
 ) {
-    let alice_entry = fund_fake(
-        TicTacToe::new(params()).unwrap().as_erased(),
-        TttState::initial(),
-        POT,
-        SEED,
-    );
-    let bob_entry = fund_fake(
-        TicTacToe::new(params()).unwrap().as_erased(),
-        TttState::initial(),
-        POT,
-        SEED,
-    );
+    let game = TicTacToe::new(params()).unwrap();
+    let mut alice_manager = manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv()));
+    let mut bob_manager = manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv()));
+    let alice_entry = game
+        .fund(
+            &mut alice_manager,
+            Amount::from_sat(POT),
+            TttState::initial(),
+        )
+        .unwrap();
+    let bob_entry = game
+        .track(
+            &mut bob_manager,
+            alice_entry.outpoint(),
+            TttState::initial(),
+        )
+        .unwrap();
 
     let alice = Runner::new(
-        manager_on(chain.clone()),
+        alice_manager,
         alice_role(),
         PlayerData {
-            xpriv: alice_xpriv(),
             strategy: scripted(alice_moves),
         },
         alice_entry.clone(),
     );
     let bob = Runner::new(
-        manager_on(chain.clone()),
+        bob_manager,
         bob_role(),
         PlayerData {
-            xpriv: bob_xpriv(),
             strategy: scripted(bob_moves),
         },
         bob_entry.clone(),
     );
-    (alice, bob, try_handle(alice_entry), try_handle(bob_entry))
+    (alice, bob, alice_entry, bob_entry)
 }
 
 #[test]
@@ -331,7 +337,7 @@ fn played_win_resolves_for_both_parties() {
     assert_eq!(b_out, Some(expected));
 
     // The terminal claim spent the last game state, paying Alice the pot.
-    let tip = walk_tip(bob_entry.handle());
+    let tip = walk_tip(&bob_entry);
     assert_eq!(tip.clause_name().as_deref(), Some("alice_wins"));
     let payout = tip.spending_tx().expect("adjudicated");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
@@ -358,7 +364,7 @@ fn full_board_resolves_as_a_tie() {
 
     // Bob (whose "turn" a full board always is) declared the tie; the stakes
     // went back to their owners.
-    let tip = walk_tip(bob_entry.handle());
+    let tip = walk_tip(&bob_entry);
     assert_eq!(tip.clause_name().as_deref(), Some("tie"));
     let payout = tip.spending_tx().expect("settled");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
@@ -388,7 +394,7 @@ fn idle_opponent_forfaits_after_the_timeout() {
         }
     );
 
-    let tip = walk_tip(alice_entry.handle());
+    let tip = walk_tip(&alice_entry);
     assert_eq!(tip.clause_name().as_deref(), Some("timeout_bob_idle"));
     let payout = tip.spending_tx().expect("forfait collected");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
@@ -426,8 +432,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
         h = h
             .make_move(cell)
             .sign(HotSigner::new(xpriv))
-            .exec_one(&mut manager)?
-            .try_into()?;
+            .exec_one(&mut manager)?;
     }
     report_spend(&mut report, "TicTacToe", "the first four moves", &entry);
 
@@ -447,8 +452,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
     let won: TicTacToeHandle = h
         .make_move(2)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
     let state = won.state();
     assert_eq!(state.board, board("XXX OO. ..."));
     won.claim_win(MARK_ALICE).exec_none(&mut manager)?;
@@ -456,7 +460,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
         &mut report,
         "TicTacToe",
         "alice_wins (CTV payout of the pot)",
-        won.handle(),
+        &won,
     );
 
     report.finalize("reports/report_tictactoe.md")?;
@@ -478,14 +482,13 @@ fn test_tictactoe_forfait_on_regtest() -> Result<(), Box<dyn std::error::Error>>
     let h: TicTacToeHandle = game
         .make_move(4)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
 
     // Once the CSV delay has passed, the forfait claim validates and pays
     // Alice the whole pot.
     manager.mine_blocks((TIMEOUT + 1).into())?;
     h.timeout_bob_idle().exec_none(&mut manager)?;
-    let payout = h.handle().spending_tx().expect("forfait collected");
+    let payout = h.spending_tx().expect("forfait collected");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(payout.output[0].value, Amount::from_sat(POT));
     Ok(())

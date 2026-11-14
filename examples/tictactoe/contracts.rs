@@ -30,17 +30,17 @@
 //! immediately, and a winner who forgoes the claim only hurts themselves.
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::{
     ClauseError, ClauseOutput, ContractState, CtvTemplate, StateCodec, StateCommitment,
     WitnessError,
 };
 use mattrs::manager::SpendBuilder;
-use mattrs::script_helpers::{check_input_contract, concat, dup, key_path_p2tr, older};
+use mattrs::script;
+use mattrs::script::{
+    check_input_contract, check_output_same_contract, concat, dup, key_path_p2tr, older,
+};
 use mattrs::{Signature, contract};
-
-define_pushable!();
 
 /// The default stake (in sats) each player bets.
 pub const DEFAULT_STAKE: i64 = 1000;
@@ -162,12 +162,12 @@ impl StateCodec for TttState {
 
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
         let bytes: &[u8; 10] = bytes.try_into().map_err(|_| {
-            WitnessError::InvalidData("a TttState serialization is exactly 10 bytes".to_string())
+            WitnessError::Invalid("a TttState serialization is exactly 10 bytes".to_string())
         })?;
         let turn = bytes[0];
         let board: [u8; 9] = bytes[1..].try_into().expect("9 bytes");
         if turn != TURN_ALICE && turn != TURN_BOB {
-            return Err(WitnessError::InvalidData(format!(
+            return Err(WitnessError::Invalid(format!(
                 "invalid turn byte {turn:#04x}"
             )));
         }
@@ -175,7 +175,7 @@ impl StateCodec for TttState {
             .iter()
             .find(|&&c| c != EMPTY && c != MARK_ALICE && c != MARK_BOB)
         {
-            return Err(WitnessError::InvalidData(format!(
+            return Err(WitnessError::Invalid(format!(
                 "invalid cell byte {cell:#04x}"
             )));
         }
@@ -310,21 +310,19 @@ impl TicTacToe {
         let state = s;
         let cell = prefix.len();
         if cell >= 9 || suffix.len() != 8 - cell {
-            return Err(ClauseError::Other(
-                "malformed move: the prefix and suffix must split 8 cells".to_string(),
+            return Err(ClauseError::other(
+                "malformed move: the prefix and suffix must split 8 cells",
             ));
         }
         if state.turn != turn {
-            return Err(ClauseError::Other(
-                "it is not this player's turn".to_string(),
-            ));
+            return Err(ClauseError::other("it is not this player's turn"));
         }
         if state.board[cell] != EMPTY {
-            return Err(ClauseError::Other(format!("cell {cell} is already taken")));
+            return Err(ClauseError::other(format!("cell {cell} is already taken")));
         }
         if prefix != &state.board[..cell] || suffix != &state.board[cell + 1..] {
-            return Err(ClauseError::Other(
-                "the revealed board does not match the state".to_string(),
+            return Err(ClauseError::other(
+                "the revealed board does not match the state",
             ));
         }
         Ok(vec![
@@ -418,7 +416,7 @@ impl TicTacToe {
             OP_SHA256
 
             // commit it to the same contract at the same output index
-            -1 0 -1 0 CHECKCONTRACTVERIFY
+            { check_output_same_contract(CcvIndex::CURRENT, None) }
             OP_TRUE
         }
     }
@@ -609,10 +607,8 @@ impl TicTacToeHandle {
 /// two-player demo (`main.rs`) and against the offline `LocalChain` in
 /// `tests/test_tictactoe.rs`.
 pub mod roles {
-    use bitcoin::bip32::Xpriv;
 
     use mattrs::protocol::{Action, ProtocolError, Role};
-    use mattrs::signer::HotSigner;
 
     use super::{
         EMPTY, MARK_ALICE, MARK_BOB, TURN_ALICE, TURN_BOB, TicTacToe, TicTacToeClause,
@@ -625,7 +621,6 @@ pub mod roles {
 
     /// A player's private side: their key and their move-picking strategy.
     pub struct PlayerData {
-        pub xpriv: Xpriv,
         pub strategy: Strategy,
     }
 
@@ -706,13 +701,11 @@ pub mod roles {
                     }
                     let cell = (d.strategy)(&s.board)?;
                     if cell >= 9 || s.board[cell] != EMPTY {
-                        return Err(ProtocolError::Other(format!(
+                        return Err(ProtocolError::other(format!(
                             "the strategy chose an invalid cell ({cell})"
                         )));
                     }
-                    return Ok(Action::Send(
-                        h.make_move(cell).sign(HotSigner::new(d.xpriv)),
-                    ));
+                    return Ok(Action::Send(h.make_move(cell)));
                 }
 
                 // The opponent's turn: watch the UTXO, and claim the forfait
@@ -722,20 +715,20 @@ pub mod roles {
                 } else {
                     h.timeout_alice_idle()
                 };
-                Ok(Action::wait_or_send_final(
+                Ok(Action::wait_or_after(
                     params.timeout_blocks,
-                    builder,
-                    TttOutcome {
-                        result: my_win,
-                        by_timeout: true,
-                        board: s.board,
-                    },
+                    (
+                        builder,
+                        TttOutcome {
+                            result: my_win,
+                            by_timeout: true,
+                            board: s.board,
+                        },
+                    ),
                 ))
             })
-            .on_settled::<TicTacToe, _>(move |_d, h: TicTacToeHandle, _cx| {
-                let clause = h.spent_clause().ok_or_else(|| {
-                    ProtocolError::Other("the game instance is not settled".to_string())
-                })?;
+            .on_settled::<TicTacToe, _>(move |_d, h, spend, _cx| {
+                let clause = spend.clause();
                 let s = h.state();
 
                 // Classify the counterparty's terminal claim, checking it
@@ -755,13 +748,11 @@ pub mod roles {
                         (TttResult::AliceWins, true, s.turn == TURN_BOB)
                     }
                     TicTacToeClause::MoveAlice | TicTacToeClause::MoveBob => {
-                        return Err(ProtocolError::Other(
-                            "a move is not a settlement".to_string(),
-                        ));
+                        return Err(ProtocolError::internal("a move is not a settlement"));
                     }
                 };
                 if !justified {
-                    return Err(ProtocolError::Other(format!(
+                    return Err(ProtocolError::violation(format!(
                         "the `{}` claim does not match the board",
                         clause.name()
                     )));

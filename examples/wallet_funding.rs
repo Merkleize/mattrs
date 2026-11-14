@@ -11,8 +11,8 @@ mod vault;
 use bitcoin::{Amount, Network, ScriptBuf, Sequence, Transaction, TxOut, Txid, bip32::Xpriv};
 use bitcoincore_rpc::RpcApi;
 use mattrs::contracts::InstanceStatus;
-use mattrs::manager::{ContractManager, ExternalInput, regtest_rpc_client};
-use mattrs::signer::{HotSigner, Signer};
+use mattrs::manager::{ContractManager, ExternalInput, InstanceHandle, regtest_rpc_client};
+use mattrs::signer::HotSigner;
 use serde_json::{Value, json};
 use vault::{Vault, VaultParams};
 
@@ -37,16 +37,9 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
 
     // A separate observer knows the contracts, but not the actor's wallet coins.
     let mut observer = ContractManager::new(regtest_rpc_client("testwallet"), Network::Regtest);
-    let observed_first = observer.track_instance(
-        Vault::new(params.clone())?.as_erased(),
-        (),
-        first.handle().outpoint(),
-    )?;
-    let observed_second = observer.track_instance(
-        Vault::new(params)?.as_erased(),
-        (),
-        second.handle().outpoint(),
-    )?;
+    let vault = Vault::new(params)?;
+    let observed_first: InstanceHandle = vault.track(&mut observer, first.outpoint())?.into();
+    let observed_second: InstanceHandle = vault.track(&mut observer, second.outpoint())?.into();
 
     // The trigger commits to a later withdrawal. This example only triggers;
     // extending a fixed CTV withdrawal with fee inputs requires a compatible
@@ -149,8 +142,8 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
         result.children[0].prevout().value,
         Amount::from_sat(300_000)
     );
-    assert_eq!(first.handle().status(), InstanceStatus::Spent);
-    assert_eq!(second.handle().status(), InstanceStatus::Spent);
+    assert_eq!(first.status(), InstanceStatus::Spent);
+    assert_eq!(second.status(), InstanceStatus::Spent);
 
     // A passive observer can resolve spent wallet prevouts from a trusted cache
     // or funding transactions. `gettxout` alone no longer works after broadcast.
@@ -162,7 +155,7 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
                 .find(|e| e.outpoint == outpoint)
                 .map(|e| e.prevout.clone())
                 .ok_or_else(|| {
-                    mattrs::manager::ManagerError::Other(format!(
+                    mattrs::manager::ManagerError::other(format!(
                         "missing cached prevout {outpoint}"
                     ))
                 })

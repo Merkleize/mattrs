@@ -52,7 +52,7 @@ fn pay(value: Amount, tag: u8) -> InstanceHandle {
 }
 
 fn script() -> bitcoin::ScriptBuf {
-    crate::script_helpers::opaque_p2tr(crate::nums_key())
+    crate::script::opaque_p2tr(crate::nums_key())
 }
 
 // Assemble deliberately invalid metadata-level transactions that the normal
@@ -73,8 +73,14 @@ fn transaction(handles: &[&InstanceHandle], output: Vec<TxOut>) -> Transaction {
     };
     let prevouts: Vec<_> = handles.iter().map(|h| h.prevout()).collect();
     for (vin, handle) in handles.iter().enumerate() {
-        tx.input[vin].witness =
-            input_witness(&handle.spend_clause("spend", vec![]), &tx, vin, &prevouts).unwrap();
+        tx.input[vin].witness = input_witness(
+            &handle.spend_clause("spend", vec![]),
+            &tx,
+            vin,
+            &prevouts,
+            &Default::default(),
+        )
+        .unwrap();
     }
     tx
 }
@@ -84,7 +90,7 @@ fn untouched(manager: &ContractManager, handles: &[&InstanceHandle]) {
     for h in handles {
         assert_eq!(h.status(), InstanceStatus::Funded);
         assert!(h.outputs().is_empty());
-        assert!(h.spending_args().is_none());
+        assert!(h.spend_record().is_none());
     }
 }
 
@@ -334,7 +340,7 @@ fn a_late_child_registry_conflict_leaves_every_parent_unchanged() {
     for h in [&a, &b] {
         assert_eq!(h.status(), InstanceStatus::Funded);
         assert!(h.outputs().is_empty());
-        assert!(h.spending_args().is_none());
+        assert!(h.spend_record().is_none());
     }
 }
 

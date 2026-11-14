@@ -42,6 +42,7 @@ pub(crate) fn poll_until<T, E>(
 /// protocol and manager layers, so a chain backend can be implemented (and
 /// used) without either.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ChainError {
     /// The node could not be reached, or answered with an error.
     #[cfg(feature = "rpc")]
@@ -87,6 +88,14 @@ pub trait ChainView {
     /// A single, non-blocking look for a transaction spending `outpoint`
     /// (mempool or block), if one exists.
     fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError>;
+
+    /// Nobody is looking for a spend of `outpoint` any more (the caller gave
+    /// up waiting): release whatever [`find_spending_tx`](Self::find_spending_tx)
+    /// kept between calls for it. Looking again later is fine; it starts over.
+    /// The default does nothing, for backends that keep no such state.
+    fn stop_watching(&self, outpoint: OutPoint) {
+        let _ = outpoint;
+    }
 
     /// The transaction `txid`, if this chain knows it (mempool or block).
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError>;
@@ -163,10 +172,12 @@ impl LocalChain {
         inner.height += n;
     }
 
-    /// Declare an externally-created transaction (e.g. a fake funding) as
-    /// confirmed at `height`, so timeouts counted from it can fire.
+    /// Declare a transaction confirmed at `height` — one created outside this
+    /// chain, or one of its own moved there (which is how a test simulates a
+    /// reorg) — so timeouts counted from it can fire.
     pub fn assume_confirmed(&self, txid: Txid, height: u32) {
         let mut inner = self.inner.borrow_mut();
+        inner.mempool.retain(|pending| *pending != txid);
         inner.confirmed.insert(txid, height);
         inner.height = inner.height.max(height);
     }

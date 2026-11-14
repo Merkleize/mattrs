@@ -45,7 +45,7 @@ impl ContractManager {
     /// Mine blocks (regtest and test chains).
     pub fn mine_blocks(&self, n: u64) -> Result<(), ManagerError> {
         let n = u32::try_from(n)
-            .map_err(|_| ManagerError::Other(format!("cannot mine {n} blocks at once")))?;
+            .map_err(|_| ManagerError::other(format!("cannot mine {n} blocks at once")))?;
         Ok(self.chain()?.mine_blocks(n)?)
     }
 
@@ -88,8 +88,7 @@ impl ContractManager {
     /// This is how a party follows a covenant driven by someone else: the
     /// returned children carry their contracts and logical state, ready for
     /// further spends or waits. The clause and its witness arguments are recorded
-    /// on the instance ([`InstanceHandle::clause_name`] /
-    /// [`InstanceHandle::spending_args`]).
+    /// on the instance ([`InstanceHandle::spend_record`]).
     pub fn wait_for_spend(&mut self, handle: &InstanceHandle) -> Result<Children, ManagerError> {
         self.wait_for_spend_within(handle, Some(DEFAULT_POLL_WINDOW))
     }
@@ -114,7 +113,7 @@ impl ContractManager {
         handles: &[&InstanceHandle],
     ) -> Result<Transaction, ManagerError> {
         let first = handles.first().ok_or_else(|| {
-            ManagerError::InvalidInstance("cannot wait for an empty batch".into())
+            ManagerError::InvalidObservation("cannot wait for an empty batch".into())
         })?;
         match first.spending_tx() {
             Some(tx) => Ok(Transaction::clone(&tx)),
@@ -145,7 +144,11 @@ impl ContractManager {
         window: Option<Duration>,
     ) -> Result<Transaction, ManagerError> {
         let chain = self.chain()?;
-        poll_until(window, || chain.find_spending_tx(outpoint))?
-            .ok_or(ManagerError::SpendNotFound(outpoint))
+        let found = poll_until(window, || chain.find_spending_tx(outpoint));
+        if !matches!(found, Ok(Some(_))) {
+            // Giving up: let the backend drop what it kept for this search.
+            chain.stop_watching(outpoint);
+        }
+        found?.ok_or(ManagerError::SpendNotFound(outpoint))
     }
 }

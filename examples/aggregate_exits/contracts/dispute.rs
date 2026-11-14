@@ -22,12 +22,12 @@
 //! point).
 
 use bitcoin::ScriptBuf;
-use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
 use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{MerkleTree, NIL, get_directions, is_power_of_2};
-use mattrs::script_utils::{bn2vch, commit_int};
+use mattrs::script;
+use mattrs::script::{bn2vch, commit_int};
 
 use super::pending_exit::PendingExit;
 use super::unwind::{Unwind, UnwindState};
@@ -36,8 +36,6 @@ use super::{
 };
 use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
 use mattrs::stack::StackScript;
-
-define_pushable!();
 
 // ============================================================================
 // Params
@@ -188,7 +186,7 @@ pub enum DisputeWinner {
 
 fn xonly(bytes: &[u8; 32]) -> Result<bitcoin::XOnlyPublicKey, ClauseError> {
     bitcoin::XOnlyPublicKey::from_slice(bytes)
-        .map_err(|e| ClauseError::Other(format!("invalid x-only key in state: {e}")))
+        .map_err(|e| ClauseError::other(format!("invalid x-only key in state: {e}")))
 }
 
 /// The three settlement outputs: the winner's slash payout, the burn, and the
@@ -236,14 +234,14 @@ fn settlement_script(s: &mut StackScript, winner: DisputeWinner) {
     };
     s.ccv(
         CcvData::Empty,
-        CcvIndex::at(0).expect("valid output index"),
+        0,
         CcvKey::Item(winner_item),
         CcvTaptree::None,
         CcvMode::DeductAmount,
     );
     s.ccv(
         CcvData::Empty,
-        CcvIndex::at(1).expect("valid output index"),
+        1,
         CcvKey::Const(mattrs::nums_key()),
         CcvTaptree::None,
         CcvMode::DeductAmount,
@@ -251,14 +249,14 @@ fn settlement_script(s: &mut StackScript, winner: DisputeWinner) {
     match winner {
         DisputeWinner::Ingrid => s.ccv(
             CcvData::Item("resume"),
-            CcvIndex::at(2).expect("valid output index"),
+            2,
             CcvKey::Nums,
             CcvTaptree::Item("pe_taptree"),
             CcvMode::Preserve,
         ),
         DisputeWinner::Challenger => s.ccv(
             CcvData::Item("r"),
-            CcvIndex::at(2).expect("valid output index"),
+            2,
             CcvKey::Nums,
             CcvTaptree::Item("unwind_taptree"),
             CcvMode::Preserve,

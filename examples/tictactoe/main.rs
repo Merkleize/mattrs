@@ -41,6 +41,7 @@ use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{ProtocolError, Runner};
+use mattrs::signer::HotSigner;
 
 use contracts::roles::{PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role};
 use contracts::{
@@ -97,12 +98,12 @@ fn prompt_strategy() -> Strategy {
             print!("Your move [0-8]: ");
             std::io::stdout()
                 .flush()
-                .map_err(|e| ProtocolError::Other(format!("failed to flush the prompt: {e}")))?;
+                .map_err(|e| ProtocolError::other(format!("failed to flush the prompt: {e}")))?;
             let mut line = String::new();
             stdin
                 .lock()
                 .read_line(&mut line)
-                .map_err(|e| ProtocolError::Other(format!("failed to read a move: {e}")))?;
+                .map_err(|e| ProtocolError::other(format!("failed to read a move: {e}")))?;
             match line.trim().parse::<usize>() {
                 Ok(cell) if cell < 9 && board[cell] == EMPTY => return Ok(cell),
                 _ => println!("Invalid or taken cell — pick an empty one from the grid."),
@@ -223,8 +224,8 @@ fn run_alice(
     )?;
 
     println!("You are X and you move first.");
+    manager.add_signer(HotSigner::new(xpriv));
     let data = PlayerData {
-        xpriv,
         strategy: prompt_strategy(),
     };
     let outcome = Runner::new(manager, alice_role(), data, entry).run_one()?;
@@ -275,16 +276,12 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector)?;
-    let entry = manager.track_instance(
-        TicTacToe::new(params)?.as_erased(),
-        TttState::initial(),
-        outpoint,
-    )?;
+    let entry = TicTacToe::new(params)?.track(&mut manager, outpoint, TttState::initial())?;
     println!("Tracking the game at {outpoint}");
 
     println!("You are O; waiting for Alice's first move on-chain...");
+    manager.add_signer(HotSigner::new(xpriv));
     let data = PlayerData {
-        xpriv,
         strategy: prompt_strategy(),
     };
     let outcome = Runner::new(manager, bob_role(), data, entry).run_one()?;

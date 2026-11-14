@@ -12,13 +12,13 @@ use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, Network, Transaction};
 use mattrs::manager::{ContractManager, InstanceHandle, SpendBuilder};
 use mattrs::merkle::NIL;
-use mattrs::script_helpers::opaque_p2tr;
+use mattrs::script::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
 // The demo cast (pool, keys, exit set) is shared with the demo binary.
 use support::aggregate_exits::fixture::*;
 use support::aggregate_exits::*;
-use support::testkit::{fund_fake, offline_manager, try_handle};
+use support::testkit::try_handle;
 
 /// Offline batch application ([`mattrs::testutil::apply_batch`]), expecting
 /// success: the counterpart of `spend_batch` without broadcast or RPC.
@@ -37,25 +37,23 @@ fn claimed_pool(
     claim: &ExitClaim,
 ) -> (PendingExitHandle, PendingExitState) {
     let ingrid_pk = xonly(&ingrid_xpriv());
-    let unwind: UnwindHandle = try_handle(fund_fake(
-        Unwind::new(params()).unwrap().as_erased(),
-        UnwindState {
-            root: pool().root(),
-        },
-        POOL_TOTAL,
-        1,
-    ));
-    let bond: ExitBondHandle = try_handle(fund_fake(
-        ExitBond::new(ExitBondParams {
-            pool: params(),
-            owner_pk: ingrid_pk,
-        })
+    let unwind: UnwindHandle = Unwind::new(params())
         .unwrap()
-        .as_erased(),
-        (),
-        BOND as u64,
-        2,
-    ));
+        .fund(
+            manager,
+            Amount::from_sat(POOL_TOTAL),
+            UnwindState {
+                root: pool().root(),
+            },
+        )
+        .unwrap();
+    let bond: ExitBondHandle = ExitBond::new(ExitBondParams {
+        pool: params(),
+        owner_pk: ingrid_pk,
+    })
+    .unwrap()
+    .fund(manager, Amount::from_sat(BOND as u64))
+    .unwrap();
 
     let claim_state = PendingExitState::for_claim(&params(), claim, &ingrid_pk);
     let (tx, children) = apply(
@@ -76,18 +74,14 @@ fn claimed_pool(
 }
 
 /// A challenger's bond instance.
-fn challenger_bond(challenger: &Xpriv, seed: u8) -> ExitBondHandle {
-    try_handle(fund_fake(
-        ExitBond::new(ExitBondParams {
-            pool: params(),
-            owner_pk: xonly(challenger),
-        })
-        .unwrap()
-        .as_erased(),
-        (),
-        BOND as u64,
-        seed,
-    ))
+fn challenger_bond(manager: &mut ContractManager, challenger: &Xpriv) -> ExitBondHandle {
+    ExitBond::new(ExitBondParams {
+        pool: params(),
+        owner_pk: xonly(challenger),
+    })
+    .unwrap()
+    .fund(manager, Amount::from_sat(BOND as u64))
+    .unwrap()
 }
 
 // ============================================================================
@@ -140,13 +134,16 @@ fn honest_claim_computation() {
 /// CCV checks do not bind the payout to the authenticated account balance.
 #[test]
 fn known_amount_gap_allows_an_account_to_over_withdraw() {
+    let mut manager = mattrs::testutil::local_manager();
     let pool = pool();
-    let unwind: UnwindHandle = try_handle(fund_fake(
-        Unwind::new(params()).unwrap().as_erased(),
-        UnwindState { root: pool.root() },
-        POOL_TOTAL,
-        1,
-    ));
+    let unwind: UnwindHandle = Unwind::new(params())
+        .unwrap()
+        .fund(
+            &mut manager,
+            Amount::from_sat(POOL_TOTAL),
+            UnwindState { root: pool.root() },
+        )
+        .unwrap();
     assert_eq!(pool.accounts[0].unwrap().1, 1_000);
     let tx = unwind
         .withdraw_direct(&pool, 0)
@@ -278,14 +275,16 @@ fn start_exit_canonicalizes_the_published_bits() {
 
 #[test]
 fn direct_withdrawal_builds_and_chains() {
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let pool = pool();
-    let unwind: UnwindHandle = try_handle(fund_fake(
-        Unwind::new(params()).unwrap().as_erased(),
-        UnwindState { root: pool.root() },
-        POOL_TOTAL,
-        1,
-    ));
+    let unwind: UnwindHandle = Unwind::new(params())
+        .unwrap()
+        .fund(
+            &mut manager,
+            Amount::from_sat(POOL_TOTAL),
+            UnwindState { root: pool.root() },
+        )
+        .unwrap();
 
     // User 2 exits with 3000 sats.
     let (tx, children) = apply(
@@ -335,7 +334,7 @@ fn direct_withdrawal_builds_and_chains() {
 
 #[test]
 fn claim_merges_pool_and_bond() {
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let claim = compute_claim(&pool(), &exit_bits());
     let (pending, claim_state) = claimed_pool(&mut manager, &claim);
     assert_eq!(pending.state(), claim_state);
@@ -347,7 +346,7 @@ fn claim_merges_pool_and_bond() {
 
 #[test]
 fn happy_path_finalizes_after_challenge_period() {
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let claim = compute_claim(&pool(), &exit_bits());
     let (pending, _) = claimed_pool(&mut manager, &claim);
 
@@ -421,7 +420,7 @@ fn bisect_to_leaf(
 
 #[test]
 fn fraudulent_claim_loses_the_bisection() {
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let pool = pool();
     // Ingrid inflates the aggregate by 2000 at step 4.
     let lie = compute_claim_with_lie(&pool, &exit_bits(), Some((4, 2_000)));
@@ -430,7 +429,7 @@ fn fraudulent_claim_loses_the_bisection() {
 
     // User 0 challenges the claimed amount.
     let challenger = user_xpriv(0);
-    let cbond = challenger_bond(&challenger, 3);
+    let cbond = challenger_bond(&mut manager, &challenger);
     let (tx, children) = apply(
         &mut manager,
         &[pending.handle(), cbond.handle()],
@@ -471,7 +470,7 @@ fn fraudulent_claim_loses_the_bisection() {
 
 #[test]
 fn false_challenge_loses_and_the_claim_resumes() {
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let pool = pool();
     let honest = compute_claim(&pool, &exit_bits());
     // The challenger's own committed run is the fabricated one.
@@ -479,7 +478,7 @@ fn false_challenge_loses_and_the_claim_resumes() {
     let (pending, claim_state) = claimed_pool(&mut manager, &honest);
 
     let challenger = user_xpriv(5);
-    let cbond = challenger_bond(&challenger, 4);
+    let cbond = challenger_bond(&mut manager, &challenger);
     let (_, children) = apply(
         &mut manager,
         &[pending.handle(), cbond.handle()],
@@ -536,14 +535,14 @@ fn false_challenge_loses_and_the_claim_resumes() {
 
 #[test]
 fn stalled_turns_forfait_both_ways() {
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let pool = pool();
     let lie = compute_claim_with_lie(&pool, &exit_bits(), Some((1, 500)));
     let honest = compute_claim(&pool, &exit_bits());
     let (pending, _) = claimed_pool(&mut manager, &lie);
 
     let challenger = user_xpriv(0);
-    let cbond = challenger_bond(&challenger, 3);
+    let cbond = challenger_bond(&mut manager, &challenger);
     let (_, children) = apply(
         &mut manager,
         &[pending.handle(), cbond.handle()],
@@ -571,9 +570,9 @@ fn stalled_turns_forfait_both_ways() {
     assert_eq!(reverted.state().root, pool.root());
 
     // The mirror image: the challenger stalls after Ingrid's reveal.
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let (pending, claim_state) = claimed_pool(&mut manager, &lie);
-    let cbond = challenger_bond(&challenger, 5);
+    let cbond = challenger_bond(&mut manager, &challenger);
     let (_, children) = apply(
         &mut manager,
         &[pending.handle(), cbond.handle()],
@@ -608,7 +607,7 @@ fn stalled_turns_forfait_both_ways() {
 
 #[test]
 fn delegation_challenge_defended() {
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let pool = pool();
     let honest = compute_claim(&pool, &exit_bits());
     let (pending, claim_state) = claimed_pool(&mut manager, &honest);
@@ -616,7 +615,7 @@ fn delegation_challenge_defended() {
 
     // User 2 (who *did* delegate) challenges anyway.
     let challenger = user_xpriv(2);
-    let cbond = challenger_bond(&challenger, 3);
+    let cbond = challenger_bond(&mut manager, &challenger);
     let (tx, children) = apply(
         &mut manager,
         &[pending.handle(), cbond.handle()],
@@ -654,7 +653,7 @@ fn delegation_challenge_defended() {
 
 #[test]
 fn unanswerable_delegation_challenge_reverts_the_claim() {
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let pool = pool();
     // Ingrid includes user 3, who never delegated.
     let mut bits = exit_bits();
@@ -663,7 +662,7 @@ fn unanswerable_delegation_challenge_reverts_the_claim() {
     let (pending, _) = claimed_pool(&mut manager, &claim);
 
     let challenger = user_xpriv(3);
-    let cbond = challenger_bond(&challenger, 3);
+    let cbond = challenger_bond(&mut manager, &challenger);
     let (_, children) = apply(
         &mut manager,
         &[pending.handle(), cbond.handle()],
@@ -696,7 +695,7 @@ fn unanswerable_delegation_challenge_reverts_the_claim() {
 fn nil_step_dispute_is_defensible() {
     // Ingrid claims a set including slot 6 (a zeroed/padding slot) and lies
     // about that very step; the challenger wins with the NIL-case reveal.
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
     let pool = pool();
     let mut bits = exit_bits();
     bits[6] = true; // padding slot: contributes nothing
@@ -705,7 +704,7 @@ fn nil_step_dispute_is_defensible() {
     let (pending, _) = claimed_pool(&mut manager, &lie);
 
     let challenger = user_xpriv(1);
-    let cbond = challenger_bond(&challenger, 3);
+    let cbond = challenger_bond(&mut manager, &challenger);
     let (_, children) = apply(
         &mut manager,
         &[pending.handle(), cbond.handle()],
@@ -771,6 +770,7 @@ fn regtest_claim(
 #[test]
 #[ignore = "requires a running MATT-enabled regtest bitcoind"]
 fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
+    let _manager = mattrs::testutil::local_manager();
     use support::testkit::report_spend;
     let (mut manager, mut report) = regtest_setup("testwallet")?;
     let pool = pool();
@@ -790,7 +790,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
         &mut report,
         "AggregateExits",
         "withdraw_direct (user 2)",
-        unwind.handle(),
+        &unwind,
     );
     let mut after = pool.clone();
     after.zero(2);
@@ -804,12 +804,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
     let claim = compute_claim(&after, &bits);
     assert_eq!(claim.x, 7_000);
     let (pending, _) = regtest_claim(&mut manager, &unwind, &claim)?;
-    report_spend(
-        &mut report,
-        "AggregateExits",
-        "start_exit + bond",
-        unwind.handle(),
-    );
+    report_spend(&mut report, "AggregateExits", "start_exit + bond", &unwind);
 
     // The claim matures unchallenged; Ingrid finalizes.
     manager.mine_blocks(params().challenge_period as u64)?;
@@ -817,7 +812,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
         .finalize()
         .output_amount(0, Amount::from_sat((claim.x + BOND) as u64))
         .exec(&mut manager)?;
-    report_spend(&mut report, "AggregateExits", "finalize", pending.handle());
+    report_spend(&mut report, "AggregateExits", "finalize", &pending);
     let continued: UnwindHandle = try_handle(children[0].clone());
     assert_eq!(continued.state().root, claim.r_prime);
 
@@ -828,6 +823,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
 #[test]
 #[ignore = "requires a running MATT-enabled regtest bitcoind"]
 fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
+    let _manager = mattrs::testutil::local_manager();
     use support::testkit::report_spend;
     let (mut manager, mut report) = regtest_setup("testwallet")?;
     let pool = pool();
@@ -858,7 +854,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         &mut report,
         "AggregateExits",
         "challenge_state + bond",
-        pending.handle(),
+        &pending,
     );
 
     // Alternate reveals down to the disputed step.
@@ -885,7 +881,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         &mut report,
         "AggregateExits",
         "leaf reveal (challenger wins)",
-        leaf.handle(),
+        &leaf,
     );
     let reverted: UnwindHandle = try_handle(children[0].clone());
     assert_eq!(reverted.state().root, pool.root());
@@ -897,6 +893,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 #[ignore = "requires a running MATT-enabled regtest bitcoind (with OP_CHECKSIGFROMSTACK for full validation)"]
 fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
+    let _manager = mattrs::testutil::local_manager();
     use support::testkit::report_spend;
     let (mut manager, mut report) = regtest_setup("testwallet")?;
     let pool = pool();
@@ -929,12 +926,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .output_amount(0, Amount::from_sat((BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut manager)?;
-    report_spend(
-        &mut report,
-        "AggregateExits",
-        "defend (CSFS reveal)",
-        dc.handle(),
-    );
+    report_spend(&mut report, "AggregateExits", "defend (CSFS reveal)", &dc);
     let resumed: PendingExitHandle = try_handle(children[0].clone());
     assert_eq!(resumed.state(), claim_state);
 
@@ -948,7 +940,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         &mut report,
         "AggregateExits",
         "finalize (resumed)",
-        resumed.handle(),
+        &resumed,
     );
 
     report.finalize("reports/report_aggregate_exits_delegation.md")?;

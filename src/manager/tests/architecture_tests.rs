@@ -8,7 +8,7 @@ fn pure_preparation_and_signing_need_no_manager() {
     let prepared = transaction::prepare(&builders).unwrap();
     assert_eq!(calls.get(), 0);
     assert_eq!(prepared.child_count(), 1);
-    let tx = signing::sign_prepared(&builders, prepared).unwrap();
+    let tx = signing::sign_prepared(&builders, prepared, &Default::default()).unwrap();
     assert_eq!(calls.get(), 1);
     assert!(!tx.input[0].witness.is_empty());
     assert_eq!(handle.status(), InstanceStatus::Funded);
@@ -98,7 +98,7 @@ fn late_registry_conflict_is_rejected_before_broadcast() {
     for h in [&first, &second] {
         assert_eq!(h.status(), InstanceStatus::Funded);
         assert!(h.outputs().is_empty());
-        assert!(h.spending_args().is_none());
+        assert!(h.spend_record().is_none());
     }
 }
 
@@ -126,12 +126,7 @@ fn execution_and_observation_record_the_same_joined_batch() {
         (actor_defining, observer_defining),
         (actor_joining, observer_joining),
     ] {
-        assert_eq!(actor_parent.spending_tx(), observer_parent.spending_tx());
-        assert_eq!(
-            actor_parent.spending_args(),
-            observer_parent.spending_args()
-        );
-        assert_eq!(actor_parent.spending_vin(), observer_parent.spending_vin());
+        assert_eq!(actor_parent.spend_record(), observer_parent.spend_record());
         assert_eq!(
             actor_parent.outputs()[0].outpoint(),
             observer_parent.outputs()[0].outpoint()

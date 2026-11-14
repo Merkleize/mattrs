@@ -13,19 +13,21 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bitcoin::Amount;
+use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{
     Action, ChainView, LocalChain, Progress, ProtocolError, Role, Runner, RunnerState,
     TimeoutAction,
 };
-use mattrs::testutil::fund_fake;
+use mattrs::signer::HotSigner;
 
 use support::rps::roles::{
     AliceData, BobData, RpsOutcome, RpsResult, alice_role, bob_role, outcome_of,
 };
-use support::rps::{DEFAULT_STAKE, RpsGameS0, RpsGameS0Handle, RpsParams, alice_move_commitment};
+use support::rps::{
+    DEFAULT_STAKE, RpsGameS0, RpsGameS0Handle, RpsGameS0Spend, RpsGameS1, RpsGameS1Handle,
+    RpsParams, alice_move_commitment,
+};
 use support::testkit::{alice_pk, bob_pk, bob_xpriv, drive_both, manager_on, walk_tip};
-
-const SEED: u8 = 21;
 
 fn params(c_a: [u8; 32]) -> RpsParams {
     RpsParams {
@@ -44,21 +46,18 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
     let c_a = alice_move_commitment(m_a, &r_a);
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
 
-    let alice_entry = fund_fake(
-        RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        (),
-        pot,
-        SEED,
-    );
-    let bob_entry = fund_fake(
-        RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        (),
-        pot,
-        SEED,
-    );
+    // Alice funds the game; Bob tracks the same output in his own manager.
+    let game = RpsGameS0::new(params(c_a)).unwrap();
+    let mut alice_manager = manager_on(chain.clone());
+    let mut bob_manager = manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv()));
+    let alice_entry: InstanceHandle = game.fund(&mut alice_manager, pot).unwrap().into();
+    let bob_entry: InstanceHandle = game
+        .track(&mut bob_manager, alice_entry.outpoint())
+        .unwrap()
+        .into();
 
     let mut alice = Runner::new(
-        manager_on(chain.clone()),
+        alice_manager,
         alice_role(),
         AliceData {
             m_a,
@@ -68,13 +67,9 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
         alice_entry,
     );
     let mut bob = Runner::new(
-        manager_on(chain.clone()),
+        bob_manager,
         bob_role(),
-        BobData {
-            m_b,
-            c_a,
-            xpriv: bob_xpriv(),
-        },
+        BobData { m_b, c_a },
         bob_entry.clone(),
     );
 
@@ -112,35 +107,17 @@ fn missing_handler_is_reported() {
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
 
     // A truncated role: it watches S0 but has no idea what an S1 is.
-    let truncated: Role<(), RpsOutcome> =
-        Role::new().on::<RpsGameS0, _>(|_d: &mut (), _h: RpsGameS0Handle, _cx| Ok(Action::Wait));
-    let mut watcher = Runner::new(
-        manager_on(chain.clone()),
-        truncated,
-        (),
-        fund_fake(
-            RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-            (),
-            pot,
-            SEED,
-        ),
-    );
-
-    let mut bob = Runner::new(
-        manager_on(chain.clone()),
-        bob_role(),
-        BobData {
-            m_b: 1,
-            c_a,
-            xpriv: bob_xpriv(),
-        },
-        fund_fake(
-            RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-            (),
-            pot,
-            SEED,
-        ),
-    );
+    let truncated: Role<(), RpsOutcome> = Role::new().watch::<RpsGameS0>();
+    let game = RpsGameS0::new(params(c_a)).unwrap();
+    let mut watcher_manager = manager_on(chain.clone());
+    let mut bob_manager = manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv()));
+    let watched: InstanceHandle = game.fund(&mut watcher_manager, pot).unwrap().into();
+    let bob_entry: InstanceHandle = game
+        .track(&mut bob_manager, watched.outpoint())
+        .unwrap()
+        .into();
+    let mut watcher = Runner::new(watcher_manager, truncated, (), watched);
+    let mut bob = Runner::new(bob_manager, bob_role(), BobData { m_b: 1, c_a }, bob_entry);
 
     // Bob moves; the watcher then observes a child it cannot follow.
     watcher.step().expect("nothing to see yet");
@@ -165,27 +142,16 @@ fn action_cannot_spend_a_different_token() {
     let chain = Rc::new(LocalChain::new());
     let c_a = alice_move_commitment(0, &[7u8; 32]);
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
-    let entry = fund_fake(
-        RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        (),
-        pot,
-        31,
-    );
-    let other: RpsGameS0Handle = fund_fake(
-        RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        (),
-        pot,
-        32,
-    )
-    .try_into()
-    .unwrap();
-    let wrong = other.clone();
+    let game = RpsGameS0::new(params(c_a)).unwrap();
+    let mut manager = manager_on(chain.clone());
+    let entry: InstanceHandle = game.fund(&mut manager, pot).unwrap().into();
+    let wrong = game.fund(&mut manager, pot).unwrap();
     let role: Role<(), ()> =
         Role::new().on::<RpsGameS0, _>(move |_d, _h, _cx| Ok(Action::Send(wrong.bob_move(1))));
-    let mut runner = Runner::new(manager_on(chain.clone()), role, (), entry.clone());
+    let mut runner = Runner::new(manager, role, (), entry.clone());
 
     let err = runner.step().unwrap_err();
-    assert!(matches!(&err, ProtocolError::Other(msg) if msg.contains("different instance")));
+    assert!(matches!(&err, ProtocolError::Internal(msg) if msg.contains("different instance")));
     assert_eq!(runner.state(), RunnerState::Failed);
     assert_eq!(runner.failed_at(), Some(&entry));
     assert!(chain.find_spending_tx(entry.outpoint()).unwrap().is_none());
@@ -196,49 +162,29 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     let c_a = alice_move_commitment(0, &[7u8; 32]);
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
 
-    let zero_entry = fund_fake(
-        RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        (),
-        pot,
-        41,
-    );
-    let zero_role: Role<(), ()> = Role::new().on::<RpsGameS0, _>(|_d, _h, _cx| {
-        Ok(Action::WaitWithTimeout {
-            blocks: 0,
-            on_timeout: TimeoutAction::Finish(()),
-        })
-    });
-    let mut zero = Runner::new(
-        manager_on(Rc::new(LocalChain::new())),
-        zero_role,
-        (),
-        zero_entry,
-    );
+    let game = RpsGameS0::new(params(c_a)).unwrap();
+    let mut zero_manager = mattrs::testutil::local_manager();
+    let zero_entry = game.fund(&mut zero_manager, pot).unwrap();
+    let zero_role: Role<(), ()> = Role::new()
+        .on::<RpsGameS0, _>(|_d, _h, _cx| Ok(Action::wait_or_after(0, TimeoutAction::Finish(()))));
+    let mut zero = Runner::new(zero_manager, zero_role, (), zero_entry);
     assert!(matches!(
         zero.step(),
         Err(ProtocolError::Manager(
-            mattrs::manager::ManagerError::ContractError(
+            mattrs::manager::ManagerError::Contract(
                 mattrs::contracts::ContractError::InvalidBlockDelay { blocks: 0 }
             )
         ))
     ));
 
     let chain = Rc::new(LocalChain::new());
-    let entry = fund_fake(
-        RpsGameS0::new(params(c_a)).unwrap().as_erased(),
-        (),
-        pot,
-        42,
-    );
+    let mut manager = manager_on(chain.clone());
+    let entry: InstanceHandle = game.fund(&mut manager, pot).unwrap().into();
     let txid = entry.outpoint().txid;
     chain.assume_confirmed(txid, 5);
-    let role: Role<(), ()> = Role::new().on::<RpsGameS0, _>(|_d, _h, _cx| {
-        Ok(Action::WaitWithTimeout {
-            blocks: 3,
-            on_timeout: TimeoutAction::Finish(()),
-        })
-    });
-    let mut runner = Runner::new(manager_on(chain.clone()), role, (), entry);
+    let role: Role<(), ()> = Role::new()
+        .on::<RpsGameS0, _>(|_d, _h, _cx| Ok(Action::wait_or_after(3, TimeoutAction::Finish(()))));
+    let mut runner = Runner::new(manager, role, (), entry);
     assert!(matches!(runner.step().unwrap(), Progress::Waiting));
 
     // Simulate a reorg moving the funding transaction much later. A cached
@@ -248,4 +194,38 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     chain.mine(2);
     assert!(matches!(runner.step().unwrap(), Progress::Done(out) if out == vec![()]));
     assert_eq!(runner.state(), RunnerState::Finished);
+}
+
+/// `parent_spend` is typed: it names the parent contract, and says so when
+/// the token did not come from one.
+#[test]
+fn parent_spend_checks_where_the_token_came_from() {
+    let chain = Rc::new(LocalChain::new());
+    let c_a = alice_move_commitment(0, &[7u8; 32]);
+    let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
+    let game = RpsGameS0::new(params(c_a)).unwrap();
+    let mut manager = manager_on(chain).with_signer(HotSigner::new(bob_xpriv()));
+    let entry = game.fund(&mut manager, pot).unwrap();
+
+    let role: Role<(), i64> = Role::new()
+        .on::<RpsGameS0, _>(|_d: &mut (), h: RpsGameS0Handle, cx| {
+            // The entry instance has no parent.
+            assert!(matches!(
+                cx.parent_spend::<RpsGameS0>(),
+                Err(ProtocolError::Internal(_))
+            ));
+            Ok(Action::Send(h.bob_move(2)))
+        })
+        .on::<RpsGameS1, _>(|_d, _h: RpsGameS1Handle, cx| {
+            // The parent is an S0, not an S1...
+            assert!(matches!(
+                cx.parent_spend::<RpsGameS1>(),
+                Err(ProtocolError::WrongContract(_))
+            ));
+            // ...and its spend carries Bob's move, typed.
+            let (_s0, RpsGameS0Spend::BobMove(args)) = cx.parent_spend::<RpsGameS0>()?;
+            Ok(Action::Finish(args.m_b))
+        });
+    let outcomes = Runner::new(manager, role, (), entry).run().unwrap();
+    assert_eq!(outcomes, vec![2]);
 }

@@ -9,7 +9,7 @@ use std::str::FromStr;
 use bitcoin::{Address, Amount};
 use mattrs::contracts::{ClauseArgs, InstanceStatus};
 use mattrs::ctv::create_ctv_template;
-use mattrs::manager::ContractManager;
+use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::signer::HotSigner;
 use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client};
 use support::vault::{UnvaultingHandle, Vault, VaultParams, VaultTriggerArgs};
@@ -30,7 +30,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 
     let amount = 49_999_900u64;
     let vault_a = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
-    let funding_outpoint = vault_a.handle().outpoint();
+    let funding_outpoint = vault_a.outpoint();
 
     let ctv_template = vec![(
         Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?.assume_checked(),
@@ -41,8 +41,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     let unvaulting_a: UnvaultingHandle = vault_a
         .trigger(ctv_hash, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut actor)?
-        .try_into()?;
+        .exec_one(&mut actor)?;
 
     // Confirm the trigger and satisfy the CSV delay, then withdraw via CTV.
     actor.mine_blocks(10)?;
@@ -64,35 +63,27 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     let observer_client = regtest_client("testwallet");
     let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
 
-    let vault_b = observer.track_instance(
-        Vault::new(params.clone())?.as_erased(),
-        (),
-        funding_outpoint,
-    )?;
+    let vault_b: InstanceHandle = Vault::new(params.clone())?
+        .track(&mut observer, funding_outpoint)?
+        .into();
 
     let children = observer.wait_for_spend(&vault_b)?;
     assert_eq!(children.len(), 1);
     assert_eq!(vault_b.clause_name().as_deref(), Some("trigger"));
-    let args = VaultTriggerArgs::decode_from_witness(&vault_b.spending_args().unwrap())?;
+    let args = VaultTriggerArgs::decode_from_witness(vault_b.spend_record().unwrap().args())?;
     assert_eq!(args.ctv_hash, ctv_hash);
     assert!(!args.sig.is_empty());
 
     // The observed child matches the actor's, including its logical state.
     let unvaulting_b: UnvaultingHandle = children[0].clone().try_into().unwrap();
-    assert_eq!(
-        unvaulting_b.handle().outpoint(),
-        unvaulting_a.handle().outpoint()
-    );
+    assert_eq!(unvaulting_b.outpoint(), unvaulting_a.outpoint());
     assert_eq!(unvaulting_b.state().ctv_hash, ctv_hash);
 
     // Follow the terminal withdraw: no children, clause + args recorded.
-    let final_children = observer.wait_for_spend(unvaulting_b.handle())?;
+    let final_children = observer.wait_for_spend(&unvaulting_b)?;
     assert!(final_children.is_empty());
-    assert_eq!(
-        unvaulting_b.handle().clause_name().as_deref(),
-        Some("withdraw")
-    );
-    assert_eq!(unvaulting_b.handle().status(), InstanceStatus::Spent);
+    assert_eq!(unvaulting_b.clause_name().as_deref(), Some("withdraw"));
+    assert_eq!(unvaulting_b.status(), InstanceStatus::Spent);
 
     Ok(())
 }
@@ -125,11 +116,13 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     // funding outpoints are still around to verify.
     let mut observer =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let vault_contract = Vault::new(params.clone())?.as_erased();
-    let tracked_1 =
-        observer.track_instance(vault_contract.clone(), (), vault_1.handle().outpoint())?;
-    let tracked_2 =
-        observer.track_instance(vault_contract.clone(), (), vault_2.handle().outpoint())?;
+    let vault_contract = Vault::new(params.clone())?;
+    let tracked_1: InstanceHandle = vault_contract
+        .track(&mut observer, vault_1.outpoint())?
+        .into();
+    let tracked_2: InstanceHandle = vault_contract
+        .track(&mut observer, vault_2.outpoint())?
+        .into();
 
     // An unspent instance times out within the polling window...
     let err = observer
@@ -156,16 +149,13 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(observed.len(), 1);
     assert_eq!(tracked_1.clause_name().as_deref(), Some("trigger"));
     assert_eq!(tracked_2.clause_name().as_deref(), Some("trigger"));
-    assert_eq!(tracked_1.spending_vin(), Some(0));
-    assert_eq!(tracked_2.spending_vin(), Some(1));
+    assert_eq!(tracked_1.spend_record().unwrap().vin(), 0);
+    assert_eq!(tracked_2.spend_record().unwrap().vin(), 1);
 
     // The merged child matches the actor's, holding both stakes.
     let unvaulting: UnvaultingHandle = observed[0].clone().try_into().unwrap();
-    assert_eq!(unvaulting.handle().outpoint(), children[0].outpoint());
-    assert_eq!(
-        unvaulting.handle().prevout().value,
-        Amount::from_sat(2 * amount)
-    );
+    assert_eq!(unvaulting.outpoint(), children[0].outpoint());
+    assert_eq!(unvaulting.amount(), Amount::from_sat(2 * amount));
     assert_eq!(unvaulting.state().ctv_hash, ctv_hash);
 
     Ok(())

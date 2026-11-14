@@ -42,9 +42,9 @@ pub(super) fn decode_observation(
 ) -> Result<ObservedInput, ManagerError> {
     let txid = spending_tx.compute_txid();
 
-    let already_spent = match handle.instance.borrow().spent_in_tx() {
+    let already_spent = match handle.spend_record().map(|spend| spend.txid()) {
         Some(recorded) if recorded != txid => {
-            return Err(ManagerError::InvalidInstance(
+            return Err(ManagerError::InvalidObservation(
                 "Instance already spent by a different transaction".to_string(),
             ));
         }
@@ -200,7 +200,7 @@ impl ContractManager {
         spending_tx: &Transaction,
     ) -> Result<super::lifecycle::StagedBatch, ManagerError> {
         if spending_tx.input.is_empty() {
-            return Err(ManagerError::InvalidInstance(
+            return Err(ManagerError::InvalidObservation(
                 "cannot observe an empty input set".into(),
             ));
         }
@@ -210,7 +210,7 @@ impl ContractManager {
         let mut input_indices = BTreeMap::new();
         for (vin, input) in spending_tx.input.iter().enumerate() {
             if input_indices.insert(input.previous_output, vin).is_some() {
-                return Err(ManagerError::InvalidInstance(
+                return Err(ManagerError::InvalidObservation(
                     "transaction spends an outpoint more than once".into(),
                 ));
             }
@@ -219,12 +219,12 @@ impl ContractManager {
         for handle in handles {
             let outpoint = handle.outpoint();
             let vin = *input_indices.get(&outpoint).ok_or_else(|| {
-                ManagerError::InvalidInstance(format!(
+                ManagerError::InvalidObservation(format!(
                     "observation context {outpoint} is not an input of this transaction"
                 ))
             })?;
             if supplied.insert(vin, *handle).is_some() {
-                return Err(ManagerError::InvalidInstance(
+                return Err(ManagerError::InvalidObservation(
                     "duplicate input context in observation".into(),
                 ));
             }

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the #[ignore]d regtest end-to-end tests against a throwaway node.
+# Run the #[ignore]d regtest end-to-end tests, and the scripted demo binaries,
+# against a throwaway node.
 #
 # Starts a MATT-enabled `bitcoind` (CCV + CTV, e.g. Bitcoin Inquisition) on a
 # temporary datadir, creates and funds `testwallet`, runs the ignored tests,
@@ -65,3 +66,11 @@ export BITCOIN_RPC_COOKIE="$datadir/regtest/.cookie"
 cd "$(dirname "$0")/.."
 # One thread: the tests share the node's wallet and its chain tip.
 cargo test --all-features --tests -- --ignored --test-threads=1 "$@"
+
+# With no test filter, also run the scripted demo binaries end to end: they are
+# otherwise only compiled, never executed.
+if [[ $# -eq 0 ]]; then
+    cargo run --quiet --all-features --example counter -- --regtest
+    cargo run --quiet --all-features --example aggregate_exits
+    cargo run --quiet --all-features --example wallet_funding
+fi

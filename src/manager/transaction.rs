@@ -48,9 +48,7 @@ fn is_payments_only(next: &NextOutputs) -> bool {
 
 pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, ManagerError> {
     if builders.is_empty() {
-        return Err(ManagerError::TransactionBuildError(
-            "empty batch spend".to_string(),
-        ));
+        return Err(ManagerError::InvalidSpend("empty batch spend".to_string()));
     }
 
     // Collect each input, its prevout, and its clause's next outputs.
@@ -68,7 +66,7 @@ pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, Manage
             .iter()
             .any(|input: &TxIn| input.previous_output == outpoint)
         {
-            return Err(ManagerError::TransactionBuildError(format!(
+            return Err(ManagerError::InvalidSpend(format!(
                 "duplicate input: {} is spent twice in the batch",
                 outpoint
             )));
@@ -78,8 +76,7 @@ pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, Manage
             .contract()
             .get_clause(builder.clause_name)
             .ok_or_else(|| ManagerError::ClauseNotFound(builder.clause_name.to_string()))?;
-        validate_clause_witness(clause.as_ref(), &builder.witness_args, true)
-            .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
+        validate_clause_witness(clause.as_ref(), &builder.witness_args, true)?;
         prevouts.push(prevout);
         tx_inputs.push(TxIn {
             previous_output: outpoint,
@@ -138,7 +135,7 @@ pub(super) fn prepare(builders: &[SpendBuilder]) -> Result<PreparedBatch, Manage
         {
             let delay = crate::BlockDelay::new(blocks)?;
             if !delay.is_satisfied_by(tx.input[vin].sequence) {
-                return Err(ManagerError::TransactionBuildError(format!(
+                return Err(ManagerError::InvalidSpend(format!(
                     "clause '{}' requires at least {blocks} CSV blocks; nSequence {} does not satisfy it",
                     builder.clause_name, tx.input[vin].sequence,
                 )));
@@ -178,19 +175,19 @@ fn derive_tx_outputs(
         .iter()
         .any(|next| matches!(next, NextOutputs::TemplateHash(_)));
     if committed_hash && !single {
-        return Err(ManagerError::TransactionBuildError(
+        return Err(ManagerError::InvalidSpend(
             "CTV template-hash clauses are single-input only; not supported in a batch".into(),
         ));
     }
 
     if let Some(explicit) = builders.iter().find_map(|b| b.explicit_outputs.as_ref()) {
         if !single {
-            return Err(ManagerError::TransactionBuildError(
+            return Err(ManagerError::InvalidSpend(
                 "explicit outputs are single-input only; not supported in a batch".to_string(),
             ));
         }
         if template.is_some() {
-            return Err(ManagerError::TransactionBuildError(
+            return Err(ManagerError::InvalidSpend(
                 "a CTV template clause fixes the whole transaction; explicit outputs \
                  cannot override it"
                     .to_string(),
@@ -204,13 +201,13 @@ fn derive_tx_outputs(
                 if outputs.iter().all(|output| output.contract().is_none())
         );
         if !untracked && !committed_hash {
-            return Err(ManagerError::TransactionBuildError(
+            return Err(ManagerError::InvalidSpend(
                 "explicit outputs require an unconstrained clause, payments, or a CTV template hash"
                     .to_string(),
             ));
         }
         if nexts.first().is_some_and(is_payments_only) && !builders[0].output_amounts.is_empty() {
-            return Err(ManagerError::TransactionBuildError(
+            return Err(ManagerError::InvalidSpend(
                 "explicit payment outputs already supply amounts; do not also set output_amount"
                     .into(),
             ));
@@ -220,13 +217,13 @@ fn derive_tx_outputs(
 
     if let Some(template) = template {
         if !single {
-            return Err(ManagerError::TransactionBuildError(
+            return Err(ManagerError::InvalidSpend(
                 "CTV template clauses are single-input only; not supported in a batch".to_string(),
             ));
         }
         match builders[0].sequence {
             Some(sequence) if sequence != template.sequence => {
-                return Err(ManagerError::TransactionBuildError(format!(
+                return Err(ManagerError::InvalidSpend(format!(
                     "the CTV template commits to nSequence {}, conflicting with the \
                      caller's {}",
                     template.sequence, sequence
@@ -237,7 +234,7 @@ fn derive_tx_outputs(
         return Ok((template.outputs.clone(), Some(template.sequence)));
     }
     if committed_hash {
-        return Err(ManagerError::TransactionBuildError(
+        return Err(ManagerError::InvalidSpend(
             "a CTV template-hash clause requires explicit outputs (SpendBuilder::outputs)".into(),
         ));
     }
@@ -289,7 +286,7 @@ fn derive_tx_outputs(
                 value: Amount::ZERO,
             });
             if entry.script_pubkey != script_pubkey {
-                return Err(ManagerError::TransactionBuildError(format!(
+                return Err(ManagerError::InvalidSpend(format!(
                     "Clashing output script at index {}",
                     idx
                 )));
@@ -297,7 +294,7 @@ fn derive_tx_outputs(
             match clause_output.amount {
                 AmountMode::Preserve => {
                     if preserve_used {
-                        return Err(ManagerError::TransactionBuildError(
+                        return Err(ManagerError::InvalidSpend(
                             "multiple PreserveOutput outputs in one input (its remaining \
                              amount can only be preserved once)"
                                 .to_string(),
@@ -315,7 +312,7 @@ fn derive_tx_outputs(
                 }
                 AmountMode::Deduct => {
                     if preserve_used {
-                        return Err(ManagerError::TransactionBuildError(
+                        return Err(ManagerError::InvalidSpend(
                             "DeductOutput must be declared before PreserveOutput".to_string(),
                         ));
                     }

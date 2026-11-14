@@ -16,10 +16,10 @@
 use std::sync::Arc;
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::argtypes::IntType;
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::ArgSpec;
+use mattrs::script;
 use mattrs::{ContractState, Signature, contract};
 
 // Re-exported so tests can import the whole game through this module; each test
@@ -29,11 +29,7 @@ pub use mattrs::fraud::{
     Bisect1, Bisect1Handle, Bisect1State, Bisect2, Bisect2Handle, Bisect2State, BisectCtx,
     BisectParams, Computer, Leaf, LeafFactory, LeafHandle, LeafParams, LeafState,
 };
-use mattrs::script_helpers::{
-    check_input_contract, check_output_contract, dup, merkle_root, timeout_sig_script,
-};
-
-define_pushable!();
+use mattrs::script::{check_input_contract, check_output_contract, dup, merkle_root};
 
 /// The challenge timeout (blocks) for the bisection's forfait clauses.
 pub const FORFAIT_TIMEOUT: u32 = 10;
@@ -215,7 +211,8 @@ contract! {
                 #[signer(p.alice_pk)]
                 alice_sig: Signature,
             }
-            script G256S2::withdraw_script;
+            timelock |_p| FORFAIT_TIMEOUT;
+            script |p| script! { { p.alice_pk } OP_CHECKSIG };
         }
 
         // <bob_sig> <t_a> <y> <x> <z> <t_b>
@@ -231,7 +228,7 @@ contract! {
             }
             script G256S2::start_challenge_script;
             next(p, a) {
-                let commit = mattrs::script_utils::commit_int;
+                let commit = mattrs::script::commit_int;
                 Ok(vec![bisect1(p.bisect()).entry_output(
                     commit(a.x),
                     commit(a.y),
@@ -247,10 +244,6 @@ contract! {
 }
 
 impl G256S2 {
-    fn withdraw_script(p: &G256Params) -> ScriptBuf {
-        timeout_sig_script(FORFAIT_TIMEOUT, p.alice_pk)
-    }
-
     fn start_challenge_script(p: &G256Params) -> ScriptBuf {
         script! {
             OP_TOALTSTACK

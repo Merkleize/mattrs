@@ -63,13 +63,11 @@ use bitcoin::XOnlyPublicKey;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::key::{Keypair, Secp256k1};
 use bitcoin::secp256k1::Message;
-use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, WitnessError};
 use mattrs::fraud::trace;
 use mattrs::merkle::{MerkleProof, MerkleTree, NIL, ceil_lg};
-use mattrs::script_utils::{bn2vch, commit_int};
-
-define_pushable!();
+use mattrs::script;
+use mattrs::script::{bn2vch, commit_int};
 
 // ============================================================================
 // Pool parameters

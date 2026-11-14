@@ -3,28 +3,38 @@ use super::validation::validate_clause_witness;
 use super::{ManagerError, SpendBuilder, transaction::PreparedBatch};
 use bitcoin::{Transaction, TxOut};
 
+/// Signers by the x-only key they sign for.
+pub(super) type Signers =
+    std::collections::HashMap<bitcoin::XOnlyPublicKey, std::rc::Rc<dyn crate::signer::Signer>>;
+
+/// `standing` are the manager's own signers, used for any key a builder
+/// registered no signer for.
 pub(super) fn sign_prepared(
     builders: &[SpendBuilder],
     prepared: PreparedBatch,
+    standing: &Signers,
 ) -> Result<Transaction, ManagerError> {
     let PreparedBatch {
         mut tx, prevouts, ..
     } = prepared;
     // Fill + finalize each input's witness (every sighash sees all prevouts).
     for (input_index, builder) in builders.iter().enumerate() {
-        tx.input[input_index].witness = input_witness(builder, &tx, input_index, &prevouts)?;
+        tx.input[input_index].witness =
+            input_witness(builder, &tx, input_index, &prevouts, standing)?;
     }
 
     Ok(tx)
 }
 /// Build the full script-path witness for one input: the clause arguments with
 /// signature elements filled (by matching each `SignerType` pubkey to a
-/// registered signer), followed by the leaf script and its control block.
+/// signer registered on the builder, else to one of the `standing` signers),
+/// followed by the leaf script and its control block.
 pub(super) fn input_witness(
     builder: &SpendBuilder,
     tx: &Transaction,
     input_index: usize,
     prevouts: &[TxOut],
+    standing: &Signers,
 ) -> Result<bitcoin::Witness, ManagerError> {
     let clause_name = builder.clause_name;
     let signers = &builder.signers;
@@ -38,8 +48,7 @@ pub(super) fn input_witness(
     let mut witness_stack = builder.witness_args.to_vec();
 
     // Validate the complete declared layout even for unsigned/raw clauses.
-    validate_clause_witness(clause.as_ref(), &witness_stack, true)
-        .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
+    validate_clause_witness(clause.as_ref(), &witness_stack, true)?;
 
     // Only compute a sighash / sign when the clause has signature args.
     let needs_signature = clause
@@ -59,25 +68,23 @@ pub(super) fn input_witness(
             Some(leaf_hash),
             bitcoin::sighash::TapSighashType::Default,
         )
-        .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
+        .map_err(|e| ManagerError::InvalidSpend(e.to_string()))?;
 
         // Walk arg specs in witness order. A signature arg names the x-only key
         // that must sign its (single) witness element; sign with the registered
         // signer, or error if the element is empty and no signer is available.
         let mut offset = 0usize;
         for spec in clause.arg_specs() {
-            let consumed = spec
-                .arg_type
-                .consume(&witness_stack[offset..])
-                .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
+            let consumed = spec.arg_type.consume(&witness_stack[offset..])?;
 
             if let Some(xonly) = spec.arg_type.signer_pubkey() {
-                if let Some(signer) = signers.get(&xonly) {
-                    witness_stack[offset] = signer
-                        .sign(&sighash)
-                        .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?
-                        .as_bytes()
-                        .to_vec();
+                // A signer given for this spend wins over a standing one.
+                let signer: Option<&dyn crate::signer::Signer> = match signers.get(&xonly) {
+                    Some(signer) => Some(signer.as_ref()),
+                    None => standing.get(&xonly).map(|signer| signer.as_ref()),
+                };
+                if let Some(signer) = signer {
+                    witness_stack[offset] = signer.sign(&sighash)?.as_bytes().to_vec();
                 } else if witness_stack[offset].is_empty() {
                     return Err(ManagerError::MissingSigner(xonly));
                 }
@@ -87,8 +94,7 @@ pub(super) fn input_witness(
         }
     }
 
-    validate_clause_witness(clause.as_ref(), &witness_stack, false)
-        .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
+    validate_clause_witness(clause.as_ref(), &witness_stack, false)?;
 
     // Append the leaf script and control block (state-tweaked key for augmented).
     let internal_key = inst
@@ -99,7 +105,7 @@ pub(super) fn input_witness(
         .taptree()
         .control_block(&internal_key, clause_name)
         .ok_or_else(|| {
-            ManagerError::TransactionBuildError(format!(
+            ManagerError::InvalidSpend(format!(
                 "Could not generate control block for clause '{}'",
                 clause_name
             ))

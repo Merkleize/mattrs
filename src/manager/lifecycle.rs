@@ -123,6 +123,17 @@ impl ContractManager {
 }
 
 impl StagedBatch {
+    /// Handles to the staged children, in output-index order: the same
+    /// instances [`commit`](Self::commit) registers and returns.
+    pub(super) fn children(&self) -> Vec<InstanceHandle> {
+        self.children
+            .values()
+            .map(|instance| InstanceHandle {
+                instance: instance.clone(),
+            })
+            .collect()
+    }
+
     pub(super) fn commit(self, manager: &mut ContractManager) -> Children {
         let Self {
             spending_tx,

@@ -155,7 +155,7 @@ impl WitnessEncodable for CcvIndex {
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
         let (value, consumed) = i64::decode_from_witness(witness)?;
-        let index = Self::try_from(value).map_err(|e| WitnessError::InvalidValue(e.to_string()))?;
+        let index = Self::try_from(value).map_err(|e| WitnessError::Invalid(e.to_string()))?;
         Ok((index, consumed))
     }
 }
@@ -248,6 +248,18 @@ mod tests {
         }
         for number in [i32::MIN, -2, 3, 4, 255, i32::MAX] {
             assert_eq!(CcvMode::try_from(number), Err(InvalidCcvMode(number)));
+        }
+    }
+
+    #[test]
+    fn an_index_argument_is_the_script_number_and_rejects_undefined_ones() {
+        for index in [CcvIndex::CURRENT, CcvIndex::from(0), CcvIndex::from(7)] {
+            let witness = index.encode_to_witness();
+            assert_eq!(witness, index.as_i64().encode_to_witness());
+            assert_eq!(CcvIndex::decode_from_witness(&witness).unwrap(), (index, 1));
+        }
+        for undefined in [-2i64, i64::from(i32::MAX) + 1] {
+            assert!(CcvIndex::decode_from_witness(&undefined.encode_to_witness()).is_err());
         }
     }
 
