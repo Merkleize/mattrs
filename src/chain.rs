@@ -89,6 +89,14 @@ pub trait ChainView {
     /// (mempool or block), if one exists.
     fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError>;
 
+    /// Nobody is looking for a spend of `outpoint` any more (the caller gave
+    /// up waiting): release whatever [`find_spending_tx`](Self::find_spending_tx)
+    /// kept between calls for it. Looking again later is fine; it starts over.
+    /// The default does nothing, for backends that keep no such state.
+    fn stop_watching(&self, outpoint: OutPoint) {
+        let _ = outpoint;
+    }
+
     /// The transaction `txid`, if this chain knows it (mempool or block).
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError>;
 

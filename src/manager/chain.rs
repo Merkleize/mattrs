@@ -144,7 +144,11 @@ impl ContractManager {
         window: Option<Duration>,
     ) -> Result<Transaction, ManagerError> {
         let chain = self.chain()?;
-        poll_until(window, || chain.find_spending_tx(outpoint))?
-            .ok_or(ManagerError::SpendNotFound(outpoint))
+        let found = poll_until(window, || chain.find_spending_tx(outpoint));
+        if !matches!(found, Ok(Some(_))) {
+            // Giving up: let the backend drop what it kept for this search.
+            chain.stop_watching(outpoint);
+        }
+        found?.ok_or(ManagerError::SpendNotFound(outpoint))
     }
 }

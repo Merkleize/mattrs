@@ -66,7 +66,6 @@ pub struct UnvaultingState {
 contract! {
     contract Vault {
         params VaultParams;
-        validate |p| mattrs::BlockDelay::new(p.spend_delay).map(|_| ());
         internal_key |p| internal_key_or_nums(p.alternate_pk);
 
         // witness: <sig> <ctv-hash> <out_i>
