@@ -16,12 +16,9 @@ use std::collections::{HashMap, HashSet};
 
 use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
-use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{Action, ProtocolError, Role, StepCtx};
 
-use super::vault::{
-    Unvaulting, UnvaultingClause, UnvaultingHandle, Vault, VaultClause, VaultHandle,
-};
+use super::vault::{Unvaulting, UnvaultingHandle, UnvaultingSpend, Vault, VaultHandle, VaultSpend};
 
 /// How one branch (token) of the vault protocol resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +114,7 @@ pub struct WatchtowerData {
 /// owner never sanctioned.
 pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
     Role::new()
-        .on::<Vault, _>(|_d: &mut WatchtowerData, _h: VaultHandle, _cx| Ok(Action::Wait))
+        .watch::<Vault>()
         .on::<Unvaulting, _>(|d: &mut WatchtowerData, h: UnvaultingHandle, _cx| {
             let state = h.state();
             if d.authorized.contains(&state.ctv_hash) {
@@ -138,13 +135,15 @@ pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
 fn settled_vault(
     _d: &mut impl Sized,
     h: VaultHandle,
+    spend: VaultSpend,
     _cx: &StepCtx<'_>,
 ) -> Result<VaultOutcome, ProtocolError> {
-    let amount = branch_amount(h.handle())?;
-    match h.spent_clause() {
-        Some(VaultClause::Recover) => Ok(VaultOutcome::Recovered { amount }),
+    let amount = h.handle().prevout().value;
+    match spend {
+        VaultSpend::Recover(_) => Ok(VaultOutcome::Recovered { amount }),
         other => Err(ProtocolError::Other(format!(
-            "unexpected terminal clause {other:?} on a Vault"
+            "unexpected terminal clause {:?} on a Vault",
+            other.clause()
         ))),
     }
 }
@@ -153,19 +152,12 @@ fn settled_vault(
 fn settled_unvaulting(
     _d: &mut impl Sized,
     h: UnvaultingHandle,
+    spend: UnvaultingSpend,
     _cx: &StepCtx<'_>,
 ) -> Result<VaultOutcome, ProtocolError> {
-    let amount = branch_amount(h.handle())?;
-    match h.spent_clause() {
-        Some(UnvaultingClause::Withdraw) => Ok(VaultOutcome::Withdrawn { amount }),
-        Some(UnvaultingClause::Recover) => Ok(VaultOutcome::Recovered { amount }),
-        other => Err(ProtocolError::Other(format!(
-            "unexpected terminal clause {other:?} on an Unvaulting"
-        ))),
-    }
-}
-
-/// The branch's UTXO value.
-fn branch_amount(handle: &InstanceHandle) -> Result<Amount, ProtocolError> {
-    Ok(handle.prevout().value)
+    let amount = h.handle().prevout().value;
+    Ok(match spend {
+        UnvaultingSpend::Withdraw(_) => VaultOutcome::Withdrawn { amount },
+        UnvaultingSpend::Recover(_) => VaultOutcome::Recovered { amount },
+    })
 }

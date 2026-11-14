@@ -23,7 +23,10 @@ use mattrs::signer::HotSigner;
 use support::rps::roles::{
     AliceData, BobData, RpsOutcome, RpsResult, alice_role, bob_role, outcome_of,
 };
-use support::rps::{DEFAULT_STAKE, RpsGameS0, RpsGameS0Handle, RpsParams, alice_move_commitment};
+use support::rps::{
+    DEFAULT_STAKE, RpsGameS0, RpsGameS0Handle, RpsGameS0Spend, RpsGameS1, RpsGameS1Handle,
+    RpsParams, alice_move_commitment,
+};
 use support::testkit::{alice_pk, bob_pk, bob_xpriv, drive_both, manager_on, walk_tip};
 
 fn params(c_a: [u8; 32]) -> RpsParams {
@@ -104,8 +107,7 @@ fn missing_handler_is_reported() {
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
 
     // A truncated role: it watches S0 but has no idea what an S1 is.
-    let truncated: Role<(), RpsOutcome> =
-        Role::new().on::<RpsGameS0, _>(|_d: &mut (), _h: RpsGameS0Handle, _cx| Ok(Action::Wait));
+    let truncated: Role<(), RpsOutcome> = Role::new().watch::<RpsGameS0>();
     let game = RpsGameS0::new(params(c_a)).unwrap();
     let mut watcher_manager = manager_on(chain.clone());
     let mut bob_manager = manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv()));
@@ -200,4 +202,38 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     chain.mine(2);
     assert!(matches!(runner.step().unwrap(), Progress::Done(out) if out == vec![()]));
     assert_eq!(runner.state(), RunnerState::Finished);
+}
+
+/// `parent_spend` is typed: it names the parent contract, and says so when
+/// the token did not come from one.
+#[test]
+fn parent_spend_checks_where_the_token_came_from() {
+    let chain = Rc::new(LocalChain::new());
+    let c_a = alice_move_commitment(0, &[7u8; 32]);
+    let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
+    let game = RpsGameS0::new(params(c_a)).unwrap();
+    let mut manager = manager_on(chain).with_signer(HotSigner::new(bob_xpriv()));
+    let entry = game.fund(&mut manager, pot).unwrap();
+
+    let role: Role<(), i64> = Role::new()
+        .on::<RpsGameS0, _>(|_d: &mut (), h: RpsGameS0Handle, cx| {
+            // The entry instance has no parent.
+            assert!(matches!(
+                cx.parent_spend::<RpsGameS0>(),
+                Err(ProtocolError::Other(_))
+            ));
+            Ok(Action::Send(h.bob_move(2)))
+        })
+        .on::<RpsGameS1, _>(|_d, _h: RpsGameS1Handle, cx| {
+            // The parent is an S0, not an S1...
+            assert!(matches!(
+                cx.parent_spend::<RpsGameS1>(),
+                Err(ProtocolError::WrongContract(_))
+            ));
+            // ...and its spend carries Bob's move, typed.
+            let (_s0, RpsGameS0Spend::BobMove(args)) = cx.parent_spend::<RpsGameS0>()?;
+            Ok(Action::Finish(args.m_b))
+        });
+    let outcomes = Runner::new(manager, role, (), entry).run().unwrap();
+    assert_eq!(outcomes, vec![2]);
 }

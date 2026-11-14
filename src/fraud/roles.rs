@@ -25,8 +25,8 @@ use crate::manager::{InstanceHandle, SpendBuilder};
 use crate::protocol::{Action, ProtocolError, Role, StepCtx};
 
 use super::{
-    Bisect1, Bisect1Clause, Bisect1Handle, Bisect2, Bisect2Clause, Bisect2Handle, BisectParams,
-    Leaf, LeafClause, LeafHandle, trace,
+    Bisect1, Bisect1Handle, Bisect1Spend, Bisect2, Bisect2Handle, Bisect2Spend, BisectParams, Leaf,
+    LeafHandle, LeafSpend, trace,
 };
 
 /// The party a fraud-proof outcome favors.
@@ -205,31 +205,28 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
 fn with_settlements(
     role: Role<FraudPartyData, FraudOutcome>,
 ) -> Role<FraudPartyData, FraudOutcome> {
-    role.on_settled::<Leaf, _>(|_d, h: LeafHandle, cx| settled_leaf(&h, cx))
-        .on_settled::<Bisect1, _>(|_d, h: Bisect1Handle, _cx| match h.spent_clause() {
-            Some(Bisect1Clause::Forfait) => Ok(forfait_outcome(&h.params(), FraudWinner::Bob)),
-            other => Err(unexpected_terminal(other, "Bisect1")),
+    role.on_settled::<Leaf, _>(|_d, _h, spend, cx| settled_leaf(spend, cx))
+        .on_settled::<Bisect1, _>(|_d, h, spend, _cx| match spend {
+            Bisect1Spend::Forfait(_) => Ok(forfait_outcome(&h.params(), FraudWinner::Bob)),
+            other => Err(unexpected_terminal(other.clause(), "Bisect1")),
         })
-        .on_settled::<Bisect2, _>(|_d, h: Bisect2Handle, _cx| match h.spent_clause() {
-            Some(Bisect2Clause::Forfait) => Ok(forfait_outcome(&h.params(), FraudWinner::Alice)),
-            other => Err(unexpected_terminal(other, "Bisect2")),
+        .on_settled::<Bisect2, _>(|_d, h, spend, _cx| match spend {
+            Bisect2Spend::Forfait(_) => Ok(forfait_outcome(&h.params(), FraudWinner::Alice)),
+            other => Err(unexpected_terminal(other.clause(), "Bisect2")),
         })
 }
 
 /// The step a [`Leaf`] adjudicates, derived from how the token got there: its
 /// parent [`Bisect2`]'s range and which half Bob's reveal recursed into.
 fn leaf_step(cx: &StepCtx<'_>) -> Result<i64, ProtocolError> {
-    let parent = cx.parent.ok_or_else(|| {
-        ProtocolError::Other("a Leaf arises from a Bisect2 reveal, not as an entry".into())
-    })?;
-    let b2: Bisect2Handle = parent.clone().try_into()?;
+    let (b2, spend) = cx.parent_spend::<Bisect2>()?;
     let p = b2.params();
-    match b2.spent_clause() {
-        Some(Bisect2Clause::BobRevealLeft) => Ok(p.i()),
-        Some(Bisect2Clause::BobRevealRight) => Ok(p.i() + p.m()),
+    match spend {
+        Bisect2Spend::BobRevealLeft(_) => Ok(p.i()),
+        Bisect2Spend::BobRevealRight(_) => Ok(p.i() + p.m()),
         other => Err(ProtocolError::Other(format!(
             "unexpected clause {:?} produced a Leaf",
-            other
+            other.clause()
         ))),
     }
 }
@@ -285,11 +282,10 @@ fn win_leaf(
 }
 
 /// Classify the counterparty's terminal reveal of a [`Leaf`].
-fn settled_leaf(h: &LeafHandle, cx: &StepCtx<'_>) -> Result<FraudOutcome, ProtocolError> {
-    let winner = match h.spent_clause() {
-        Some(LeafClause::AliceReveal) => FraudWinner::Alice,
-        Some(LeafClause::BobReveal) => FraudWinner::Bob,
-        other => return Err(unexpected_terminal(other, "Leaf")),
+fn settled_leaf(spend: LeafSpend, cx: &StepCtx<'_>) -> Result<FraudOutcome, ProtocolError> {
+    let winner = match spend {
+        LeafSpend::AliceReveal(_) => FraudWinner::Alice,
+        LeafSpend::BobReveal(_) => FraudWinner::Bob,
     };
     Ok(FraudOutcome {
         winner,

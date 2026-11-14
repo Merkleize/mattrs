@@ -1234,7 +1234,12 @@ fn codegen(def: ContractDef) -> TokenStream2 {
 
         impl ::mattrs::protocol::TypedContract for #name {
             type Handle = #handle_ident;
+            type Spend = #spend_enum_ident;
             const NAME: &'static str = ::core::stringify!(#name);
+
+            fn spend_of(handle: &#handle_ident) -> ::core::option::Option<#spend_enum_ident> {
+                handle.spent()
+            }
 
             fn kind_id() -> ::core::any::TypeId {
                 ::core::any::TypeId::of::<#identity_ident>()

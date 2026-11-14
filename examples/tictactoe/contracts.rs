@@ -727,10 +727,8 @@ pub mod roles {
                     },
                 ))
             })
-            .on_settled::<TicTacToe, _>(move |_d, h: TicTacToeHandle, _cx| {
-                let clause = h.spent_clause().ok_or_else(|| {
-                    ProtocolError::Other("the game instance is not settled".to_string())
-                })?;
+            .on_settled::<TicTacToe, _>(move |_d, h, spend, _cx| {
+                let clause = spend.clause();
                 let s = h.state();
 
                 // Classify the counterparty's terminal claim, checking it

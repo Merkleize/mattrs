@@ -222,12 +222,11 @@ impl RpsGameS1 {
 /// `LocalChain` (see `tests/test_protocol.rs`).
 pub mod roles {
 
-    use mattrs::contracts::ClauseArgs;
     use mattrs::protocol::{Action, ProtocolError, Role};
 
     use super::{
-        RpsGameS0, RpsGameS0BobMoveArgs, RpsGameS0Handle, RpsGameS1, RpsGameS1Clause,
-        RpsGameS1Handle, RpsGameS1TieArgs, alice_move_commitment,
+        RpsGameS0, RpsGameS0Handle, RpsGameS0Spend, RpsGameS1, RpsGameS1Clause, RpsGameS1Handle,
+        RpsGameS1Spend, alice_move_commitment,
     };
 
     /// Who takes the pot.
@@ -281,17 +280,11 @@ pub mod roles {
     /// Her adjudication reveals `(m_a, r_a)`; the true outcome's clause is the
     /// only one that validates, and its CTV template pays the pot.
     pub fn alice_role() -> Role<AliceData, RpsOutcome> {
-        Role::new()
-            .on::<RpsGameS0, _>(|_d: &mut AliceData, _h: RpsGameS0Handle, _cx| Ok(Action::Wait))
-            .on::<RpsGameS1, _>(|d, h: RpsGameS1Handle, cx| {
+        Role::new().watch::<RpsGameS0>().on::<RpsGameS1, _>(
+            |d: &mut AliceData, h: RpsGameS1Handle, cx| {
                 // Bob's move travels in the witness of the spend that got us here.
-                let parent = cx
-                    .parent
-                    .ok_or_else(|| ProtocolError::Other("S1 arises from S0's bob_move".into()))?;
-                let witness = parent
-                    .spending_args()
-                    .ok_or_else(|| ProtocolError::Other("the parent S0 is spent".into()))?;
-                let m_b = RpsGameS0BobMoveArgs::decode_from_witness(&witness)?.m_b;
+                let (_s0, RpsGameS0Spend::BobMove(bob_move)) = cx.parent_spend::<RpsGameS0>()?;
+                let m_b = bob_move.m_b;
 
                 let result = outcome_of(d.m_a, m_b);
                 if let Some(pace) = &d.before_adjudicating {
@@ -308,7 +301,8 @@ pub mod roles {
                     m_b,
                 };
                 Ok(Action::SendFinal(builder, outcome))
-            })
+            },
+        )
     }
 
     /// Bob's view: Alice's commitment and his own move.
@@ -324,24 +318,22 @@ pub mod roles {
             .on::<RpsGameS0, _>(|d: &mut BobData, h: RpsGameS0Handle, _cx| {
                 Ok(Action::Send(h.bob_move(d.m_b)))
             })
-            .on::<RpsGameS1, _>(|_d, _h: RpsGameS1Handle, _cx| Ok(Action::Wait))
-            .on_settled::<RpsGameS1, _>(|d, h: RpsGameS1Handle, _cx| {
-                let clause = h
-                    .spent_clause()
-                    .ok_or_else(|| ProtocolError::Other("the S1 instance is spent".into()))?;
-                // The three adjudication clauses share one witness layout.
-                let witness = h
-                    .handle()
-                    .spending_args()
-                    .ok_or_else(|| ProtocolError::Other("the S1 instance is spent".into()))?;
-                let args = RpsGameS1TieArgs::decode_from_witness(&witness)?;
+            .watch::<RpsGameS1>()
+            .on_settled::<RpsGameS1, _>(|d, _h, spend, _cx| {
+                let clause = spend.clause();
+                // Every adjudication clause reveals Alice's move and nonce.
+                let (m_a, r_a) = match spend {
+                    RpsGameS1Spend::Tie(a) => (a.m_a, a.r_a),
+                    RpsGameS1Spend::BobWins(a) => (a.m_a, a.r_a),
+                    RpsGameS1Spend::AliceWins(a) => (a.m_a, a.r_a),
+                };
 
-                if alice_move_commitment(args.m_a, &args.r_a) != d.c_a {
+                if alice_move_commitment(m_a, &r_a) != d.c_a {
                     return Err(ProtocolError::Other(
                         "Alice's revealed move breaks her commitment".into(),
                     ));
                 }
-                let result = outcome_of(args.m_a, d.m_b);
+                let result = outcome_of(m_a, d.m_b);
                 if clause != clause_of(result) {
                     return Err(ProtocolError::Other(format!(
                         "adjudicated clause `{}` does not match the moves",
@@ -350,7 +342,7 @@ pub mod roles {
                 }
                 Ok(RpsOutcome {
                     result,
-                    m_a: args.m_a,
+                    m_a,
                     m_b: d.m_b,
                 })
             })

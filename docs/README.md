@@ -71,7 +71,7 @@ Each party is declared as a **role**: a table mapping contract types to handlers
 | `WaitWithTimeout{blocks, fallback}` | Watch, but act (e.g. `forfait`) once the UTXO sits unspent for `blocks` |
 | `Finish(outcome)` | Resolved with no transaction from us |
 
-A separate `on_settled` handler classifies *terminal* spends made by the counterparty (e.g. a CTV payout) into the protocol's outcome type.
+A separate `on_settled` handler classifies *terminal* spends made by the counterparty (e.g. a CTV payout) into the protocol's outcome type; it receives the typed spend record (`VaultSpend::Recover(args)`, …), so classifying is a `match`. A handler reads what the counterparty revealed on the way to the current state the same way, with `cx.parent_spend::<RpsGameS0>()`. `watch::<C>()` declares a state where the party only waits.
 
 A **runner** drives a role from an entry instance to its outcome: it dispatches handlers, builds and broadcasts the spends they return, follows the counterparty by observing the chain, and fires timeout fallbacks. All chain I/O goes through one seam (`ChainView`), so the same roles run unchanged against a real node (`RpcChain`) or the deterministic in-memory chain used by offline tests (`LocalChain`), where timeout paths are exercised by mining explicitly.
 

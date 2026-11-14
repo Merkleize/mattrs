@@ -47,12 +47,32 @@ pub trait TypedContract {
     /// The generated typed handle (`NameHandle`).
     type Handle: TryFrom<InstanceHandle, Error = WrongContractType> + Clone + 'static;
 
+    /// The generated spend record (`NameSpend`): one variant per clause,
+    /// holding that clause's typed arguments.
+    type Spend: 'static;
+
     /// The contract's name (matches
     /// [`ErasedContract::contract_name`](crate::contracts::ErasedContract::contract_name)).
     const NAME: &'static str;
 
     /// The `TypeId` of the erased contract backing this type.
     fn kind_id() -> TypeId;
+
+    /// The recorded spend of `handle` (`None` while unspent).
+    fn spend_of(handle: &Self::Handle) -> Option<Self::Spend>;
+
+    /// `handle` as a `C` instance together with its recorded spend: the typed
+    /// view of an instance somebody has spent.
+    fn spent(handle: &InstanceHandle) -> Result<(Self::Handle, Self::Spend), ProtocolError> {
+        let typed = Self::Handle::try_from(handle.clone())?;
+        let spend = Self::spend_of(&typed).ok_or_else(|| {
+            ProtocolError::Other(format!(
+                "the `{}` instance has no decodable recorded spend",
+                Self::NAME
+            ))
+        })?;
+        Ok((typed, spend))
+    }
 
     /// The dispatch key of this contract type.
     fn kind() -> ContractKey {
@@ -200,13 +220,33 @@ fn clause_delay(builder: &SpendBuilder) -> Result<u32, ProtocolError> {
 /// How the protocol token got to the state a handler runs at.
 pub struct StepCtx<'a> {
     /// The spent instance whose clause created the current one (`None` for the
-    /// protocol's entry instance). Its
-    /// [`clause_name`](InstanceHandle::clause_name) and
-    /// [`spending_args`](InstanceHandle::spending_args) carry what the
-    /// counterparty revealed on the way here.
+    /// protocol's entry instance). Read what its spend revealed with
+    /// [`parent_spend`](StepCtx::parent_spend).
     pub parent: Option<&'a InstanceHandle>,
     /// Read-only chain access (e.g. the current height).
     pub chain: &'a dyn ChainView,
+}
+
+impl StepCtx<'_> {
+    /// The parent instance as a `C`, with the spend that created the current
+    /// instance: the clause the counterparty took and the arguments they
+    /// revealed.
+    ///
+    /// ```ignore
+    /// let (_s0, RpsGameS0Spend::BobMove(args)) = cx.parent_spend::<RpsGameS0>()? else { .. };
+    /// ```
+    ///
+    /// Errors for the entry instance (no parent) and when the parent is not a
+    /// `C`.
+    pub fn parent_spend<C: TypedContract>(&self) -> Result<(C::Handle, C::Spend), ProtocolError> {
+        let parent = self.parent.ok_or_else(|| {
+            ProtocolError::Other(format!(
+                "the entry instance has no parent (expected a `{}`)",
+                C::NAME
+            ))
+        })?;
+        C::spent(parent)
+    }
 }
 
 /// An error raised while declaring or driving a protocol role.
@@ -349,11 +389,21 @@ impl<D: 'static, O: 'static> Role<D, O> {
         self
     }
 
+    /// Declare that this party only watches a live `C` instance: it waits for
+    /// somebody else to spend it. Shorthand for an [`on`](Role::on) handler
+    /// returning [`Action::Wait`].
+    ///
+    /// # Panics
+    ///
+    /// As [`on`](Role::on).
+    pub fn watch<C: TypedContract>(self) -> Self {
+        self.on::<C, _>(|_, _, _| Ok(Action::Wait))
+    }
+
     /// Declare how this party classifies a *terminal* spend of a `C` instance
     /// made by the counterparty (a spend producing no child instances, e.g. a
-    /// CTV payout). The spent handle's
-    /// [`clause_name`](InstanceHandle::clause_name) and
-    /// [`spending_args`](InstanceHandle::spending_args) identify what happened.
+    /// CTV payout). The handler receives the spent instance and its spend
+    /// record — the clause taken, with its typed arguments.
     ///
     /// # Panics
     ///
@@ -361,7 +411,7 @@ impl<D: 'static, O: 'static> Role<D, O> {
     pub fn on_settled<C, F>(mut self, f: F) -> Self
     where
         C: TypedContract,
-        F: Fn(&mut D, C::Handle, &StepCtx<'_>) -> Result<O, ProtocolError> + 'static,
+        F: Fn(&mut D, C::Handle, C::Spend, &StepCtx<'_>) -> Result<O, ProtocolError> + 'static,
     {
         let key = C::kind();
         assert!(
@@ -372,8 +422,8 @@ impl<D: 'static, O: 'static> Role<D, O> {
         self.settlements.insert(
             key,
             Rc::new(move |d, h, cx| {
-                let typed = C::Handle::try_from(h)?;
-                f(d, typed, cx)
+                let (typed, spend) = C::spent(&h)?;
+                f(d, typed, spend, cx)
             }),
         );
         self

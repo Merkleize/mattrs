@@ -22,7 +22,7 @@ use mattrs::protocol::{Action, ProtocolError, Role};
 use mattrs::script_utils::{bn2vch, commit_int, vch2bn};
 
 use super::game256::{
-    FORFAIT_TIMEOUT, G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Clause, G256S2Handle,
+    FORFAIT_TIMEOUT, G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Handle, G256S2Spend,
 };
 
 /// How the game ended, from one party's perspective.
@@ -113,8 +113,8 @@ pub fn cheating_vals(x: i64) -> Vec<i64> {
 /// fraud-proof role.
 pub fn alice_game_role() -> Role<AliceGameData, GameOutcome> {
     Role::new()
-        .on::<G256S0, _>(|_d: &mut AliceGameData, _h: G256S0Handle, _cx| Ok(Action::Wait))
-        .on::<G256S1, _>(|d, h: G256S1Handle, _cx| {
+        .watch::<G256S0>()
+        .on::<G256S1, _>(|d: &mut AliceGameData, h: G256S1Handle, _cx| {
             let x = h.state().x;
             let vals = (d.claim)(x);
             let n = vals.len() - 1;
@@ -147,7 +147,7 @@ pub fn bob_game_role() -> Role<BobGameData, GameOutcome> {
         .on::<G256S0, _>(|d: &mut BobGameData, h: G256S0Handle, _cx| {
             Ok(Action::Send(h.choose(d.x)))
         })
-        .on::<G256S1, _>(|_d, _h: G256S1Handle, _cx| Ok(Action::Wait))
+        .watch::<G256S1>()
         .on::<G256S2, _>(|d, h: G256S2Handle, _cx| {
             let s = h.state();
             let n = d.vals.len() - 1;
@@ -160,11 +160,11 @@ pub fn bob_game_role() -> Role<BobGameData, GameOutcome> {
             let builder = h.start_challenge(s.t_a, s.y, s.x, d.vals[n], t_b);
             Ok(Action::Send(builder))
         })
-        .on_settled::<G256S2, _>(|_d, h: G256S2Handle, _cx| match h.spent_clause() {
-            Some(G256S2Clause::Withdraw) => Ok(GameOutcome::AliceWithdrew),
+        .on_settled::<G256S2, _>(|_d, _h, spend, _cx| match spend {
+            G256S2Spend::Withdraw(_) => Ok(GameOutcome::AliceWithdrew),
             other => Err(ProtocolError::Other(format!(
                 "unexpected terminal clause {:?} on G256S2",
-                other
+                other.clause()
             ))),
         })
         .embed(
