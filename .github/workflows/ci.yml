@@ -25,16 +25,26 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # `--workspace` covers the inspector client, the derive macros and the
+      # vendored `script!` macro, not only the root crate.
       - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check without default features
+        run: cargo check --no-default-features
 
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps
 
       - name: Test
-        run: cargo test --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features
+
+      # `--all-targets` leaves the documentation examples out, and with them
+      # the `compile_fail` ones that pin what the typed APIs must reject.
+      - name: Test the documentation examples
+        run: cargo test --workspace --doc --all-features
 
       # The demo binaries are otherwise only compiled; these run without a node.
       - name: Run the offline examples

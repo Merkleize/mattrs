@@ -307,9 +307,10 @@ cargo run -p mattrs-inspector       # or: nc localhost 34443
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
-cargo test --all-targets --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+cargo test --workspace --all-targets --all-features
+cargo test --workspace --doc --all-features      # the documentation examples
 ```
 
 The end-to-end tests are `#[ignore]`d by default because they need a
