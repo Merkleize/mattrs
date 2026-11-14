@@ -18,8 +18,7 @@ use support::minivault::{
     MiniUnvaulting, MiniUnvaultingHandle, MiniVault, MiniVaultHandle, MiniVaultParams,
 };
 use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, fund_fake, offline_client, regtest_client, report_spend,
-    try_handle,
+    alice_pk, alice_xpriv, bob_pk, fund_fake, regtest_client, report_spend, try_handle,
 };
 
 const SPEND_DELAY: u32 = 10;
@@ -99,16 +98,15 @@ fn test_minivault_trigger_commits_unvaulting_state() {
 
     let handle = try_handle::<MiniVaultHandle>(fund_fake(
         MiniVault::new(params.clone()).unwrap().as_erased(),
-        None,
+        (),
         100_000,
         0,
     ));
 
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
     let tx = handle
         .trigger(wpk, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
 
     let unvaulting = MiniUnvaulting::new(support::minivault::MiniUnvaultingParams {
@@ -119,7 +117,7 @@ fn test_minivault_trigger_commits_unvaulting_state() {
     .unwrap();
     let expected = unvaulting
         .as_erased()
-        .script_pubkey(Some(wpk.as_slice()))
+        .script_pubkey(&mattrs::StateCommitment::identity(wpk.to_vec()))
         .unwrap();
 
     assert_eq!(tx.output.len(), 1);
@@ -128,24 +126,24 @@ fn test_minivault_trigger_commits_unvaulting_state() {
 }
 
 #[test]
-fn test_minivault_rejects_negative_output_indices() {
+fn test_minivault_rejects_invalid_output_indices() {
     let params = make_params(true, false);
     let handle = try_handle::<MiniVaultHandle>(fund_fake(
         MiniVault::new(params).unwrap().as_erased(),
-        None,
+        (),
         100_000,
         8,
     ));
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     let err = handle
-        .trigger_and_revault(withdrawal_pk(), 0, -1)
-        .build_tx(&manager)
+        .trigger_and_revault(withdrawal_pk(), 0, -2)
+        .build_tx()
         .unwrap_err();
+    // `-1` is CCV's "same index as this input"; anything below is undefined.
     assert!(matches!(
         err,
         ManagerError::ClauseError(ClauseError::Other(message))
-            if message.contains("revault_out_i")
+            if message.contains("CCV index -2")
     ));
 }
 
@@ -229,7 +227,7 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
         .try_into()?;
     report_spend(&mut report, "MiniVault", "trigger", vault.handle());
 
-    let state = unvaulting.state().expect("MiniUnvaulting state");
+    let state = unvaulting.state();
     assert_eq!(state.withdrawal_pk, wpk);
 
     unvaulting
@@ -343,11 +341,11 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
         .find(|c| c.contract_name() == "MiniVault")
         .expect("revaulted vault child");
     let merged = Amount::from_sat(3 * 100_000 - 30_000);
-    assert_eq!(unvaulting_child.prevout().unwrap().value, merged);
-    assert_eq!(revault_child.prevout().unwrap().value, revault_amount);
+    assert_eq!(unvaulting_child.prevout().value, merged);
+    assert_eq!(revault_child.prevout().value, revault_amount);
 
     let unvaulting: MiniUnvaultingHandle = unvaulting_child.clone().try_into()?;
-    assert_eq!(unvaulting.state().expect("state").withdrawal_pk, wpk);
+    assert_eq!(unvaulting.state().withdrawal_pk, wpk);
 
     manager.mine_blocks(SPEND_DELAY as u64)?;
     unvaulting

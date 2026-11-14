@@ -17,15 +17,15 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use bitcoin::{Amount, Sequence};
-use mattrs::contracts::ContractState;
+use mattrs::contracts::{ContractState, StateCodec};
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{LocalChain, ProtocolError, Runner};
 use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
 use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, fund_fake, offline_client,
-    offline_manager, try_handle, walk_tip,
+    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, fund_fake, manager_on, try_handle,
+    walk_tip,
 };
 use support::tictactoe::roles::{
     PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role,
@@ -52,7 +52,7 @@ fn params() -> TttParams {
 fn funded_game(state: TttState) -> TicTacToeHandle {
     try_handle(fund_fake(
         TicTacToe::new(params()).unwrap().as_erased(),
-        Some(Box::new(state)),
+        state,
         POT,
         SEED,
     ))
@@ -78,7 +78,7 @@ fn board(picture: &str) -> [u8; 9] {
 // ----------------------------------------------------------------------------
 
 #[test]
-fn state_roundtrips_through_its_commitment() {
+fn state_roundtrips_through_its_serialization() {
     let state = TttState {
         turn: TURN_BOB,
         board: board("XO. .X. ..O"),
@@ -94,6 +94,29 @@ fn state_roundtrips_through_its_commitment() {
     let mut bad_cell = bytes.clone();
     bad_cell[3] = 7;
     assert!(TttState::decode(&bad_cell).is_err(), "invalid cell byte");
+}
+
+#[test]
+fn explicit_state_hash_preserves_the_previous_address() {
+    use bitcoin::hashes::{Hash, sha256};
+    use mattrs::contracts::{apply_state_tweak, compute_taproot_output_key};
+    let state = TttState {
+        turn: TURN_BOB,
+        board: board("XO. .X. ..O"),
+    };
+    // Previous addressing implicitly hashed this 10-byte serialization.
+    let legacy_data = sha256::Hash::hash(&state.preimage()).to_byte_array();
+    assert_eq!(state.commitment().as_bytes(), legacy_data);
+    let contract = TicTacToe::new(params()).unwrap().as_erased();
+    let internal = apply_state_tweak(&mattrs::nums_key(), &legacy_data).unwrap();
+    let expected = mattrs::script_helpers::opaque_p2tr(compute_taproot_output_key(
+        &internal,
+        Some(contract.taptree()),
+    ));
+    assert_eq!(
+        contract.script_pubkey(&state.commitment()).unwrap(),
+        expected
+    );
 }
 
 #[test]
@@ -123,14 +146,12 @@ fn game_rules_match_the_boards() {
 #[test]
 fn moves_commit_the_updated_board() {
     let game = funded_game(TttState::initial());
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
 
     // Alice opens in the center.
     let tx = game
         .make_move(4)
-        .unwrap()
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
 
     // Output 0 is the same contract committing the updated board, whole pot.
@@ -138,7 +159,7 @@ fn moves_commit_the_updated_board() {
     let expected = TicTacToe::new(params())
         .unwrap()
         .as_erased()
-        .script_pubkey(Some(&next.encode()))
+        .script_pubkey(&next.commitment())
         .unwrap();
     assert_eq!(tx.output[0].script_pubkey, expected);
     assert_eq!(tx.output[0].value, Amount::from_sat(POT));
@@ -146,7 +167,6 @@ fn moves_commit_the_updated_board() {
 
 #[test]
 fn claims_pay_out_via_their_ctv_templates() {
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
     let pot = Amount::from_sat(POT);
     let stake = Amount::from_sat(DEFAULT_STAKE as u64);
 
@@ -155,11 +175,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("XXX OO. ..."),
     });
-    let tx = won
-        .claim_win(MARK_ALICE)
-        .unwrap()
-        .build_tx(&manager)
-        .unwrap();
+    let tx = won.claim_win(MARK_ALICE).build_tx().unwrap();
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[0].value, pot);
@@ -170,7 +186,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("XOX XOO OXX"),
     });
-    let tx = tied.claim_tie().unwrap().build_tx(&manager).unwrap();
+    let tx = tied.claim_tie().build_tx().unwrap();
     assert_eq!(tx.output.len(), 2);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[1].script_pubkey, p2tr(bob_pk()));
@@ -182,7 +198,7 @@ fn claims_pay_out_via_their_ctv_templates() {
         turn: TURN_BOB,
         board: board("X.. ... ..."),
     });
-    let tx = idle.timeout_bob_idle().unwrap().build_tx(&manager).unwrap();
+    let tx = idle.timeout_bob_idle().build_tx().unwrap();
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(tx.output[0].value, pot);
@@ -191,14 +207,12 @@ fn claims_pay_out_via_their_ctv_templates() {
 
 #[test]
 fn illegal_moves_are_rejected_when_building() {
-    let manager = ContractManager::new(offline_client(), bitcoin::Network::Regtest);
-
     // Out of turn: it is Alice's move, Bob tries to play.
     let game = funded_game(TttState::initial());
     let err = game
         .move_bob(vec![], vec![EMPTY; 8])
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager);
+        .build_tx();
     assert!(err.is_err(), "out-of-turn move must not build");
 
     // Occupied cell: the center is already taken.
@@ -209,7 +223,7 @@ fn illegal_moves_are_rejected_when_building() {
     let err = game
         .move_bob(board("... .X. ...")[..4].to_vec(), vec![EMPTY; 4])
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager);
+        .build_tx();
     assert!(err.is_err(), "a move onto a taken cell must not build");
 
     // A move whose revealed board contradicts the committed one.
@@ -220,7 +234,7 @@ fn illegal_moves_are_rejected_when_building() {
     let err = game
         .move_alice(vec![], vec![EMPTY; 8])
         .sign(HotSigner::new(alice_xpriv()))
-        .build_tx(&manager);
+        .build_tx();
     assert!(err.is_err(), "a fabricated board must not build");
 }
 
@@ -239,8 +253,7 @@ fn strategy_errors_propagate_from_the_role() {
     let chain = Rc::new(LocalChain::new());
     let entry = funded_game(TttState::initial());
     let mut runner = Runner::new(
-        offline_manager(),
-        chain,
+        manager_on(chain),
         alice_role(),
         PlayerData {
             xpriv: alice_xpriv(),
@@ -270,20 +283,19 @@ fn setup(
 ) {
     let alice_entry = fund_fake(
         TicTacToe::new(params()).unwrap().as_erased(),
-        Some(Box::new(TttState::initial())),
+        TttState::initial(),
         POT,
         SEED,
     );
     let bob_entry = fund_fake(
         TicTacToe::new(params()).unwrap().as_erased(),
-        Some(Box::new(TttState::initial())),
+        TttState::initial(),
         POT,
         SEED,
     );
 
     let alice = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         alice_role(),
         PlayerData {
             xpriv: alice_xpriv(),
@@ -292,8 +304,7 @@ fn setup(
         alice_entry.clone(),
     );
     let bob = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         bob_role(),
         PlayerData {
             xpriv: bob_xpriv(),
@@ -413,7 +424,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
             bob_xpriv()
         };
         h = h
-            .make_move(cell)?
+            .make_move(cell)
             .sign(HotSigner::new(xpriv))
             .exec_one(&mut manager)?
             .try_into()?;
@@ -423,24 +434,24 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
     // No line on the board yet: a win claim must be rejected by the node's
     // script interpreter (the line scan is consensus-enforced)...
     assert!(
-        h.claim_win(MARK_BOB)?.exec_none(&mut manager).is_err(),
+        h.claim_win(MARK_BOB).exec_none(&mut manager).is_err(),
         "bob_wins must not validate without a line of O's"
     );
     // ...and so must a forfait claim before the CSV delay has passed.
     assert!(
-        h.timeout_alice_idle()?.exec_none(&mut manager).is_err(),
+        h.timeout_alice_idle().exec_none(&mut manager).is_err(),
         "the forfait must not validate before the timeout"
     );
 
     // Alice completes her line and claims the pot via the CTV template.
     let won: TicTacToeHandle = h
-        .make_move(2)?
+        .make_move(2)
         .sign(HotSigner::new(alice_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
-    let state = won.state().expect("expanded state");
+    let state = won.state();
     assert_eq!(state.board, board("XXX OO. ..."));
-    won.claim_win(MARK_ALICE)?.exec_none(&mut manager)?;
+    won.claim_win(MARK_ALICE).exec_none(&mut manager)?;
     report_spend(
         &mut report,
         "TicTacToe",
@@ -465,7 +476,7 @@ fn test_tictactoe_forfait_on_regtest() -> Result<(), Box<dyn std::error::Error>>
 
     // Alice opens; Bob never answers.
     let h: TicTacToeHandle = game
-        .make_move(4)?
+        .make_move(4)
         .sign(HotSigner::new(alice_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
@@ -473,7 +484,7 @@ fn test_tictactoe_forfait_on_regtest() -> Result<(), Box<dyn std::error::Error>>
     // Once the CSV delay has passed, the forfait claim validates and pays
     // Alice the whole pot.
     manager.mine_blocks((TIMEOUT + 1).into())?;
-    h.timeout_bob_idle()?.exec_none(&mut manager)?;
+    h.timeout_bob_idle().exec_none(&mut manager)?;
     let payout = h.handle().spending_tx().expect("forfait collected");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(payout.output[0].value, Amount::from_sat(POT));

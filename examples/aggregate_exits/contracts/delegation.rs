@@ -3,16 +3,14 @@
 use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
-use mattrs::contracts::{
-    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
-    WitnessReader,
-};
+use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
 
 use super::pending_exit::PendingExit;
 use super::unwind::{Unwind, UnwindState};
 use super::{ChallengeContext, PoolParams, spec};
-use mattrs::stack::{Source, StackScript};
+use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
+use mattrs::stack::StackScript;
 
 define_pushable!();
 
@@ -69,6 +67,7 @@ contract! {
     /// half-slashed to the challenger, half burned.
     contract DelegationChallenge {
         params PoolParams;
+        validate PoolParams::validate_timelocks;
         state DelegationChallengeState;
 
         // witness: the seven state leaves (STATE_ITEMS order), then <sig>
@@ -103,11 +102,11 @@ impl DelegationChallenge {
     fn reveal_state(s: &mut StackScript) {
         s.merkle_of(&STATE_ITEMS, "state");
         s.ccv(
-            Source::Item("state"),
-            -1,
-            Source::None,
-            Source::Current,
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("state"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::CheckInput,
         );
     }
 
@@ -133,28 +132,28 @@ impl DelegationChallenge {
         // Output 0: half the challenger's bond to Ingrid.
         // TODO(OP_AMOUNT): enforce that output 0 carries exactly `bond / 2`.
         s.ccv(
-            Source::None,
-            0,
-            Source::Item("ingrid_pk"),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Item("ingrid_pk"),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 1: the other half is burned.
         // TODO(OP_AMOUNT): enforce that output 1 carries `bond - bond / 2`.
         s.ccv(
-            Source::None,
-            1,
-            Source::Const(mattrs::nums_key().serialize()),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(1).expect("valid output index"),
+            CcvKey::Const(mattrs::nums_key()),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 2 resumes the claim (same state, fresh challenge period).
         s.ccv(
-            Source::Item("resume"),
-            2,
-            Source::None,
-            Source::Item("pe_taptree"),
-            0,
+            CcvData::Item("resume"),
+            CcvIndex::at(2).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Item("pe_taptree"),
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -162,21 +161,15 @@ impl DelegationChallenge {
     fn defend_outputs(
         p: &PoolParams,
         witness: &[Vec<u8>],
-        state: Option<&DelegationChallengeState>,
+        state: &DelegationChallengeState,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state
-            .ok_or_else(|| ClauseError::Other("defend needs the challenge state".to_string()))?;
         let mut w = WitnessReader::new(witness);
         w.skip(4)?; // resume, pe_taptree, unwind_taptree, r
         let ingrid_pk = w.xonly()?;
         Ok(vec![
             ClauseOutput::pay_key(0, ingrid_pk),
             ClauseOutput::burn(1),
-            ClauseOutput::at(2)
-                .to(PendingExit::new(p.clone())?.as_erased())
-                .with_state(&state.ctx.resume_state)
-                .preserve_amount()
-                .build(),
+            PendingExit::new(p.clone())?.output(2, state.ctx.resume_state.clone()),
         ])
     }
 
@@ -191,28 +184,28 @@ impl DelegationChallenge {
         // Output 0: the challenger's bond back plus half of Ingrid's.
         // TODO(OP_AMOUNT): enforce that output 0 carries `bond + bond / 2`.
         s.ccv(
-            Source::None,
-            0,
-            Source::Item("challenger_pk"),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Item("challenger_pk"),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 1: the other half of Ingrid's bond is burned.
         // TODO(OP_AMOUNT): enforce that output 1 carries `bond - bond / 2`.
         s.ccv(
-            Source::None,
-            1,
-            Source::Const(mattrs::nums_key().serialize()),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(1).expect("valid output index"),
+            CcvKey::Const(mattrs::nums_key()),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 2 reverts the pool to the pre-claim root.
         s.ccv(
-            Source::Item("r"),
-            2,
-            Source::None,
-            Source::Item("unwind_taptree"),
-            0,
+            CcvData::Item("r"),
+            CcvIndex::at(2).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Item("unwind_taptree"),
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -220,11 +213,8 @@ impl DelegationChallenge {
     fn challenger_wins_outputs(
         p: &PoolParams,
         witness: &[Vec<u8>],
-        state: Option<&DelegationChallengeState>,
+        state: &DelegationChallengeState,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("challenger_wins needs the challenge state".to_string())
-        })?;
         let mut w = WitnessReader::new(witness);
         w.skip(6)?; // all STATE_ITEMS up to challenger_pk
         let challenger_pk = w.xonly()?;
@@ -232,13 +222,12 @@ impl DelegationChallenge {
         Ok(vec![
             ClauseOutput::pay_key(0, challenger_pk),
             ClauseOutput::burn(1),
-            ClauseOutput::at(2)
-                .to(Unwind::new(p.clone())?.as_erased())
-                .with_state(&UnwindState {
+            Unwind::new(p.clone())?.output(
+                2,
+                UnwindState {
                     root: state.ctx.resume_state.r,
-                })
-                .preserve_amount()
-                .build(),
+                },
+            ),
         ])
     }
 }
@@ -246,7 +235,6 @@ impl DelegationChallenge {
 impl DelegationChallengeHandle {
     fn challenge_state(&self) -> DelegationChallengeState {
         self.state()
-            .expect("DelegationChallenge instances carry their state")
     }
 
     /// Ingrid reveals the challenged user's delegation signature. The caller

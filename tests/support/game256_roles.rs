@@ -120,10 +120,7 @@ pub fn alice_game_role() -> Role<AliceGameData, GameOutcome> {
     Role::new()
         .on::<G256S0, _>(|_d: &mut AliceGameData, _h: G256S0Handle, _cx| Ok(Action::Wait))
         .on::<G256S1, _>(|d, h: G256S1Handle, _cx| {
-            let x = h
-                .state()
-                .ok_or_else(|| ProtocolError::Other("S1 carries Bob's chosen input".into()))?
-                .x;
+            let x = h.state().x;
             let vals = (d.claim)(x);
             let n = vals.len() - 1;
             fill_fraud_data(&mut d.fraud, &vals);
@@ -137,7 +134,7 @@ pub fn alice_game_role() -> Role<AliceGameData, GameOutcome> {
         .on::<G256S2, _>(|d, h: G256S2Handle, _cx| {
             let builder = h
                 .withdraw()
-                .outputs(pot(h.handle(), &d.fraud.payout)?)
+                .outputs(pot(h.handle(), &d.fraud.payout))
                 .sign(HotSigner::new(d.xpriv));
             Ok(Action::wait_or_send_final(
                 FORFAIT_TIMEOUT,
@@ -162,9 +159,7 @@ pub fn bob_game_role() -> Role<BobGameData, GameOutcome> {
         })
         .on::<G256S1, _>(|_d, _h: G256S1Handle, _cx| Ok(Action::Wait))
         .on::<G256S2, _>(|d, h: G256S2Handle, _cx| {
-            let s = h
-                .state()
-                .ok_or_else(|| ProtocolError::Other("S2 carries Alice's claim".into()))?;
+            let s = h.state();
             let n = d.vals.len() - 1;
             if s.y == d.vals[n] {
                 // Alice's claim checks out: nothing to dispute.

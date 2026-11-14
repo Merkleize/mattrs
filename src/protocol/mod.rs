@@ -27,7 +27,6 @@
 //! future extension — say an `Action::SendWith(primary, companions)` driving
 //! [`spend_batch`](crate::manager::ContractManager::spend_batch).
 
-pub mod chain;
 mod runner;
 
 use std::any::TypeId;
@@ -35,11 +34,11 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::contracts::WitnessError;
-use crate::manager::{
-    InstanceHandle, ManagerError, MissingStateError, SpendBuilder, WrongContractType,
-};
+use crate::manager::{InstanceHandle, ManagerError, SpendBuilder, WrongContractType};
 
-pub use chain::{ChainView, LocalChain, RpcChain};
+#[cfg(feature = "rpc")]
+pub use crate::chain::RpcChain;
+pub use crate::chain::{ChainError, ChainView, LocalChain};
 pub use runner::{Progress, Runner, RunnerState};
 
 /// Bridge from a `contract!`-generated contract type to its typed handle and
@@ -158,6 +157,25 @@ impl<O> Action<O> {
         }
     }
 
+    /// [`wait_or_send`](Action::wait_or_send) with the deadline read from the
+    /// fallback's own clause: the delay it declares with `timelock`. Prefer
+    /// this whenever the clause declares one, so the role cannot repeat (and
+    /// drift from) a number the contract already states. Errors if the clause
+    /// declares no timelock.
+    pub fn wait_or(builder: SpendBuilder) -> Result<Self, ProtocolError> {
+        Ok(Self::wait_or_send(clause_delay(&builder)?, builder))
+    }
+
+    /// [`wait_or`](Action::wait_or) for a terminal fallback: broadcast the
+    /// spend and resolve with `outcome`.
+    pub fn wait_or_final(builder: SpendBuilder, outcome: O) -> Result<Self, ProtocolError> {
+        Ok(Self::wait_or_send_final(
+            clause_delay(&builder)?,
+            builder,
+            outcome,
+        ))
+    }
+
     /// [`wait_or_send`](Action::wait_or_send) for a terminal fallback:
     /// broadcast the spend and resolve with `outcome`.
     pub fn wait_or_send_final(blocks: u32, builder: SpendBuilder, outcome: O) -> Self {
@@ -166,6 +184,17 @@ impl<O> Action<O> {
             on_timeout: TimeoutAction::SendFinal(builder.sequence(blocks), outcome),
         }
     }
+}
+
+/// The CSV delay a timeout fallback's clause declares.
+fn clause_delay(builder: &SpendBuilder) -> Result<u32, ProtocolError> {
+    builder.csv_blocks().ok_or_else(|| {
+        ProtocolError::Other(
+            "the fallback's clause declares no `timelock`; give the deadline explicitly \
+             with `wait_or_send`"
+                .to_string(),
+        )
+    })
 }
 
 /// How the protocol token got to the state a handler runs at.
@@ -185,12 +214,12 @@ pub struct StepCtx<'a> {
 pub enum ProtocolError {
     /// An underlying manager operation failed.
     Manager(ManagerError),
+    /// A chain operation (broadcast, spend lookup, height) failed.
+    Chain(ChainError),
     /// Decoding witness data or contract parameters failed.
     Witness(WitnessError),
     /// A handler ran against an instance of the wrong contract type.
     WrongContract(WrongContractType),
-    /// A typed spend needed instance state that is not there.
-    MissingState(MissingStateError),
     /// The token reached a contract this role neither handles nor ignores.
     NoHandler {
         /// The name of the unhandled contract.
@@ -211,9 +240,9 @@ impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProtocolError::Manager(e) => write!(f, "manager error: {}", e),
+            ProtocolError::Chain(e) => write!(f, "chain error: {}", e),
             ProtocolError::Witness(e) => write!(f, "witness error: {}", e),
             ProtocolError::WrongContract(e) => write!(f, "{}", e),
-            ProtocolError::MissingState(e) => write!(f, "{}", e),
             ProtocolError::NoHandler { contract } => {
                 write!(f, "the role has no handler for contract `{}`", contract)
             }
@@ -232,6 +261,12 @@ impl From<ManagerError> for ProtocolError {
     }
 }
 
+impl From<ChainError> for ProtocolError {
+    fn from(e: ChainError) -> Self {
+        ProtocolError::Chain(e)
+    }
+}
+
 impl From<WitnessError> for ProtocolError {
     fn from(e: WitnessError) -> Self {
         ProtocolError::Witness(e)
@@ -241,12 +276,6 @@ impl From<WitnessError> for ProtocolError {
 impl From<WrongContractType> for ProtocolError {
     fn from(e: WrongContractType) -> Self {
         ProtocolError::WrongContract(e)
-    }
-}
-
-impl From<MissingStateError> for ProtocolError {
-    fn from(e: MissingStateError) -> Self {
-        ProtocolError::MissingState(e)
     }
 }
 
@@ -489,9 +518,9 @@ mod tests {
     use super::*;
     use crate::testutil::fund_fake;
     use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, Txid};
-    use mattrs_derive::{ContractParams, contract};
+    use mattrs_derive::contract;
 
-    #[derive(Debug, Clone, ContractParams)]
+    #[derive(Debug, Clone)]
     pub struct PairParams {
         pub tag: i64,
     }
@@ -553,19 +582,19 @@ mod tests {
     /// A chain that answers nothing (handlers under test never reach it).
     struct NoChain;
     impl ChainView for NoChain {
-        fn broadcast(&self, _tx: &Transaction) -> Result<(), ProtocolError> {
-            Err(ProtocolError::Other("no chain".into()))
+        fn broadcast(&self, _tx: &Transaction) -> Result<(), ChainError> {
+            Err(ChainError::Other("no chain".into()))
         }
-        fn find_spending_tx(
-            &self,
-            _outpoint: OutPoint,
-        ) -> Result<Option<Transaction>, ProtocolError> {
+        fn find_spending_tx(&self, _outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
             Ok(None)
         }
-        fn height(&self) -> Result<u32, ProtocolError> {
+        fn transaction(&self, _txid: Txid) -> Result<Option<Transaction>, ChainError> {
+            Ok(None)
+        }
+        fn height(&self) -> Result<u32, ChainError> {
             Ok(0)
         }
-        fn confirmation_height(&self, _txid: Txid) -> Result<Option<u32>, ProtocolError> {
+        fn confirmation_height(&self, _txid: Txid) -> Result<Option<u32>, ChainError> {
             Ok(None)
         }
     }
@@ -582,13 +611,22 @@ mod tests {
     fn typed_handles_use_nominal_identity() {
         let a = fund_fake(
             KeyA::new(PairParams { tag: 42 }).unwrap().as_erased(),
-            None,
+            (),
             Amount::from_sat(1000),
             1,
         );
         assert_eq!(ContractKey::of_handle(&a), KeyA::kind());
         let typed: KeyAHandle = a.clone().try_into().expect("same contract");
         assert_eq!(typed.params().tag, 42);
+        // Params are read back by type, never by reinterpreting their bytes: a
+        // different struct with the very same layout is not this contract's.
+        #[derive(Debug, Clone)]
+        struct TwinParams {
+            #[allow(dead_code)]
+            tag: i64,
+        }
+        assert!(a.params::<PairParams>().is_some());
+        assert!(a.params::<TwinParams>().is_none());
         // A different contract with the same erased primitive must not convert.
         assert!(KeyBHandle::try_from(a).is_err());
 
@@ -596,7 +634,7 @@ mod tests {
             first::SameName::new(PairParams { tag: 7 })
                 .unwrap()
                 .as_erased(),
-            None,
+            (),
             Amount::from_sat(1000),
             2,
         );
@@ -629,7 +667,7 @@ mod tests {
 
         let b = fund_fake(
             KeyB::new(PairParams { tag: 0 }).unwrap().as_erased(),
-            None,
+            (),
             Amount::from_sat(1000),
             2,
         );

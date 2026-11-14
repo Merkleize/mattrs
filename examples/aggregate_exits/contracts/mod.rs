@@ -1,5 +1,9 @@
 //! Aggregate exits: optimistic aggregated withdrawals from a shared UTXO.
 //!
+//! Incomplete regtest experiment: payouts, bonds, and burns lack exact amount
+//! enforcement. A valid account can over-withdraw other users' funds. The
+//! scenarios assume honest transaction amounts; see `../SPEC.md` for the gaps.
+//!
 //! Implements the protocol sketched in `../aggregate_exits.md` (see `../SPEC.md`
 //! for the concrete specification). A pooled UTXO in its *unwind* phase commits
 //! to a vector of `(pubkey, balance)` accounts as a Merkle root. Users may exit
@@ -29,7 +33,7 @@
 //!   challenge transaction, so bonds join the pot via a batched spend.
 //!
 //! Every pool-chain clause is *permissionless*: reveals are data-bound to the
-//! upfront trace commitments and every output is covenant-fixed, so no sighash
+//! upfront trace commitments and output programs are covenant-fixed, so no sighash
 //! signature is needed anywhere in the chain. The only signatures are bond
 //! owners spending their own money and the off-chain delegation signatures
 //! verified with OP_CHECKSIGFROMSTACK.
@@ -60,7 +64,6 @@ use bitcoin::hashes::{Hash, sha256};
 use bitcoin::key::{Keypair, Secp256k1};
 use bitcoin::secp256k1::Message;
 use bitcoin_script::{define_pushable, script};
-use mattrs::ContractParams;
 use mattrs::contracts::{ClauseError, WitnessError};
 use mattrs::fraud::trace;
 use mattrs::merkle::{MerkleProof, MerkleTree, NIL, ceil_lg};
@@ -73,7 +76,7 @@ define_pushable!();
 // ============================================================================
 
 /// The pool's immutable parameters, shared by every contract in the chain.
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct PoolParams {
     /// Identifies this pool in delegation messages (domain separation), e.g. a
     /// hash of the pool's genesis. Random in the demo.
@@ -91,6 +94,13 @@ pub struct PoolParams {
 }
 
 impl PoolParams {
+    /// Validate both delays before constructing any nested dispute contracts.
+    pub fn validate_timelocks(&self) -> Result<(), mattrs::contracts::ContractError> {
+        mattrs::BlockDelay::new(self.challenge_period)?;
+        mattrs::BlockDelay::new(self.response_timeout)?;
+        Ok(())
+    }
+
     /// The padded account-tree size: `n_users` rounded up to a power of two
     /// (minimum 2, so there is always a tree).
     pub fn padded_size(&self) -> usize {

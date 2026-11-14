@@ -1,7 +1,7 @@
 //! CheckTemplateVerify (CTV) utilities implementing BIP-119.
 
 use bitcoin::{
-    Address, Amount, Sequence, TxOut,
+    Address, Amount, Sequence, Transaction, TxOut,
     consensus::encode::serialize,
     hashes::{Hash, sha256},
 };
@@ -15,7 +15,7 @@ use bitcoin::{
 /// For standard CTV usage in clauses, we use simplified parameters:
 /// - nVersion: 2
 /// - nLockTime: 0
-/// - scriptSig_hash: 0 (all empty)
+/// - scriptSig_hash: omitted (all empty)
 /// - num_inputs: 1
 /// - nIn: 0 (the only input)
 ///
@@ -63,6 +63,39 @@ pub fn compute_ctv_hash(outputs: &[TxOut], sequence: Sequence) -> [u8; 32] {
     *hash.as_byte_array()
 }
 
+/// Compute the BIP-119 default template hash of an actual transaction.
+///
+/// Unlike [`compute_ctv_hash`], this includes the transaction's actual version,
+/// locktime, all inputs' sequences, and serialized scriptSigs when any is
+/// nonempty. Prevouts and witnesses are not committed. `input_index` is hashed
+/// as supplied; callers validating a spend must use its actual input index.
+///
+/// See the [BIP-119 specification](https://github.com/bitcoin/bips/blob/master/bip-0119.mediawiki).
+pub fn compute_ctv_hash_for_tx(tx: &Transaction, input_index: u32) -> [u8; 32] {
+    let mut data = serialize(&tx.version);
+    data.extend_from_slice(&serialize(&tx.lock_time));
+    if tx.input.iter().any(|input| !input.script_sig.is_empty()) {
+        let scripts: Vec<u8> = tx
+            .input
+            .iter()
+            .flat_map(|input| serialize(&input.script_sig))
+            .collect();
+        data.extend_from_slice(sha256::Hash::hash(&scripts).as_byte_array());
+    }
+    data.extend_from_slice(&(tx.input.len() as u32).to_le_bytes());
+    let sequences: Vec<u8> = tx
+        .input
+        .iter()
+        .flat_map(|input| serialize(&input.sequence))
+        .collect();
+    data.extend_from_slice(sha256::Hash::hash(&sequences).as_byte_array());
+    data.extend_from_slice(&(tx.output.len() as u32).to_le_bytes());
+    let outputs: Vec<u8> = tx.output.iter().flat_map(serialize).collect();
+    data.extend_from_slice(sha256::Hash::hash(&outputs).as_byte_array());
+    data.extend_from_slice(&input_index.to_le_bytes());
+    sha256::Hash::hash(&data).to_byte_array()
+}
+
 /// Create a CTV template from a list of addresses and amounts.
 ///
 /// This is a convenience function for building a
@@ -89,6 +122,55 @@ mod tests {
     use super::*;
     use bitcoin::Address;
     use std::str::FromStr;
+
+    #[test]
+    fn bip119_reference_vectors() {
+        // Two vectors (with and without scriptSigs) from the BIP's published
+        // reference vectors. Includes all supplied input indices, even indices
+        // outside the transaction: this function hashes, not validates, nIn.
+        // https://github.com/bitcoin/bips/blob/master/bip-0119/vectors/ctvhash.json
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/data/ctvhash.json")).unwrap();
+        for vector in vectors.as_array().unwrap() {
+            let tx: Transaction = bitcoin::consensus::deserialize(
+                &hex::decode(vector["hex_tx"].as_str().unwrap()).unwrap(),
+            )
+            .unwrap();
+            for (index, expected) in vector["spend_index"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(vector["result"].as_array().unwrap())
+            {
+                assert_eq!(
+                    hex::encode(compute_ctv_hash_for_tx(&tx, index.as_u64().unwrap() as u32)),
+                    expected.as_str().unwrap(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn simple_and_full_transaction_hashes_agree() {
+        let mut tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                sequence: Sequence(10),
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1234),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        };
+        let expected = compute_ctv_hash(&tx.output, Sequence(10));
+        assert_eq!(compute_ctv_hash_for_tx(&tx, 0), expected);
+        // CTV does not commit to witness data or previous outpoints.
+        tx.input[0].previous_output.vout = 42;
+        tx.input[0].witness.push([1, 2, 3]);
+        assert_eq!(compute_ctv_hash_for_tx(&tx, 0), expected);
+    }
 
     #[test]
     fn test_ctv_hash_computation() {

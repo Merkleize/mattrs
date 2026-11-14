@@ -181,8 +181,8 @@ fn test_ram_write_commits_updated_root() {
     // (MerkleProofType), reads the cells from the instance's expanded state, updates
     // cell 2, and commits the new Merkle root to the output. Builds locally, no RPC.
     use bitcoin::Amount;
-    use mattrs::manager::ContractManager;
-    use support::testkit::{fund_fake, offline_client, try_handle};
+
+    use support::testkit::{fund_fake, try_handle};
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
     let ram = Ram::new(RamParams { size: 4 }).unwrap();
@@ -192,15 +192,12 @@ fn test_ram_write_commits_updated_root() {
     let committed = MerkleTree::new(leaves.clone()).root();
     let handle = try_handle::<RamHandle>(fund_fake(
         ram.as_erased(),
-        Some(Box::new(RamState {
+        RamState {
             leaves: leaves.clone(),
-        })),
+        },
         100_000,
         0,
     ));
-
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // Prove cell 2 and write a new value into it.
     let tree = MerkleTree::new(leaves.clone());
@@ -209,7 +206,7 @@ fn test_ram_write_commits_updated_root() {
 
     let tx = handle
         .write(proof, new_value, committed)
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
 
     // The single output commits the updated Merkle root, preserving the amount.
@@ -218,7 +215,7 @@ fn test_ram_write_commits_updated_root() {
     let new_root = MerkleTree::new(updated).root();
     let expected = ram
         .as_erased()
-        .script_pubkey(Some(new_root.as_slice()))
+        .script_pubkey(&mattrs::StateCommitment::identity(new_root.to_vec()))
         .unwrap();
 
     assert_eq!(tx.output.len(), 1);
@@ -280,7 +277,9 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     let proof: WitProof<2> = new_tree.prove_leaf(2)?.to_wit_proof()?;
 
     use bitcoincore_rpc::RpcApi;
-    let dest = manager.rpc().get_new_address(None, None)?.assume_checked();
+    let dest = regtest_client("testwallet")
+        .get_new_address(None, None)?
+        .assume_checked();
     child
         .withdraw(proof, new_tree.root())
         .outputs(vec![bitcoin::TxOut {

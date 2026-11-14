@@ -4,10 +4,7 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::define_pushable;
 use mattrs::ContractState;
 use mattrs::contract;
-use mattrs::contracts::{
-    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
-    WitnessReader,
-};
+use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
 use mattrs::script_utils::{bn2vch, commit_int};
 
@@ -17,7 +14,8 @@ use super::unwind::{Unwind, UnwindState};
 use super::{
     ChallengeContext, ExitClaim, PoolParams, PoolTree, dual_proof_layer, spec, spec_num, step_h,
 };
-use mattrs::stack::{Source, StackScript};
+use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
+use mattrs::stack::StackScript;
 
 define_pushable!();
 
@@ -71,7 +69,8 @@ impl PendingExitState {
     /// dispute needs to resume this claim.
     pub fn hash(&self) -> [u8; 32] {
         use mattrs::contracts::ContractState;
-        self.encode()
+        self.commitment()
+            .as_bytes()
             .try_into()
             .expect("merkle commitment is 32 bytes")
     }
@@ -104,6 +103,7 @@ contract! {
     /// period — each retry costs another challenger half their bond).
     contract PendingExit {
         params PoolParams;
+        validate PoolParams::validate_timelocks;
         state PendingExitState;
 
         // witness: <unwind_taptree> <r> <r_prime> <s_root> <ingrid_pk> <trace_i> <x>
@@ -128,7 +128,7 @@ contract! {
         // witness: <state...> <pe_taptree> <challenger_pk> <user_pk> <bal>
         //          (<sib_r_l> <sib_s_l> <d_l>) x depth
         clause challenge_delegation {
-            args raw |p| PendingExit::challenge_delegation_specs(p);
+            args raw PendingExit::challenge_delegation_specs;
             script PendingExit::challenge_delegation_script;
             next(p, a, s) {
                 PendingExit::challenge_delegation_outputs(p, &a.0, s)
@@ -153,11 +153,11 @@ impl PendingExit {
     }
 
     /// Reveal the state leaves on `s`, commit them as `as_name`, and verify
-    /// against the input. `taptree` is `Source::Current` when the clause may
+    /// against the input. `taptree` is `CcvTaptree::Current` when the clause may
     /// rely on the input's own taptree, or the witness `pe_taptree` when the
     /// clause must bind a copy of it for downstream use. Leaves the seven
     /// witness items (and `as_name`) tracked.
-    fn reveal_state(s: &mut StackScript, as_name: &str, taptree: Source) {
+    fn reveal_state(s: &mut StackScript, as_name: &str, taptree: CcvTaptree<'_>) {
         s.pick("x");
         s.sha256_top("x_leaf");
         s.merkle_of(
@@ -173,35 +173,35 @@ impl PendingExit {
             as_name,
         );
         s.ccv(
-            Source::Item(as_name),
-            -1,
-            Source::None,
+            CcvData::Item(as_name),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
             taptree,
-            CCV_FLAG_CHECK_INPUT,
+            CcvMode::CheckInput,
         );
     }
 
     fn finalize_script(_p: &PoolParams) -> ScriptBuf {
         let mut s = StackScript::from_specs(&Self::state_specs());
-        Self::reveal_state(&mut s, "state", Source::Current);
+        Self::reveal_state(&mut s, "state", CcvTaptree::Current);
 
         // Output 0 pays Ingrid.
         // TODO(OP_AMOUNT): enforce that output 0 carries exactly `x + bond`
         // sats — the claimed aggregate plus Ingrid's returned bond.
         s.ccv(
-            Source::None,
-            0,
-            Source::Item("ingrid_pk"),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Item("ingrid_pk"),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
         // Output 1 continues the pool at the claimed post-exit root.
         s.ccv(
-            Source::Item("r_prime"),
-            1,
-            Source::None,
-            Source::Item("unwind_taptree"),
-            0,
+            CcvData::Item("r_prime"),
+            CcvIndex::at(1).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Item("unwind_taptree"),
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -217,11 +217,7 @@ impl PendingExit {
         let ingrid_pk = w.xonly()?;
         Ok(vec![
             ClauseOutput::pay_key(0, ingrid_pk),
-            ClauseOutput::at(1)
-                .to(Unwind::new(p.clone())?.as_erased())
-                .with_state(&UnwindState { root: r_prime })
-                .preserve_amount()
-                .build(),
+            Unwind::new(p.clone())?.output(1, UnwindState { root: r_prime }),
         ])
     }
 
@@ -236,12 +232,14 @@ impl PendingExit {
         specs
     }
 
-    fn challenge_state_script(p: &PoolParams) -> ScriptBuf {
+    fn challenge_state_script(
+        p: &PoolParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
         let mut s = StackScript::from_specs(&Self::challenge_state_specs());
 
         // Verify the state against the input, binding the witness copy of our
         // own taptree (needed downstream to resume this claim).
-        Self::reveal_state(&mut s, "resume", Source::Item("pe_taptree"));
+        Self::reveal_state(&mut s, "resume", CcvTaptree::Item("pe_taptree"));
 
         // The bisection endpoints: h_start = H(r || bn2vch(0)) = H(r), and
         // Ingrid's claimed end H(r_prime || bn2vch(x)); the challenger commits
@@ -259,27 +257,22 @@ impl PendingExit {
         // Output 0 is the bisection game over the full step range.
         // TODO(OP_AMOUNT): enforce that output 0 carries the pot plus the
         // challenger's bond (`p.bond` sats on top of the input amount).
-        let b1_root = ExitBisect1::new(BisectRangeParams::entry(p))
-            .expect("ExitBisect1 contract definition is valid")
-            .taptree_root();
+        let b1_root = ExitBisect1::new(BisectRangeParams::entry(p))?.taptree_root();
         s.ccv(
-            Source::Item("b1_state"),
-            0,
-            Source::None,
-            Source::Const(b1_root),
-            0,
+            CcvData::Item("b1_state"),
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Const(b1_root),
+            CcvMode::Preserve,
         );
-        s.into_script()
+        Ok(s.into_script())
     }
 
     fn challenge_state_outputs(
         p: &PoolParams,
         witness: &[Vec<u8>],
-        state: Option<&PendingExitState>,
+        state: &PendingExitState,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("challenge_state needs the claim state".to_string())
-        })?;
         let mut w = WitnessReader::new(witness);
         w.skip(7)?; // the state fields; `state` already carries them decoded
         let ctx = ChallengeContext {
@@ -297,11 +290,7 @@ impl PendingExit {
         };
         w.expect_end()?;
         Ok(vec![
-            ClauseOutput::at(0)
-                .to(ExitBisect1::new(BisectRangeParams::entry(p))?.as_erased())
-                .with_state(&b1_state)
-                .preserve_amount()
-                .build(),
+            ExitBisect1::new(BisectRangeParams::entry(p))?.output(0, b1_state),
         ])
     }
 
@@ -321,11 +310,13 @@ impl PendingExit {
         specs
     }
 
-    fn challenge_delegation_script(p: &PoolParams) -> ScriptBuf {
+    fn challenge_delegation_script(
+        p: &PoolParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
         let depth = p.depth();
         let mut s = StackScript::from_specs(&Self::challenge_delegation_specs(p));
 
-        Self::reveal_state(&mut s, "resume", Source::Item("pe_taptree"));
+        Self::reveal_state(&mut s, "resume", CcvTaptree::Item("pe_taptree"));
 
         // One shared-direction walk proves that the challenged slot holds
         // `(user_pk, bal)` in the pool root *and* that its exit bit is set.
@@ -354,27 +345,22 @@ impl PendingExit {
         );
         // TODO(OP_AMOUNT): enforce that output 0 carries the pot plus the
         // challenger's bond (`p.bond` sats on top of the input amount).
-        let dc_root = DelegationChallenge::new(p.clone())
-            .expect("DelegationChallenge contract definition is valid")
-            .taptree_root();
+        let dc_root = DelegationChallenge::new(p.clone())?.taptree_root();
         s.ccv(
-            Source::Item("dc_state"),
-            0,
-            Source::None,
-            Source::Const(dc_root),
-            0,
+            CcvData::Item("dc_state"),
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Const(dc_root),
+            CcvMode::Preserve,
         );
-        s.into_script()
+        Ok(s.into_script())
     }
 
     fn challenge_delegation_outputs(
         p: &PoolParams,
         witness: &[Vec<u8>],
-        state: Option<&PendingExitState>,
+        state: &PendingExitState,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state = state.ok_or_else(|| {
-            ClauseError::Other("challenge_delegation needs the claim state".to_string())
-        })?;
         let mut w = WitnessReader::new(witness);
         w.skip(7)?; // the state fields; `state` already carries them decoded
         let pe_taptree = w.bytes32()?;
@@ -389,11 +375,7 @@ impl PendingExit {
             },
         };
         Ok(vec![
-            ClauseOutput::at(0)
-                .to(DelegationChallenge::new(p.clone())?.as_erased())
-                .with_state(&dc_state)
-                .preserve_amount()
-                .build(),
+            DelegationChallenge::new(p.clone())?.output(0, dc_state),
         ])
     }
 }
@@ -401,7 +383,6 @@ impl PendingExit {
 impl PendingExitHandle {
     fn claim_state(&self) -> PendingExitState {
         self.state()
-            .expect("PendingExit instances carry their claim state")
     }
 
     /// Settle the matured claim: output 0 pays Ingrid, output 1 continues the

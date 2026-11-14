@@ -1,5 +1,8 @@
 //! Aggregate exits demo: optimistic aggregated withdrawals from a shared UTXO.
 //!
+//! Incomplete regtest experiment: missing amount checks permit over-withdrawal
+//! and omitted bonds. See SPEC.md; this demo does not enforce pool safety.
+//!
 //! Runs the protocol of `aggregate_exits.md` (concrete spec in `SPEC.md`) on a
 //! MATT-enabled regtest node, one scenario per execution path:
 //!
@@ -15,8 +18,8 @@
 //! `delegation-defend` (Ingrid reveals the CHECKSIGFROMSTACK delegation),
 //! `delegation-timeout` (she cannot, and the withdrawal reverts).
 //!
-//! Needs a regtest `bitcoind` with OP_CHECKCONTRACTVERIFY (and ideally
-//! OP_CHECKSIGFROMSTACK) and a funded `testwallet`; see the repo README. Auth
+//! Needs a regtest `bitcoind` enforcing OP_CAT, OP_CHECKCONTRACTVERIFY and
+//! OP_CHECKSIGFROMSTACK, and a funded `testwallet`; see the repo README. Auth
 //! follows `regtest_rpc_client` (`BITCOIN_RPC_URL`/`_USER`/`_PASSWORD` or the
 //! regtest cookie).
 
@@ -81,7 +84,7 @@ impl Stage {
                 short(&xonly(&user_xpriv(i)).serialize())
             );
         }
-        println!("  Unwind funded at {}", unwind.handle().outpoint().unwrap());
+        println!("  Unwind funded at {}", unwind.handle().outpoint());
 
         Ok(Stage {
             manager,
@@ -201,7 +204,7 @@ fn scenario_direct(wallet: &str) -> DemoResult {
     let mut after = stage.pool.clone();
     after.zero(2);
     let next: UnwindHandle = children.typed(1)?;
-    assert_eq!(next.state().unwrap().root, after.root());
+    assert_eq!(next.state().root, after.root());
     println!(
         "  user 2 takes {} sats; the pool continues with {} sats at root {}",
         BALANCES[2],
@@ -216,7 +219,7 @@ fn scenario_direct(wallet: &str) -> DemoResult {
         .exec(&mut stage.manager)?;
     after.zero(5);
     let next: UnwindHandle = children.typed(1)?;
-    assert_eq!(next.state().unwrap().root, after.root());
+    assert_eq!(next.state().root, after.root());
     println!(
         "  user 5 takes {} sats; the pool continues with {} sats",
         BALANCES[5],
@@ -237,7 +240,7 @@ fn scenario_happy(wallet: &str) -> DemoResult {
         .output_amount(0, Amount::from_sat((claim.x + BOND) as u64))
         .exec(&mut stage.manager)?;
     let continued: UnwindHandle = children.typed(1)?;
-    assert_eq!(continued.state().unwrap().root, claim.r_prime);
+    assert_eq!(continued.state().root, claim.r_prime);
     println!(
         "  Ingrid takes {} sats (aggregate {} + bond {}); the pool continues with {} sats at R' {}",
         claim.x + BOND,
@@ -271,7 +274,7 @@ fn scenario_fraud(wallet: &str) -> DemoResult {
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
     let reverted: UnwindHandle = children.typed(2)?;
-    assert_eq!(reverted.state().unwrap().root, stage.pool.root());
+    assert_eq!(reverted.state().root, stage.pool.root());
     println!(
         "  step 4 re-run on-chain: Ingrid lied. The challenger takes {} sats (their bond back + half of Ingrid's), {} sats are burned,",
         BOND + BOND / 2,
@@ -302,7 +305,7 @@ fn scenario_false_challenge(wallet: &str) -> DemoResult {
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
     let resumed: PendingExitHandle = children.typed(2)?;
-    assert_eq!(resumed.state().unwrap(), claim_state);
+    assert_eq!(resumed.state(), claim_state);
     println!(
         "  step 2 re-run on-chain: the claim was honest. Ingrid pockets {} sats of the challenger's bond, {} are burned,",
         BOND / 2,
@@ -350,7 +353,7 @@ fn scenario_delegation_defend(wallet: &str) -> DemoResult {
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
     let resumed: PendingExitHandle = children.typed(2)?;
-    assert_eq!(resumed.state().unwrap(), claim_state);
+    assert_eq!(resumed.state(), claim_state);
     println!(
         "  Ingrid reveals user 2's delegation signature (verified with OP_CHECKSIGFROMSTACK):"
     );
@@ -396,7 +399,7 @@ fn scenario_delegation_timeout(wallet: &str) -> DemoResult {
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut stage.manager)?;
     let reverted: UnwindHandle = children.typed(2)?;
-    assert_eq!(reverted.state().unwrap().root, stage.pool.root());
+    assert_eq!(reverted.state().root, stage.pool.root());
     println!(
         "  user 3 collects {} sats (their bond back + half of Ingrid's), {} sats are burned,",
         BOND + BOND / 2,
@@ -420,6 +423,9 @@ const SCENARIOS: [(&str, Scenario); 6] = [
 ];
 
 fn main() {
+    eprintln!(
+        "Incomplete regtest experiment: amount checks are missing; over-withdrawal and omitted bonds are possible. See examples/aggregate_exits/SPEC.md."
+    );
     let scenario_names = SCENARIOS.map(|(n, _)| n).join("|");
     let args: Vec<String> = std::env::args().collect();
     let mut wallet = "testwallet".to_string();

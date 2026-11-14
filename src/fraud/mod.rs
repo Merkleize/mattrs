@@ -49,24 +49,22 @@ pub mod roles;
 
 use std::sync::Arc;
 
+use crate::ccv::CcvIndex;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 
 use crate::Signature;
 use crate::argtypes::{BytesType, SignerType};
-use crate::contracts::{
-    ArgSpec, ClauseError, ClauseOutput, ContractParams as ContractParamsTrait, ParamEncodable,
-    WitnessError,
-};
-pub use crate::manager::MissingStateError;
+use crate::contracts::ContractError;
+use crate::contracts::{ArgSpec, ClauseError, ClauseOutput};
 use crate::manager::SpendBuilder;
 use crate::merkle::is_power_of_2;
 use crate::script_helpers::{
     check_input_contract, check_output_contract, concat, drop as script_drop, dup, merkle_root,
     timeout_sig_script,
 };
-use mattrs_derive::{ContractParams, ContractState, contract};
+use mattrs_derive::{ContractState, contract};
 
 define_pushable!();
 
@@ -86,6 +84,8 @@ pub enum FraudError {
     TraceRangeNotPowerOfTwo { i: usize, j: usize },
     /// A forfait must require at least one confirmation block.
     ZeroForfaitTimeout,
+    /// A non-zero timeout is not a representable CSV block duration.
+    InvalidForfaitTimeout(u32),
 }
 
 impl std::fmt::Display for FraudError {
@@ -103,6 +103,9 @@ impl std::fmt::Display for FraudError {
                 write!(f, "trace range [{i}, {j}] does not have power-of-two size")
             }
             Self::ZeroForfaitTimeout => write!(f, "forfait timeout must be at least one block"),
+            Self::InvalidForfaitTimeout(blocks) => {
+                write!(f, "forfait timeout exceeds 65535 blocks: {blocks}")
+            }
         }
     }
 }
@@ -130,7 +133,7 @@ pub struct Computer {
 
 /// Produces the [`Leaf`] contract adjudicating step `i`. Most computations use
 /// the same leaf for every step and ignore the index.
-pub type LeafFactory = Arc<dyn Fn(i64) -> Leaf + Send + Sync>;
+pub type LeafFactory = Arc<dyn Fn(i64) -> Result<Leaf, ContractError> + Send + Sync>;
 
 /// The construction context of the `Bisect` contracts: everything they need
 /// beyond their (encodable) [`BisectParams`].
@@ -148,6 +151,8 @@ impl BisectCtx {
         if forfait_timeout == 0 {
             return Err(FraudError::ZeroForfaitTimeout);
         }
+        crate::BlockDelay::new(forfait_timeout)
+            .map_err(|_| FraudError::InvalidForfaitTimeout(forfait_timeout))?;
         Ok(Self {
             leaf_factory,
             forfait_timeout,
@@ -160,7 +165,7 @@ impl BisectCtx {
     }
 
     /// Build the leaf contract adjudicating `step`.
-    pub fn leaf(&self, step: i64) -> Leaf {
+    pub fn leaf(&self, step: i64) -> Result<Leaf, ContractError> {
         (self.leaf_factory)(step)
     }
 }
@@ -208,7 +213,7 @@ pub fn trace(hs: &[[u8; 32]], i: usize, j: usize) -> Result<[u8; 32], FraudError
 // ============================================================================
 
 /// The two parties of a [`Leaf`] adjudication.
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct LeafParams {
     pub alice_pk: XOnlyPublicKey,
     pub bob_pk: XOnlyPublicKey,
@@ -263,7 +268,7 @@ impl Leaf {
     fn reveal_specs(pk: XOnlyPublicKey, computer: &Computer, other_hash: &str) -> Vec<ArgSpec> {
         let mut specs = vec![ArgSpec {
             name: "sig".to_string(),
-            arg_type: Arc::new(SignerType::new(pk.serialize())),
+            arg_type: Arc::new(SignerType::new(pk)),
         }];
         specs.extend(computer.specs.iter().cloned());
         specs.push(ArgSpec {
@@ -290,7 +295,7 @@ impl Leaf {
             computer.encoder.clone(), // h_y
             reorder,
             merkle_root(3),
-            check_input_contract(-1, None),
+            check_input_contract(CcvIndex::CURRENT, None),
             script! { { pk } OP_CHECKSIG },
         ])
     }
@@ -300,14 +305,14 @@ impl LeafHandle {
     /// Alice re-runs the disputed step, revealing the step value `x` (its
     /// witness elements, one per [`Computer`] spec). The counterparty's claimed
     /// ending commitment comes from the instance state.
-    pub fn alice_reveal(&self, x: Vec<Vec<u8>>) -> Result<SpendBuilder, MissingStateError> {
+    pub fn alice_reveal(&self, x: Vec<Vec<u8>>) -> SpendBuilder {
         self.reveal("alice_reveal", x, |s| s.h_end_bob)
     }
 
     /// Bob re-runs the disputed step, revealing the step value `x` (its witness
     /// elements, one per [`Computer`] spec). The counterparty's claimed ending
     /// commitment comes from the instance state.
-    pub fn bob_reveal(&self, x: Vec<Vec<u8>>) -> Result<SpendBuilder, MissingStateError> {
+    pub fn bob_reveal(&self, x: Vec<Vec<u8>>) -> SpendBuilder {
         self.reveal("bob_reveal", x, |s| s.h_end_alice)
     }
 
@@ -316,13 +321,13 @@ impl LeafHandle {
         clause: &'static str,
         x: Vec<Vec<u8>>,
         other_hash: fn(&LeafState) -> [u8; 32],
-    ) -> Result<SpendBuilder, MissingStateError> {
-        let state = self.state().ok_or(MissingStateError { contract: "Leaf" })?;
+    ) -> SpendBuilder {
+        let state = self.state();
         // The signature element stays empty; the manager fills it at spend time.
         let mut witness = vec![Vec::new()];
         witness.extend(x);
         witness.push(other_hash(&state).to_vec());
-        Ok(self.0.spend_clause(clause, witness))
+        self.0.spend_clause(clause, witness)
     }
 }
 
@@ -381,61 +386,6 @@ impl BisectParams {
     /// Whether the two children are single steps (Leaves) rather than sub-Bisects.
     pub fn children_are_leaves(&self) -> bool {
         self.m() == 1
-    }
-}
-
-// The derived codec handles framing; the public wrapper validates decoded
-// ranges before they can re-enter contract construction.
-#[derive(Debug, Clone, ContractParams)]
-struct EncodedBisectParams {
-    alice_pk: XOnlyPublicKey,
-    bob_pk: XOnlyPublicKey,
-    i: i64,
-    j: i64,
-}
-
-impl From<&BisectParams> for EncodedBisectParams {
-    fn from(params: &BisectParams) -> Self {
-        Self {
-            alice_pk: params.alice_pk,
-            bob_pk: params.bob_pk,
-            i: params.i,
-            j: params.j,
-        }
-    }
-}
-
-impl TryFrom<EncodedBisectParams> for BisectParams {
-    type Error = FraudError;
-
-    fn try_from(params: EncodedBisectParams) -> Result<Self, Self::Error> {
-        Self::new(params.alice_pk, params.bob_pk, params.i, params.j)
-    }
-}
-
-impl ParamEncodable for BisectParams {
-    fn encode_param(&self) -> Vec<Vec<u8>> {
-        ParamEncodable::encode_param(&EncodedBisectParams::from(self))
-    }
-
-    fn decode_param(elements: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
-        let (params, consumed) = EncodedBisectParams::decode_param(elements)?;
-        let params = params
-            .try_into()
-            .map_err(|error: FraudError| WitnessError::InvalidValue(error.to_string()))?;
-        Ok((params, consumed))
-    }
-}
-
-impl ContractParamsTrait for BisectParams {
-    fn encode(&self) -> Vec<u8> {
-        ContractParamsTrait::encode(&EncodedBisectParams::from(self))
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
-        EncodedBisectParams::decode(bytes)?
-            .try_into()
-            .map_err(|error: FraudError| WitnessError::InvalidValue(error.to_string()))
     }
 }
 
@@ -503,18 +453,12 @@ contract! {
                 trace_left_a: [u8; 32],
                 trace_right_a: [u8; 32],
             }
-            script |p, c| Bisect1::alice_reveal_script(
-                p.alice_pk,
-                Bisect2::new(p.clone(), c.clone())
-                    .expect("Bisect2 contract definition is valid")
-                    .taptree_root(),
-            );
+            script |p, c| {
+                let bisect2 = Bisect2::new(p.clone(), c.clone())?;
+                Ok(Bisect1::alice_reveal_script(p.alice_pk, bisect2.taptree_root()))
+            };
             next(p, a) {
-                Ok(vec![ClauseOutput::at_same_index()
-                    .to(Bisect2::new(p.clone(), ctx.clone())?.as_erased())
-                    .with_state(&Bisect2State::from(a))
-                    .preserve_amount()
-                    .build()])
+                Ok(vec![Bisect2::new(p.clone(), ctx.clone())?.output(CcvIndex::CURRENT, Bisect2State::from(a))])
             }
         }
 
@@ -535,11 +479,11 @@ impl Bisect1 {
     /// Script fragment handing a spend off into this bisection: consumes the
     /// five entry-state leaves from the stack (`h_start`, `h_end_alice`,
     /// `h_end_bob`, `trace_alice`, `trace_bob`, with `trace_bob` on top) and
-    /// verifies that output `index` (`-1` = same as the input) pays this
+    /// verifies that output `index` ([`CcvIndex::CURRENT`] = same as the input) pays this
     /// [`Bisect1`] committing to them. The `next`-side counterpart is
     /// [`entry_output`](Bisect1::entry_output); embedding contracts use the
     /// pair without knowing the bisection state's layout.
-    pub fn state_output_script(&self, index: i64) -> ScriptBuf {
+    pub fn state_output_script(&self, index: CcvIndex) -> ScriptBuf {
         concat(&[
             merkle_root(5),
             check_output_contract(self.taptree_root(), index, None),
@@ -557,17 +501,16 @@ impl Bisect1 {
         trace_alice: [u8; 32],
         trace_bob: [u8; 32],
     ) -> ClauseOutput {
-        ClauseOutput::at_same_index()
-            .to(self.as_erased())
-            .with_state(&Bisect1State {
+        self.output(
+            CcvIndex::CURRENT,
+            Bisect1State {
                 h_start,
                 h_end_a: h_end_alice,
                 h_end_b: h_end_bob,
                 trace_a: trace_alice,
                 trace_b: trace_bob,
-            })
-            .preserve_amount()
-            .build()
+            },
+        )
     }
 
     // witness: <alice_sig> <h_start> <h_end_a> <h_end_b> <trace_a> <trace_b>
@@ -577,14 +520,14 @@ impl Bisect1 {
             OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
             { dup(5) }
             { merkle_root(5) }
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
             OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
             // t_{i,j;a} = H(h_i || h_{j+1;a} || t_left_a || t_right_a)
             7 OP_PICK 7 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
             5 OP_PICK OP_EQUALVERIFY
             // output: the top 8 elements -> Bisect_2
             { merkle_root(8) }
-            { check_output_contract(bisect2_root, -1, None) }
+            { check_output_contract(bisect2_root, CcvIndex::CURRENT, None) }
             { alice_pk }
             OP_CHECKSIG
         }
@@ -634,12 +577,14 @@ contract! {
                 trace_left_b: [u8; 32],
                 trace_right_b: [u8; 32],
             }
-            script |p, c| Bisect2::bob_reveal_script(
-                p.bob_pk,
-                p.children_are_leaves(),
-                Side::Left,
-                Bisect2::child_root(p, Side::Left, c),
-            );
+            script |p, c| {
+                Ok(Bisect2::bob_reveal_script(
+                    p.bob_pk,
+                    p.children_are_leaves(),
+                    Side::Left,
+                    Bisect2::child_root(p, Side::Left, c)?,
+                ))
+            };
             next(p, a) {
                 Bisect2::child_output(
                     p, ctx, Side::Left,
@@ -666,12 +611,14 @@ contract! {
                 trace_left_b: [u8; 32],
                 trace_right_b: [u8; 32],
             }
-            script |p, c| Bisect2::bob_reveal_script(
-                p.bob_pk,
-                p.children_are_leaves(),
-                Side::Right,
-                Bisect2::child_root(p, Side::Right, c),
-            );
+            script |p, c| {
+                Ok(Bisect2::bob_reveal_script(
+                    p.bob_pk,
+                    p.children_are_leaves(),
+                    Side::Right,
+                    Bisect2::child_root(p, Side::Right, c)?,
+                ))
+            };
             next(p, a) {
                 Bisect2::child_output(
                     p, ctx, Side::Right,
@@ -713,13 +660,15 @@ impl Bisect2 {
 
     /// The taptree root committed for `side`'s child (a [`Leaf`] at a single
     /// step, else a sub-[`Bisect1`]).
-    fn child_root(params: &BisectParams, side: Side, ctx: &BisectCtx) -> [u8; 32] {
-        match Self::child_range(params, side) {
-            ChildRange::Leaf(step) => ctx.leaf(step).taptree_root(),
-            ChildRange::Bisect(child) => Bisect1::new(child, ctx.clone())
-                .expect("Bisect1 contract definition is valid")
-                .taptree_root(),
-        }
+    fn child_root(
+        params: &BisectParams,
+        side: Side,
+        ctx: &BisectCtx,
+    ) -> Result<[u8; 32], ContractError> {
+        Ok(match Self::child_range(params, side) {
+            ChildRange::Leaf(step) => ctx.leaf(step)?.taptree_root(),
+            ChildRange::Bisect(child) => Bisect1::new(child, ctx.clone())?.taptree_root(),
+        })
     }
 
     /// The single output a `bob_reveal_*` clause produces: the dispute
@@ -738,7 +687,7 @@ impl Bisect2 {
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let output = match Self::child_range(params, side) {
             ChildRange::Leaf(step) => ClauseOutput::at_same_index()
-                .to(ctx.leaf(step).as_erased())
+                .to(ctx.leaf(step)?.as_erased())
                 .with_state(&LeafState {
                     h_start,
                     h_end_alice,
@@ -790,7 +739,7 @@ impl Bisect2 {
             OP_TOALTSTACK OP_TOALTSTACK OP_TOALTSTACK
             { dup(8) }
             { merkle_root(8) }
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
             OP_FROMALTSTACK OP_FROMALTSTACK OP_FROMALTSTACK
             // t_{i,j;b} = H(h_i || h_{j+1;b} || t_left_b || t_right_b)
             10 OP_PICK 9 OP_PICK OP_CAT 2 OP_PICK OP_CAT 1 OP_PICK OP_CAT OP_SHA256
@@ -799,7 +748,7 @@ impl Bisect2 {
             { mid_check }
             { picks }
             { encoder }
-            { check_output_contract(child_root, -1, None) }
+            { check_output_contract(child_root, CcvIndex::CURRENT, None) }
             { script_drop(11) }
             { bob_pk }
             OP_CHECKSIG
@@ -853,24 +802,22 @@ mod tests {
     }
 
     #[test]
-    fn decoded_bisect_ranges_are_validated() {
-        let key = crate::nums_key();
-        let invalid = EncodedBisectParams {
-            alice_pk: key,
-            bob_pk: key,
-            i: 0,
-            j: 2,
-        };
-        let bytes = ContractParamsTrait::encode(&invalid);
-        assert!(BisectParams::decode(&bytes).is_err());
-    }
-
-    #[test]
     fn zero_forfait_timeout_is_rejected() {
         let factory: LeafFactory = Arc::new(|_| panic!("factory is not called"));
         assert!(matches!(
             BisectCtx::new(factory, 0),
             Err(FraudError::ZeroForfaitTimeout)
         ));
+    }
+
+    #[test]
+    fn oversized_forfait_timeouts_are_rejected() {
+        for blocks in [65_536, 1 << 22, 1 << 31, u32::MAX] {
+            let factory: LeafFactory = Arc::new(|_| panic!("factory is not called"));
+            assert!(matches!(
+                BisectCtx::new(factory, blocks),
+                Err(FraudError::InvalidForfaitTimeout(_))
+            ));
+        }
     }
 }

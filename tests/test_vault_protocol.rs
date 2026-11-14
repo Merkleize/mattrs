@@ -18,14 +18,12 @@ use std::time::Duration;
 use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{Action, LocalChain, Progress, ProtocolError, Role, RpcChain, Runner};
+use mattrs::protocol::{Action, LocalChain, Progress, ProtocolError, Role, Runner};
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
 use mattrs::testutil::fund_fake;
 
-use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, drive_both, offline_manager, regtest_client,
-};
+use support::testkit::{alice_pk, alice_xpriv, bob_pk, drive_both, manager_on, regtest_client};
 use support::vault::{Unvaulting, Vault, VaultHandle, VaultParams};
 use support::vault_roles::{
     OwnerData, TriggerStep, VaultOutcome, WatchtowerData, owner_role, watchtower_role,
@@ -47,7 +45,7 @@ fn params() -> VaultParams {
 fn fake_vault(seed: u8) -> mattrs::manager::InstanceHandle {
     fund_fake(
         Vault::new(params()).unwrap().as_erased(),
-        None,
+        (),
         Amount::from_sat(AMOUNT),
         seed,
     )
@@ -59,6 +57,20 @@ fn withdrawal(amount: Amount) -> Vec<TxOut> {
         script_pubkey: opaque_p2tr(alice_pk()),
         value: amount,
     }]
+}
+
+/// Step until every live token is waiting. One `Progress::Waiting` only says
+/// the token just stepped is waiting; which token that is depends on the order
+/// a fork's children are queued in, so wait for a full quiet round instead.
+fn step_until_all_wait<D: 'static, O: 'static>(runner: &mut Runner<D, O>) {
+    let mut quiet = 0;
+    while quiet < runner.tokens().len() {
+        match runner.step().expect("the runner steps") {
+            Progress::Advanced => quiet = 0,
+            Progress::Waiting => quiet += 1,
+            Progress::Done(_) => panic!("nothing can resolve before the CSV delay"),
+        }
+    }
 }
 
 #[test]
@@ -81,8 +93,7 @@ fn revault_forks_and_both_branches_withdraw() {
     ];
     let entry = fake_vault(SEED);
     let mut owner = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         owner_role(),
         OwnerData::new(alice_xpriv(), plan),
         entry.clone(),
@@ -91,13 +102,7 @@ fn revault_forks_and_both_branches_withdraw() {
     // The runner triggers both plan steps by itself: the first spend forks the
     // token (Unvaulting + revaulted Vault), the Vault child re-arrives and
     // triggers again. It then sits waiting out two CSV delays.
-    loop {
-        match owner.step().expect("owner steps") {
-            Progress::Advanced => continue,
-            Progress::Waiting => break,
-            Progress::Done(_) => panic!("nothing can resolve before the CSV delay"),
-        }
-    }
+    step_until_all_wait(&mut owner);
     assert_eq!(owner.tokens().len(), 2, "the trigger_and_revault forked");
     assert!(owner.current().is_none(), "several tokens in flight");
 
@@ -159,14 +164,13 @@ fn identical_templates_on_both_branches_withdraw() {
         },
     ];
     let mut owner = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         owner_role(),
         OwnerData::new(alice_xpriv(), plan),
         fake_vault(SEED),
     );
 
-    while let Progress::Advanced = owner.step().expect("owner steps") {}
+    step_until_all_wait(&mut owner);
     assert_eq!(owner.tokens().len(), 2, "the trigger_and_revault forked");
 
     chain.mine(SPEND_DELAY + 1);
@@ -188,8 +192,7 @@ fn watchtower_recovers_an_unauthorized_unvaulting() {
     // The owner's key is compromised: the thief triggers a withdrawal whose
     // CTV hash the watchtower was never told about.
     let mut thief = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         owner_role(),
         OwnerData::new(
             alice_xpriv(),
@@ -202,8 +205,7 @@ fn watchtower_recovers_an_unauthorized_unvaulting() {
     );
     let tower_entry = fake_vault(SEED);
     let mut tower = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         watchtower_role(),
         WatchtowerData {
             authorized: HashSet::new(),
@@ -239,8 +241,7 @@ fn watchtower_keeps_watching_the_revaulted_branch() {
     // The thief splits the vault, stealing the larger branch (and leaving the
     // revaulted remainder alone — for now).
     let mut thief = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         owner_role(),
         OwnerData::new(
             alice_xpriv(),
@@ -252,8 +253,7 @@ fn watchtower_keeps_watching_the_revaulted_branch() {
         fake_vault(SEED),
     );
     let mut tower = Runner::new(
-        offline_manager(),
-        chain.clone(),
+        manager_on(chain.clone()),
         watchtower_role(),
         WatchtowerData {
             authorized: HashSet::new(),
@@ -318,8 +318,7 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
 
     // Handling Vault but not Unvaulting: the spend's child is a loud error...
     let mut runner = Runner::new(
-        offline_manager(),
-        Rc::new(LocalChain::new()),
+        manager_on(Rc::new(LocalChain::new())),
         trigger_only(),
         OwnerData::new(alice_xpriv(), plan()),
         fake_vault(SEED),
@@ -335,8 +334,7 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
     // ...unless the role explicitly ignores it: then every branch of the spend
     // is somebody else's business and the token resolves silently.
     let mut runner = Runner::new(
-        offline_manager(),
-        Rc::new(LocalChain::new()),
+        manager_on(Rc::new(LocalChain::new())),
         trigger_only().ignore::<Unvaulting>(),
         OwnerData::new(alice_xpriv(), plan()),
         fake_vault(SEED),
@@ -370,7 +368,6 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let mut owner = Runner::new(
         manager,
-        Rc::new(RpcChain::new(regtest_client("testwallet"))),
         owner_role(),
         OwnerData::new(alice_xpriv(), plan),
         entry.clone(),
@@ -415,4 +412,39 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(unvaulting.clause_name().as_deref(), Some("withdraw"));
     }
     Ok(())
+}
+
+/// `Action::wait_or` reads its deadline from the fallback's own clause.
+#[test]
+fn timeout_deadline_comes_from_the_clause_timelock() {
+    let unvaulting = Unvaulting::new(mattrs_unvaulting_params()).unwrap();
+    let state = support::vault::UnvaultingState { ctv_hash: [1; 32] };
+    let handle: support::vault::UnvaultingHandle = fund_fake(
+        unvaulting.as_erased(),
+        state,
+        Amount::from_sat(AMOUNT),
+        SEED,
+    )
+    .try_into()
+    .unwrap();
+
+    // `withdraw` declares `timelock |p| p.spend_delay`.
+    assert_eq!(handle.withdraw().csv_blocks(), Some(SPEND_DELAY));
+    match Action::<()>::wait_or(handle.withdraw()).unwrap() {
+        Action::WaitWithTimeout { blocks, .. } => assert_eq!(blocks, SPEND_DELAY),
+        _ => panic!("a timeout action"),
+    }
+
+    // `recover` declares none, so there is no deadline to read.
+    assert_eq!(handle.recover(0).csv_blocks(), None);
+    assert!(Action::<()>::wait_or(handle.recover(0)).is_err());
+}
+
+fn mattrs_unvaulting_params() -> support::vault::UnvaultingParams {
+    let p = params();
+    support::vault::UnvaultingParams {
+        alternate_pk: p.alternate_pk,
+        spend_delay: p.spend_delay,
+        recover_pk: p.recover_pk,
+    }
 }

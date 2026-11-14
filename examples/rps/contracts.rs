@@ -10,8 +10,9 @@
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{ClauseOutput, CtvTemplate};
-use mattrs::{ContractParams, ContractState, Signature, contract, script_utils::commit_int};
+use mattrs::ccv::CcvIndex;
+use mattrs::contracts::CtvTemplate;
+use mattrs::{ContractState, Signature, contract, script_utils::commit_int};
 
 use mattrs::script_helpers::{check_input_contract, check_output_contract, key_path_p2tr};
 
@@ -20,7 +21,7 @@ define_pushable!();
 /// The default stake (in sats) each player bets.
 pub const DEFAULT_STAKE: i64 = 1000;
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct RpsParams {
     pub alice_pk: XOnlyPublicKey,
     pub bob_pk: XOnlyPublicKey,
@@ -31,6 +32,7 @@ pub struct RpsParams {
 
 /// The committed state of `RpsGameS1`: `sha256(bn(m_b))`.
 #[derive(Debug, Clone, ContractState)]
+#[commit(identity)]
 pub struct RpsGameS1State {
     pub commitment: [u8; 32],
 }
@@ -69,11 +71,7 @@ contract! {
             next(p, a) {
                 let s1 = RpsGameS1::new(p.clone())?;
                 let state = RpsGameS1State { commitment: move_commitment(a.m_b) };
-                Ok(vec![ClauseOutput::at(0)
-                    .to(s1.as_erased())
-                    .with_state(&state)
-                    .preserve_amount()
-                    .build()])
+                Ok(vec![s1.output(0, state)])
             }
         }
 
@@ -82,11 +80,9 @@ contract! {
 }
 
 impl RpsGameS0 {
-    fn bob_move_script(p: &RpsParams) -> ScriptBuf {
-        let s1_taptree_root = RpsGameS1::new(p.clone())
-            .expect("RpsGameS1 contract definition is valid")
-            .taptree_root();
-        script! {
+    fn bob_move_script(p: &RpsParams) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let s1_taptree_root = RpsGameS1::new(p.clone())?.taptree_root();
+        Ok(script! {
             // check Bob's signature, leaving <m_b> on top
             { p.bob_pk }
             OP_CHECKSIG
@@ -98,8 +94,8 @@ impl RpsGameS0 {
 
             // commit sha256(m_b) into the next contract's state (output 0)
             OP_SHA256
-            { check_output_contract(s1_taptree_root, 0, None) }
-        }
+            { check_output_contract(s1_taptree_root, CcvIndex::at(0).expect("valid output index"), None) }
+        })
     }
 }
 
@@ -186,7 +182,7 @@ impl RpsGameS1 {
             // commit sha256(m_b) as the current input's state
             OP_DUP
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
 
             // compute (m_b - m_a) mod 3, add 3 if negative
             OP_FROMALTSTACK

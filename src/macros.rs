@@ -24,14 +24,14 @@
 /// or more entries is a compile error, not an implicit shape.
 ///
 /// The resulting `ClauseTree` is the single source of truth handed to
-/// `StandardP2TR::new` / `StandardAugmentedP2TR::new`, which derive both the
+/// `StandardP2TR::new`, which derives both the
 /// address-bearing script taptree and the spend-time clause lookup from it.
 ///
 /// ```ignore
 /// // trigger
 /// //   \_ [trigger_and_revault, recover]
 /// let tree = clause_tree![trigger, [trigger_and_revault, recover]];
-/// let contract = StandardP2TR::new(internal_key, tree);
+/// let contract = StandardP2TR::new("Vault", internal_key, &params, tree)?;
 /// ```
 #[macro_export]
 macro_rules! clause_tree {
@@ -89,8 +89,8 @@ macro_rules! clause_tree {
 /// *expanded* state type: the on-chain commitment is the Merkle root of the
 /// type's `leaves()` (a method returning the 32-byte leaves in order, as an
 /// array or `Vec`), and — as with the RAM example's cell vector — the expanded
-/// data cannot be recovered from the root, so `decode` always fails (children
-/// are materialized via `with_state` instead; see
+/// data cannot be recovered from the root. No serialization codec is generated
+/// (children are materialized via `with_state` instead; see
 /// [`ErasedState`](crate::contracts::ErasedState)).
 ///
 /// ```ignore
@@ -105,17 +105,12 @@ macro_rules! clause_tree {
 macro_rules! opaque_merkle_state {
     ($ty:ty) => {
         impl $crate::contracts::ContractState for $ty {
-            fn encode(&self) -> Vec<u8> {
-                $crate::merkle::MerkleTree::new(self.leaves().to_vec())
-                    .root()
-                    .to_vec()
-            }
-
-            fn decode(_bytes: &[u8]) -> Result<Self, $crate::contracts::WitnessError> {
-                Err($crate::contracts::WitnessError::DecodingFailed(format!(
-                    "{} is committed as an opaque Merkle root",
-                    stringify!($ty)
-                )))
+            fn commitment(&self) -> $crate::contracts::StateCommitment {
+                $crate::contracts::StateCommitment::identity(
+                    $crate::merkle::MerkleTree::new(self.leaves().to_vec())
+                        .root()
+                        .to_vec(),
+                )
             }
         }
     };
@@ -126,7 +121,7 @@ mod tests {
     use std::sync::Arc;
 
     use bitcoin::ScriptBuf;
-    use mattrs_derive::{ContractParams, contract};
+    use mattrs_derive::contract;
 
     use crate::contracts::{ClauseTree, ErasedClause, RawArgs, StandardClause};
 
@@ -191,7 +186,7 @@ mod tests {
     // the same four leaf scripts and differ only in tree shape, so shape alone
     // decides whether the taproot roots match.
 
-    #[derive(Debug, Clone, ContractParams)]
+    #[derive(Debug, Clone)]
     pub struct TreeParams {
         pub tag: i64,
     }
@@ -216,6 +211,32 @@ mod tests {
             clause d { args { x: i64, } script |_p| ScriptBuf::from(vec![0x54u8]); }
             tree [a, [b, [c, d]]];
         }
+    }
+
+    // Clause names that match the macro's own bindings must not shadow them:
+    // every later clause still needs the real `params`, and the tree its
+    // clauses. (`internal_key` and `tree` are also DSL section keywords.)
+    contract! {
+        contract ShadowingNames {
+            params TreeParams;
+            clause internal_key { args { x: i64, } script |_p| ScriptBuf::from(vec![0x51u8]); }
+            clause tree { args { x: i64, } script |p| ScriptBuf::from(vec![0x52u8, p.tag as u8]); }
+            clause last { args { x: i64, } script |p| ScriptBuf::from(vec![0x53u8, p.tag as u8]); }
+            tree [internal_key, [tree, last]];
+        }
+    }
+
+    #[test]
+    fn clause_names_do_not_shadow_macro_bindings() {
+        let contract = ShadowingNames::new(TreeParams { tag: 7 }).unwrap();
+        let names: Vec<_> = contract
+            .contract()
+            .taptree()
+            .leaves()
+            .iter()
+            .map(|leaf| leaf.name.clone())
+            .collect();
+        assert_eq!(names, ["internal_key", "tree", "last"]);
     }
 
     #[test]

@@ -14,7 +14,8 @@
 //!
 //! # Defining a contract
 //!
-//! - Declare params/state structs and derive [`macro@ContractParams`] /
+//! - Declare a params struct (any `Debug + Clone + Send + Sync` type) and,
+//!   for a stateful contract, a state struct deriving
 //!   [`macro@ContractState`] (re-exported here from `mattrs-derive`).
 //! - Write one [`macro@contract`]`! { .. }` block: it generates the per-clause
 //!   `*Args` structs, the clause tree, the contract struct (`new`/`fund`/
@@ -49,33 +50,39 @@ extern crate self as mattrs;
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 
-/// Derive macros, re-exported so users can `use mattrs::{ContractParams, ..}`.
-pub use mattrs_derive::{ClauseArgs, ContractParams, ContractState};
+/// Derive macros, re-exported so users can `use mattrs::{ContractState, ..}`.
+pub use mattrs_derive::{ClauseArgs, ContractState};
 
 /// The `contract!` DSL macro, re-exported so users can `use mattrs::contract`.
 pub use mattrs_derive::contract;
 
 /// A signature witness element, re-exported for use in clause `*Args` structs.
 pub use contracts::Signature;
+pub use contracts::{StateCodec, StateCommitment};
 
 pub mod argtypes;
+pub mod ccv;
+pub mod chain;
 pub mod contracts;
 pub mod ctv;
 pub mod fraud;
 #[cfg(feature = "inspector")]
 pub mod inspector;
-pub mod key_payout;
 #[macro_use]
 pub mod macros;
 pub mod manager;
 pub mod merkle;
 pub mod protocol;
+#[cfg(any(test, feature = "test-util"))]
 pub mod report;
 pub mod script_helpers;
 pub mod script_utils;
 pub mod signer;
 pub mod stack;
+#[cfg(any(test, feature = "test-util"))]
 pub mod testutil;
+pub mod timelock;
+pub use timelock::BlockDelay;
 
 /// NUMS ("nothing-up-my-sleeve") x-only public key, used as a taproot internal key
 /// when a contract has no key-spend path.

@@ -10,16 +10,30 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
+default = ["rpc"]
+# A node backend over Bitcoin Core's RPC interface (`mattrs::chain::RpcChain`,
+# `ContractManager::new`). Without it the crate has no network dependency:
+# use `LocalChain` or your own `ChainView`.
+rpc = ["dep:bitcoincore-rpc", "dep:serde_json"]
 # Live-inspection support: a TCP server pushing JSON manager snapshots on every
 # state change (see `mattrs::inspector` and the `mattrs-inspector` TUI client).
-inspector = ["dep:serde"]
+inspector = ["dep:serde", "dep:serde_json", "dep:hex"]
+# Helpers for tests and demos, not for production code: fake-funded instances
+# and offline batch application (`mattrs::testutil`), and markdown transaction
+# reports (`mattrs::report`).
+test-util = []
 
 [dependencies]
-bitcoin = "0.32.2"
-bitcoincore-rpc = "0.19.0"
+bitcoin = { version = "0.32.2", features = ["rand-std"] }
+bitcoincore-rpc = { version = "0.19.0", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-serde_json = "1"
+serde_json = { version = "1", optional = true }
 bitcoin-script = { path = "./bitcoin-script"}
 mattrs-derive = { path = "./mattrs-derive" }
+hex = { version = "0.4", optional = true }
+
+[dev-dependencies]
+# The crate's own tests and examples use the test utilities.
+mattrs = { path = ".", features = ["test-util"] }
+serde_json = "1"
 hex = "0.4"

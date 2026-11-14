@@ -6,6 +6,11 @@ UTXO, where users too small to exit alone delegate to an intermediary
 ("Ingrid") who withdraws their aggregate balance optimistically — bonded,
 challenge-gated, and backed by two kinds of fraud proof.
 
+This is an incomplete protocol experiment for regtest. Its amount invariants
+are not enforced: a valid account can withdraw other users' funds, bonds can
+be omitted, and settlement payouts and burns can be chosen incorrectly. The
+honest scenarios demonstrate the intended flow, not pool safety.
+
 Script requirements: standard opcodes plus `OP_CAT`,
 `OP_CHECKCONTRACTVERIFY` (CCV) and `OP_CHECKSIGFROMSTACK` (CSFS, BIP 348,
 `0xcc`). Exact output *amounts* cannot be introspected today; every such check
@@ -103,10 +108,19 @@ clause checks a sighash signature at all:
   (`ExitBond`, plain `OP_CHECKSIG`) and the off-chain delegation signatures
   (CSFS).
 
-Documented consequence: until OP_AMOUNT exists, the deduct-amount outputs are
-chosen by the broadcaster, and a challenge transaction could in principle be
-front-run with a swapped reward key. Neither breaks the protocol's safety goal
-(a fraudulent claim still fails; the pool funds still return to the covenant).
+Until the missing amount constraints are implemented, the deduct outputs are
+chosen by the broadcaster. Membership authenticates an account's balance but
+does not limit its payout: in the 21,000-sat fixture, the account holding 1,000
+sats can receive 20,000 sats while leaving 1,000 sats in the continued pool.
+Both the proof and the residual-value check still hold. This breaks pool
+safety. Underpayment can also zero an account without paying its balance.
+Challenges can omit their bonds, so the intended costs of repeated challenges
+and the slashing incentives are not enforced either.
+
+`SpendBuilder::output_amount` selects a transaction amount; it adds no script
+constraint. Requiring the withdrawing account's signature alone would not
+prevent that account owner from over-withdrawing. The amount table below is a
+list of required enforcement work, not guarantees of the current scripts.
 
 ## Clauses
 

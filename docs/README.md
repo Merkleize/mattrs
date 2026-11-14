@@ -20,13 +20,13 @@ Each spending condition in the taptree is called a **clause**. A clause may also
 
 ## Merkleized data
 
-While the embedded data slot is a single 32-byte value, it can represent arbitrarily complex state through commitments:
+The embedded data is whatever bytes the contract's script hands to `OP_CHECKCONTRACTVERIFY`, so it can represent arbitrarily complex state through commitments. The commitment is always chosen explicitly by the contract author (`#[commit(..)]` on the state struct); it is never inferred from the value's length:
 
-| State shape | Encoding |
-|-------------|----------|
-| Single 32-byte value | Stored directly |
-| Single value of other size | SHA256 hash |
-| Multiple values | Merkle tree root of the individual (hashed) values |
+| State shape | Commitment | Declared as |
+|-------------|------------|-------------|
+| Single value the script reveals verbatim (e.g. a 32-byte hash) | The value itself | `#[commit(identity)]` |
+| Single value the script hashes before committing | SHA256 of the value | `#[commit(sha256)]` |
+| Multiple values | Merkle tree root of the individual (hashed) values | `#[commit(merkle)]` |
 
 > **Note**: Other commitment schemes are possible. For example, hashing the concatenation of individual hashes is more efficient when all values must be revealed anyway. Care is needed -- not all hash-concatenation schemes are collision-resistant.
 

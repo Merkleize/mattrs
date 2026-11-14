@@ -78,7 +78,7 @@ use bitcoin::{Amount, ScriptBuf, Sequence, TxOut};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
 use support::rps::{RpsGameS0Handle, RpsGameS1Handle, RpsGameS1State};
-use support::testkit::{bob_xpriv, fund_fake, offline_client, try_handle};
+use support::testkit::{bob_xpriv, fund_fake, try_handle};
 
 #[test]
 fn test_rps_bob_move_commits_s1_state() {
@@ -86,26 +86,25 @@ fn test_rps_bob_move_commits_s1_state() {
 
     let handle = try_handle::<RpsGameS0Handle>(fund_fake(
         RpsGameS0::new(params.clone()).unwrap().as_erased(),
-        None,
+        (),
         2000,
         0,
     ));
-
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
 
     // Bob plays paper (m_b = 1), signing with his key.
     let tx = handle
         .bob_move(1)
         .sign(HotSigner::new(bob_xpriv()))
-        .build_tx(&manager)
+        .build_tx()
         .unwrap();
 
     // Output 0 commits RpsGameS1 with state sha256(m_b), preserving the amount.
     let expected = RpsGameS1::new(params)
         .unwrap()
         .as_erased()
-        .script_pubkey(Some(move_commitment(1).as_slice()))
+        .script_pubkey(&mattrs::StateCommitment::identity(
+            move_commitment(1).to_vec(),
+        ))
         .unwrap();
     assert_eq!(tx.output[0].script_pubkey, expected);
     assert_eq!(tx.output[0].value, Amount::from_sat(2000));
@@ -118,18 +117,15 @@ fn test_rps_bob_wins_pays_out_via_ctv() {
 
     let handle = try_handle::<RpsGameS1Handle>(fund_fake(
         RpsGameS1::new(params).unwrap().as_erased(),
-        Some(Box::new(RpsGameS1State {
+        RpsGameS1State {
             commitment: move_commitment(1),
-        })),
+        },
         2000,
         0,
     ));
 
-    let client = offline_client();
-    let manager = ContractManager::new(client, bitcoin::Network::Regtest);
-
     // The bob_wins clause pays out the whole pot to Bob via a CTV template.
-    let tx = handle.bob_wins(1, 0, [0u8; 32]).build_tx(&manager).unwrap();
+    let tx = handle.bob_wins(1, 0, [0u8; 32]).build_tx().unwrap();
 
     let secp = Secp256k1::new();
     let bob_spk = ScriptBuf::new_p2tr(&secp, bob_pk, None);
@@ -171,7 +167,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .sign(HotSigner::new(bob_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
-    let state = s1.state().expect("S1 state");
+    let state = s1.state();
     assert_eq!(state.commitment, move_commitment(1));
     report_spend(
         &mut report,

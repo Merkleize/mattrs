@@ -17,13 +17,12 @@
 
 mod support;
 
-use std::rc::Rc;
 use std::time::Duration;
 
 use bitcoin::Amount;
 use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{RpcChain, Runner};
+use mattrs::protocol::Runner;
 use mattrs::report::Report;
 use mattrs::script_helpers::key_path_p2tr as p2tr;
 
@@ -51,12 +50,12 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
     let s0 = G256S0::new(params.clone())?.fund(&mut alice_manager, Amount::from_sat(AMOUNT))?;
     let alice_entry = s0.handle().clone();
-    let outpoint = alice_entry.outpoint().expect("just funded");
+    let outpoint = alice_entry.outpoint();
 
     // ...and Bob, given the outpoint out-of-band, verifies and tracks it.
     let mut bob_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let bob_entry = bob_manager.track_instance(G256S0::new(params)?.as_erased(), None, outpoint)?;
+    let bob_entry = bob_manager.track_instance(G256S0::new(params)?.as_erased(), (), outpoint)?;
 
     // The parties: Alice will cheat at step 5, Bob doubles honestly.
     let alice_data = AliceGameData {
@@ -75,20 +74,8 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
         xpriv: bob_xpriv(),
     };
 
-    let mut alice = Runner::new(
-        alice_manager,
-        Rc::new(RpcChain::new(regtest_client("testwallet"))),
-        alice_game_role(),
-        alice_data,
-        alice_entry,
-    );
-    let mut bob = Runner::new(
-        bob_manager,
-        Rc::new(RpcChain::new(regtest_client("testwallet"))),
-        bob_game_role(),
-        bob_data,
-        bob_entry.clone(),
-    );
+    let mut alice = Runner::new(alice_manager, alice_game_role(), alice_data, alice_entry);
+    let mut bob = Runner::new(bob_manager, bob_game_role(), bob_data, bob_entry.clone());
 
     // Interleave the two parties until both resolve (the happy path lives in
     // the mempool; nothing needs mining).

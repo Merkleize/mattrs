@@ -9,7 +9,7 @@
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::NextOutputs;
-use mattrs::{ContractParams, Signature, contract};
+use mattrs::{Signature, contract};
 
 use super::PoolParams;
 
@@ -18,7 +18,7 @@ define_pushable!();
 /// A bond UTXO's parameters: the pool it stakes into and its owner. The pool
 /// params ride along for self-description; only the owner key reaches the
 /// script.
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct ExitBondParams {
     pub pool: PoolParams,
     pub owner_pk: XOnlyPublicKey,
@@ -34,6 +34,7 @@ contract! {
     /// the specific pot the batch builds.
     contract ExitBond {
         params ExitBondParams;
+        validate |p| p.pool.validate_timelocks();
 
         // witness: <sig>
         clause stake {

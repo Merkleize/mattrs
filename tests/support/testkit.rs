@@ -2,7 +2,7 @@
 //!
 //! `SpendBuilder::build_tx` (and the batch `build_batch_tx`) perform no RPC, so a
 //! spend can be built and inspected offline against a fake-funded instance
-//! (`offline_client` + `fund_fake`). The `#[ignore]`d end-to-end tests use
+//! (`ContractManager::offline` + `fund_fake`). The `#[ignore]`d end-to-end tests use
 //! `regtest_client` against a real regtest `bitcoind` instead.
 
 use std::str::FromStr;
@@ -12,7 +12,7 @@ use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
-use mattrs::contracts::{ErasedContract, ErasedState};
+use mattrs::contracts::{ContractState, ErasedContract};
 use mattrs::manager::InstanceHandle;
 use mattrs::report::Report;
 
@@ -48,16 +48,18 @@ pub fn bob_pk() -> XOnlyPublicKey {
     xonly_of(&bob_xpriv())
 }
 
-/// An offline RPC client. It is never actually contacted — building (as opposed to
-/// broadcasting) a spend performs no RPC.
-pub fn offline_client() -> Client {
-    mattrs::testutil::offline_client()
-}
-
-/// A manager over an [`offline_client`], for tests driving protocols on a
+/// A manager with no node behind it, for tests driving protocols on a
 /// `LocalChain`.
 pub fn offline_manager() -> mattrs::manager::ContractManager {
-    mattrs::manager::ContractManager::new(offline_client(), bitcoin::Network::Regtest)
+    mattrs::manager::ContractManager::offline(bitcoin::Network::Regtest)
+}
+
+/// A manager on `chain`, for tests driving protocols on a `LocalChain` shared
+/// between the parties.
+pub fn manager_on(
+    chain: std::rc::Rc<mattrs::chain::LocalChain>,
+) -> mattrs::manager::ContractManager {
+    mattrs::manager::ContractManager::on(chain, bitcoin::Network::Regtest)
 }
 
 /// Interleave two parties' runners — one step each per round — until both
@@ -121,11 +123,11 @@ where
 /// Thin wrapper over [`mattrs::testutil::fund_fake`] taking sats directly.
 pub fn fund_fake(
     contract: Arc<dyn ErasedContract>,
-    expanded: Option<Box<dyn ErasedState>>,
+    state: impl ContractState + 'static,
     amount: u64,
     seed: u8,
 ) -> InstanceHandle {
-    mattrs::testutil::fund_fake(contract, expanded, Amount::from_sat(amount), seed)
+    mattrs::testutil::fund_fake(contract, state, Amount::from_sat(amount), seed)
 }
 
 /// Append the transaction that spent `handle` to `report` as a collapsible

@@ -35,3 +35,24 @@ jobs:
 
       - name: Test
         run: cargo test --all-targets --all-features
+
+  # The #[ignore]d end-to-end tests, against a MATT-enabled regtest node.
+  regtest:
+    runs-on: ubuntu-24.04
+    container: bigspider/bitcoin_matt
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential
+
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install stable Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: End-to-end tests on regtest
+        run: scripts/regtest-tests.sh

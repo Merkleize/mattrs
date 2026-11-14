@@ -6,8 +6,10 @@
 //! occupies, and mark which arguments are signatures (so the manager knows which
 //! key must sign them). It mirrors the Python ArgType system from pymatt.
 
-use crate::contracts::{ArgType as ArgTypeTrait, WitnessError};
+use crate::contracts::{ArgType as ArgTypeTrait, WitnessEncodable, WitnessError};
 use crate::script_utils::vch2bn;
+use bitcoin::XOnlyPublicKey;
+use std::marker::PhantomData;
 
 /// Standard argument type for signed integers.
 ///
@@ -22,10 +24,6 @@ impl ArgTypeTrait for IntType {
         }
         vch2bn(&witness[0])?;
         Ok(1)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ArgTypeTrait> {
-        Box::new(self.clone())
     }
 }
 
@@ -42,9 +40,40 @@ impl ArgTypeTrait for BytesType {
         }
         Ok(1)
     }
+}
 
-    fn clone_boxed(&self) -> Box<dyn ArgTypeTrait> {
-        Box::new(self.clone())
+/// The argument type of any [`WitnessEncodable`] value: its layout is whatever
+/// the type's own codec consumes, so an argument's spec can never disagree
+/// with how its value is encoded. `#[derive(ClauseArgs)]` uses it for every
+/// field that is not a `#[signer(..)]` signature.
+pub struct TypedArg<T>(PhantomData<fn() -> T>);
+
+impl<T> TypedArg<T> {
+    /// The argument type of a `T`.
+    pub fn new() -> Self {
+        TypedArg(PhantomData)
+    }
+}
+
+impl<T> Default for TypedArg<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> std::fmt::Debug for TypedArg<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TypedArg<{}>", std::any::type_name::<T>())
+    }
+}
+
+impl<T: WitnessEncodable> ArgTypeTrait for TypedArg<T> {
+    fn consume(&self, witness: &[Vec<u8>]) -> Result<usize, WitnessError> {
+        T::decode_from_witness(witness).map(|(_, consumed)| consumed)
+    }
+
+    fn witness_elements(&self) -> Option<usize> {
+        T::ELEMENTS
     }
 }
 
@@ -55,32 +84,14 @@ impl ArgTypeTrait for BytesType {
 /// element may be empty until then.
 #[derive(Debug, Clone)]
 pub struct SignerType {
-    /// The x-only public key (32 bytes) for Taproot/Schnorr signatures.
-    pub pubkey: [u8; 32],
+    /// The x-only public key that must sign this argument.
+    pub pubkey: XOnlyPublicKey,
 }
 
 impl SignerType {
     /// Creates a new SignerType with the given public key.
-    pub fn new(pubkey: [u8; 32]) -> Self {
+    pub fn new(pubkey: XOnlyPublicKey) -> Self {
         SignerType { pubkey }
-    }
-
-    /// Creates a new SignerType from a slice.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the slice is not exactly 32 bytes.
-    pub fn from_slice(pubkey: &[u8]) -> Result<Self, WitnessError> {
-        if pubkey.len() != 32 {
-            return Err(WitnessError::InvalidValue(format!(
-                "SignerType requires 32-byte x-only pubkey, got {} bytes",
-                pubkey.len()
-            )));
-        }
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(pubkey);
-        Ok(SignerType { pubkey: key })
     }
 }
 
@@ -92,12 +103,8 @@ impl ArgTypeTrait for SignerType {
         Ok(1)
     }
 
-    fn signer_pubkey(&self) -> Option<[u8; 32]> {
+    fn signer_pubkey(&self) -> Option<XOnlyPublicKey> {
         Some(self.pubkey)
-    }
-
-    fn clone_boxed(&self) -> Box<dyn ArgTypeTrait> {
-        Box::new(self.clone())
     }
 }
 
@@ -142,7 +149,7 @@ mod tests {
 
     #[test]
     fn test_signer_type_consume_and_pubkey() {
-        let pubkey = [0x42; 32];
+        let pubkey = crate::nums_key();
         let signer_type = SignerType::new(pubkey);
 
         // A signature element — or the empty placeholder before signing — is one slot.

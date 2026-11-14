@@ -3,8 +3,8 @@
 //! The macro parses a small DSL describing a MATT contract — its params/state
 //! types, taproot internal key, clauses (typed args + a script-builder fn + an
 //! optional `next` outputs body), and the taptree shape — and expands it to the
-//! ordinary `mattrs` primitives (`StandardClause`, `ClauseTree`, `StandardP2TR` /
-//! `StandardAugmentedP2TR`) plus a typed handle with one spend method per clause.
+//! ordinary `mattrs` primitives (`StandardClause`, `ClauseTree`, `StandardP2TR`)
+//! plus a typed handle with one spend method per clause.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -22,14 +22,16 @@ struct ContractDef {
     attrs: Vec<Attribute>,
     name: Ident,
     params_ty: Type,
-    /// The optional `ctx <Type>;` section: non-encodable construction context
-    /// (script fragments, factories, timeouts...) passed to `new` alongside the
-    /// params. Unlike params it never round-trips through `ParamEncodable`:
-    /// scripts receive it as a second argument and `next` bodies capture a clone.
+    /// The optional `ctx <Type>;` section: construction context (script
+    /// fragments, factories, timeouts...) passed to `new` alongside the params
+    /// but kept apart from them: scripts receive it as a second argument and
+    /// `next` bodies capture a clone.
     ctx_ty: Option<Type>,
     state_ty: Option<Type>,
     /// The `internal_key |p| ..` closure; `None` defaults to the NUMS key.
     ikey: Option<(Ident, Expr)>,
+    /// Fallible validation run before constructing keys, scripts, or children.
+    validate: Option<Expr>,
     clauses: Vec<ClauseDef>,
     tree: TreeDef,
 }
@@ -103,6 +105,7 @@ impl Parse for ContractDef {
         let mut ctx_ty: Option<Type> = None;
         let mut state_ty: Option<Type> = None;
         let mut ikey: Option<(Ident, Expr)> = None;
+        let mut validate: Option<Expr> = None;
         let mut clauses: Vec<ClauseDef> = Vec::new();
         let mut tree: Option<TreeDef> = None;
 
@@ -148,6 +151,16 @@ impl Parse for ContractDef {
                 "clause" => {
                     clauses.push(parse_clause(&body)?);
                 }
+                "validate" => {
+                    if validate.is_some() {
+                        return Err(syn::Error::new(
+                            section.span(),
+                            "duplicate `validate` section",
+                        ));
+                    }
+                    validate = Some(body.parse()?);
+                    body.parse::<Token![;]>()?;
+                }
                 "tree" => {
                     if tree.is_some() {
                         return Err(syn::Error::new(section.span(), "duplicate `tree` section"));
@@ -180,6 +193,16 @@ impl Parse for ContractDef {
         let tree = tree.ok_or_else(|| syn::Error::new(name_span, "missing `tree [ .. ];`"))?;
         let mut clause_names = std::collections::HashSet::new();
         for clause in &clauses {
+            if RESERVED_CLAUSE_NAMES.contains(&clause.name.to_string().as_str()) {
+                return Err(syn::Error::new(
+                    clause.name.span(),
+                    format!(
+                        "`{}` cannot be used as a clause name: the generated handle \
+                         already has a method (or `contract!` a binding) with that name",
+                        clause.name
+                    ),
+                ));
+            }
             if !clause_names.insert(clause.name.to_string()) {
                 return Err(syn::Error::new(
                     clause.name.span(),
@@ -223,10 +246,42 @@ impl Parse for ContractDef {
             ctx_ty,
             state_ty,
             ikey,
+            validate,
             clauses,
             tree,
         })
     }
+}
+
+/// Clause names that would collide with what `contract!` generates: each typed
+/// clause becomes a method on the handle, next to these built-in ones, and
+/// `ctx` is the binding `next` and dynamic `tree` bodies read the context from.
+const RESERVED_CLAUSE_NAMES: &[&str] =
+    &["handle", "params", "state", "spent", "spent_clause", "ctx"];
+
+/// The local a clause's object is bound to inside the generated `new`. Prefixed
+/// so a clause can never shadow `params` or another internal binding.
+fn clause_local(name: &Ident) -> Ident {
+    format_ident!("__clause_{}", name)
+}
+
+/// Rewrite the clause names of a static `tree [ .. ]` into their
+/// [`clause_local`] bindings, keeping the bracket structure and spans.
+fn tree_with_clause_locals(tokens: TokenStream2) -> TokenStream2 {
+    use proc_macro2::{Group, TokenTree};
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Ident(ident) => TokenTree::Ident(clause_local(&ident)),
+            TokenTree::Group(group) => {
+                let mut rewritten =
+                    Group::new(group.delimiter(), tree_with_clause_locals(group.stream()));
+                rewritten.set_span(group.span());
+                TokenTree::Group(rewritten)
+            }
+            other => other,
+        })
+        .collect()
 }
 
 /// Check the shape and names of `tree [ .. ]`: every level holds one clause or
@@ -298,7 +353,7 @@ fn validate_tree_names(tree_tokens: &TokenStream2, clauses: &[ClauseDef]) -> syn
 }
 
 /// Rewrite the `#[signer(p.field)]` shorthand into the full closure form
-/// `#[signer(|p| p.field.serialize())]` (the params binding is taken from the
+/// `#[signer(|p| p.field)]` (the params binding is taken from the
 /// user's own expression). Closures and other expressions pass through untouched.
 fn expand_signer_shorthand(attr: &Attribute) -> syn::Result<Attribute> {
     if !attr.path().is_ident("signer") {
@@ -308,7 +363,7 @@ fn expand_signer_shorthand(attr: &Attribute) -> syn::Result<Attribute> {
     if let Expr::Field(field_access) = &expr {
         if let Expr::Path(base) = &*field_access.base {
             if let Some(param) = base.path.get_ident() {
-                let rewritten: Expr = syn::parse_quote!(|#param| #expr.serialize());
+                let rewritten: Expr = syn::parse_quote!(|#param| #expr);
                 let mut attr = attr.clone();
                 attr.meta = syn::parse_quote!(signer(#rewritten));
                 return Ok(attr);
@@ -489,7 +544,7 @@ fn closure_ident(c: &syn::ExprClosure) -> syn::Result<Ident> {
     if c.inputs.len() != 1 {
         return Err(syn::Error::new_spanned(
             c,
-            "internal_key closure must take exactly one parameter",
+            "this closure must take exactly one parameter",
         ));
     }
     match &c.inputs[0] {
@@ -499,18 +554,6 @@ fn closure_ident(c: &syn::ExprClosure) -> syn::Result<Ident> {
             "expected a simple identifier",
         )),
     }
-}
-
-fn to_camel(s: &str) -> String {
-    s.split('_')
-        .map(|part| {
-            let mut chars = part.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
-        })
-        .collect()
 }
 
 pub fn expand(input: TokenStream) -> TokenStream {
@@ -560,7 +603,7 @@ fn next_fn_tokens(
             ::core::option::Option::Some({
                 let __ctx = ctx.clone();
                 ::std::sync::Arc::new(
-                    move |#p: &#params_ty, #a: &#args_ty, #s: ::core::option::Option<&#state_ty>|
+                    move |#p: &#params_ty, #a: &#args_ty, #s: &#state_ty|
                     -> #ret {
                         #[allow(unused_variables)]
                         let ctx: &#ctx_ty = &__ctx;
@@ -571,7 +614,7 @@ fn next_fn_tokens(
         },
         None => quote! {
             ::core::option::Option::Some(::std::sync::Arc::new(
-                |#p: &#params_ty, #a: &#args_ty, #s: ::core::option::Option<&#state_ty>|
+                |#p: &#params_ty, #a: &#args_ty, #s: &#state_ty|
                 -> #ret {
                     #body
                 }
@@ -595,7 +638,10 @@ fn timelock_tokens(
         Some(expr) => {
             let blocks_call = call_builder(expr, quote! { u32 });
             (
-                quote! { let __csv_blocks: u32 = #blocks_call; },
+                quote! {
+                    let __csv_blocks: u32 = #blocks_call;
+                    let __csv_blocks = ::mattrs::BlockDelay::new(__csv_blocks)?.blocks();
+                },
                 quote! {
                     ::mattrs::script_helpers::concat(&[
                         ::mattrs::script_helpers::older(__csv_blocks),
@@ -608,7 +654,8 @@ fn timelock_tokens(
     }
 }
 
-/// `bob_reveal_left` → `BobRevealLeft`, for clause enum variants.
+/// `bob_reveal_left` → `BobRevealLeft`, for clause enum variants and `*Args`
+/// struct names.
 fn camel_case(s: &str) -> String {
     s.split('_')
         .filter(|seg| !seg.is_empty())
@@ -635,62 +682,85 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         .clone()
         .unwrap_or_else(|| syn::parse_quote!(()));
 
-    let contract_ty: TokenStream2 = if augmented {
-        quote! { ::mattrs::contracts::StandardAugmentedP2TR<#params_ty, #state_ty> }
-    } else {
-        quote! { ::mattrs::contracts::StandardP2TR<#params_ty> }
-    };
+    // A stateless contract is one whose state type is `()`.
+    let contract_ty: TokenStream2 =
+        quote! { ::mattrs::contracts::StandardP2TR<#params_ty, #state_ty> };
 
     // The taproot internal key: the user's closure, or the NUMS key by default.
     let ikey_init: TokenStream2 = match &def.ikey {
         Some((param, body)) => quote! {
-            let internal_key: ::bitcoin::XOnlyPublicKey = {
-                let #param = &params;
-                #body
-            };
+            let __internal_key: ::bitcoin::XOnlyPublicKey =
+                ::mattrs::contracts::IntoContractResult::into_contract_result({
+                    let #param = &params;
+                    #body
+                })?;
         },
         None => quote! {
-            let internal_key: ::bitcoin::XOnlyPublicKey = ::mattrs::nums_key();
+            let __internal_key: ::bitcoin::XOnlyPublicKey = ::mattrs::nums_key();
         },
     };
     // The taptree: either the static nested-bracket list handed to `clause_tree!`,
     // or a params-derived closure body evaluating to a `ClauseTree`. Both run after
     // the clause locals are emitted, so either can reference clauses by name.
     let tree_init: TokenStream2 = match &def.tree {
-        TreeDef::Static(tree_tokens) => quote! {
-            let tree = ::mattrs::clause_tree![ #tree_tokens ];
-        },
-        TreeDef::Dynamic { p, body } => quote! {
-            let tree: ::mattrs::contracts::ClauseTree = {
-                let #p = &params;
-                #body
-            };
-        },
+        TreeDef::Static(tree_tokens) => {
+            let tree_tokens = tree_with_clause_locals(tree_tokens.clone());
+            quote! {
+                let __tree = ::mattrs::clause_tree![ #tree_tokens ];
+            }
+        }
+        // The body names clauses directly, so they are rebound under their
+        // own names here, in a scope that holds nothing else of the macro's.
+        TreeDef::Dynamic { p, body } => {
+            let names = def.clauses.iter().map(|c| &c.name);
+            let locals = def.clauses.iter().map(|c| clause_local(&c.name));
+            quote! {
+                let __tree: ::mattrs::contracts::ClauseTree =
+                    ::mattrs::contracts::IntoContractResult::into_contract_result({
+                        #(
+                            #[allow(unused_variables)]
+                            let #names = ::std::clone::Clone::clone(&#locals);
+                        )*
+                        let #p = &params;
+                        #body
+                    })?;
+            }
+        }
     };
 
     // The optional construction context: an extra `new` argument whose value is
     // handed to the script/spec builder exprs and captured (cloned) by `next`
-    // closures; unlike params it never round-trips through `ParamEncodable`.
+    // closures.
     let ctx_ty = def.ctx_ty.as_ref();
-    // Invoke a script (or raw-args spec) builder expr inside `new`. The `&dyn Fn`
-    // coercion pins the expected type, so closure exprs infer their parameter
-    // types (a bare `(#expr)(&params, ..)` call would not).
+    // Invoke a script (or raw-args spec) builder expr inside `new`. Passing it
+    // to a generic helper pins the expected signature, so closure exprs infer
+    // their parameter types (a bare `(#expr)(&params, ..)` call would not), and
+    // lets the builder evaluate to either `#ret` or a `Result` of it; an error
+    // propagates out of `new`.
     let call_builder = |expr: &Expr, ret: TokenStream2| -> TokenStream2 {
         match ctx_ty {
-            Some(c) => quote! {{
-                let __f: &dyn ::core::ops::Fn(&#params_ty, &#c) -> #ret = &(#expr);
-                __f(&params, &ctx)
-            }},
-            None => quote! {{
-                let __f: &dyn ::core::ops::Fn(&#params_ty) -> #ret = &(#expr);
-                __f(&params)
-            }},
+            Some(c) => quote! {
+                ::mattrs::contracts::__call_builder_with_ctx::<#params_ty, #c, #ret, _>(
+                    #expr,
+                    &params,
+                    &ctx,
+                )?
+            },
+            None => quote! {
+                ::mattrs::contracts::__call_builder::<#params_ty, #ret, _>(#expr, &params)?
+            },
         }
     };
 
     let mut args_structs: Vec<TokenStream2> = Vec::new();
+    let validation = def.validate.as_ref().map(|expr| {
+        let call = call_builder(expr, quote! { () });
+        quote! { #call; }
+    });
     let mut clause_locals: Vec<TokenStream2> = Vec::new();
     let mut methods: Vec<TokenStream2> = Vec::new();
+    // Each clause's args type, in clause order, for the typed spend enum.
+    let mut spend_arg_tys: Vec<TokenStream2> = Vec::new();
 
     for clause in &def.clauses {
         let cname = &clause.name;
@@ -702,6 +772,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             // spend methods on the generated handle instead).
             ClauseArgsDef::Raw(specs_expr) => {
                 let raw_ty = quote! { ::mattrs::contracts::RawArgs };
+                spend_arg_tys.push(raw_ty.clone());
                 let next_fn = next_fn_tokens(clause, params_ty, &state_ty, ctx_ty, &raw_ty);
                 let script_call = call_builder(script_expr, quote! { ::bitcoin::ScriptBuf });
                 let specs_call = call_builder(
@@ -710,8 +781,9 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 );
                 let (csv_binding, script_tokens, csv_chain) =
                     timelock_tokens(clause, &call_builder, script_call);
+                let clocal = clause_local(cname);
                 clause_locals.push(quote! {
-                    let #cname: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> = {
+                    let #clocal: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> = {
                         #csv_binding
                         ::std::sync::Arc::new(
                             ::mattrs::contracts::StandardClause::<
@@ -733,7 +805,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             ClauseArgsDef::Typed(fields) => fields,
         };
 
-        let args_ident = format_ident!("{}{}Args", name, to_camel(&cname.to_string()));
+        let args_ident = format_ident!("{}{}Args", name, camel_case(&cname.to_string()));
 
         // --- The typed *Args struct (ClauseArgs is derived) ---
         let struct_fields = fields.iter().map(|f| {
@@ -752,12 +824,14 @@ fn codegen(def: ContractDef) -> TokenStream2 {
 
         // --- The clause object, built inside `Name::new` ---
         let args_ty = quote! { #args_ident };
+        spend_arg_tys.push(args_ty.clone());
         let next_fn = next_fn_tokens(clause, params_ty, &state_ty, ctx_ty, &args_ty);
         let script_call = call_builder(script_expr, quote! { ::bitcoin::ScriptBuf });
         let (csv_binding, script_tokens, csv_chain) =
             timelock_tokens(clause, &call_builder, script_call);
+        let clocal = clause_local(cname);
         clause_locals.push(quote! {
-            let #cname: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> = {
+            let #clocal: ::std::sync::Arc<dyn ::mattrs::contracts::ErasedClause> = {
                 #csv_binding
                 ::std::sync::Arc::new(
                     ::mattrs::contracts::StandardClause::<#params_ty, #state_ty, #args_ident>::new(
@@ -791,40 +865,23 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 quote! { #fname }
             }
         });
-        if fields.iter().any(|f| f.is_from_state) {
-            methods.push(quote! {
-                // A clause can have many arguments; the generated method mirrors them.
-                #[allow(clippy::too_many_arguments)]
-                pub fn #cname(
-                    &self,
-                    #(#method_params),*
-                ) -> ::core::result::Result<
-                    ::mattrs::manager::SpendBuilder,
-                    ::mattrs::manager::MissingStateError,
-                > {
-                    let __state = self.state().ok_or(::mattrs::manager::MissingStateError {
-                        contract: ::core::stringify!(#name),
-                    })?;
-                    let args = #args_ident::new(#(#ctor_args),*);
-                    ::core::result::Result::Ok(self.0.spend_clause(
-                        ::core::stringify!(#cname),
-                        <#args_ident as ::mattrs::contracts::ClauseArgs>::encode_to_witness(&args),
-                    ))
-                }
-            });
+        let state_binding = if fields.iter().any(|f| f.is_from_state) {
+            quote! { let __state = self.state(); }
         } else {
-            methods.push(quote! {
-                // A clause can have many arguments; the generated method mirrors them.
-                #[allow(clippy::too_many_arguments)]
-                pub fn #cname(&self, #(#method_params),*) -> ::mattrs::manager::SpendBuilder {
-                    let args = #args_ident::new(#(#ctor_args),*);
-                    self.0.spend_clause(
-                        ::core::stringify!(#cname),
-                        <#args_ident as ::mattrs::contracts::ClauseArgs>::encode_to_witness(&args),
-                    )
-                }
-            });
-        }
+            quote! {}
+        };
+        methods.push(quote! {
+            // A clause can have many arguments; the generated method mirrors them.
+            #[allow(clippy::too_many_arguments)]
+            pub fn #cname(&self, #(#method_params),*) -> ::mattrs::manager::SpendBuilder {
+                #state_binding
+                let args = #args_ident::new(#(#ctor_args),*);
+                self.0.spend_clause(
+                    ::core::stringify!(#cname),
+                    <#args_ident as ::mattrs::contracts::ClauseArgs>::encode_to_witness(&args),
+                )
+            }
+        });
     }
 
     // `fund` and `address` differ: augmented contracts need the state.
@@ -838,15 +895,35 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 amount: ::bitcoin::Amount,
                 state: #state_ty,
             ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
-                let handle = manager.fund_instance(
-                    self.as_erased(),
-                    ::core::option::Option::Some(
-                        ::std::boxed::Box::new(state)
-                            as ::std::boxed::Box<dyn ::mattrs::contracts::ErasedState>,
-                    ),
-                    amount,
-                )?;
+                let handle = manager.fund_instance(self.as_erased(), state, amount)?;
                 ::core::result::Result::Ok(#handle_ident(handle))
+            }
+
+            /// Track an instance of this contract carrying `state` that
+            /// already exists on-chain at `outpoint` (e.g. one a counterparty
+            /// funded), returning its typed handle.
+            pub fn track(
+                &self,
+                manager: &mut ::mattrs::manager::ContractManager,
+                outpoint: ::bitcoin::OutPoint,
+                state: #state_ty,
+            ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
+                let handle = manager.track_instance(self.as_erased(), state, outpoint)?;
+                ::core::result::Result::Ok(#handle_ident(handle))
+            }
+
+            /// A clause output sending output `index` to this contract with
+            /// `state`, preserving the input's amount (chain `.deduct_amount()`
+            /// or `.ignore_amount()` to change that).
+            pub fn output(
+                &self,
+                index: impl ::core::convert::Into<::mattrs::contracts::CcvIndex>,
+                state: #state_ty,
+            ) -> ::mattrs::contracts::ClauseOutput {
+                ::mattrs::contracts::ClauseOutput::at(index)
+                    .to(self.as_erased())
+                    .with_state(&state)
+                    .build()
             }
         }
     } else {
@@ -858,12 +935,32 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 manager: &mut ::mattrs::manager::ContractManager,
                 amount: ::bitcoin::Amount,
             ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
-                let handle = manager.fund_instance(
-                    self.as_erased(),
-                    ::core::option::Option::None,
-                    amount,
-                )?;
+                let handle = manager.fund_instance(self.as_erased(), (), amount)?;
                 ::core::result::Result::Ok(#handle_ident(handle))
+            }
+
+            /// Track an instance of this contract that already exists on-chain
+            /// at `outpoint` (e.g. one a counterparty funded), returning its
+            /// typed handle.
+            pub fn track(
+                &self,
+                manager: &mut ::mattrs::manager::ContractManager,
+                outpoint: ::bitcoin::OutPoint,
+            ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
+                let handle = manager.track_instance(self.as_erased(), (), outpoint)?;
+                ::core::result::Result::Ok(#handle_ident(handle))
+            }
+
+            /// A clause output sending output `index` to this contract,
+            /// preserving the input's amount (chain `.deduct_amount()` or
+            /// `.ignore_amount()` to change that).
+            pub fn output(
+                &self,
+                index: impl ::core::convert::Into<::mattrs::contracts::CcvIndex>,
+            ) -> ::mattrs::contracts::ClauseOutput {
+                ::mattrs::contracts::ClauseOutput::at(index)
+                    .to(self.as_erased())
+                    .build()
             }
         }
     };
@@ -871,21 +968,13 @@ fn codegen(def: ContractDef) -> TokenStream2 {
     // Augmented handles know their state type; expose it without a turbofish.
     let state_fn = if augmented {
         quote! {
-            /// This instance's typed state, if available.
-            pub fn state(&self) -> ::core::option::Option<#state_ty> {
-                self.0.state::<#state_ty>()
-            }
-
-            /// This instance's typed state, or a
-            /// [`MissingStateError`](::mattrs::manager::MissingStateError) if
-            /// the instance carries none (only possible for instances
-            /// constructed by hand without their state).
-            pub fn state_req(
-                &self,
-            ) -> ::core::result::Result<#state_ty, ::mattrs::manager::MissingStateError> {
-                self.state().ok_or(::mattrs::manager::MissingStateError {
-                    contract: ::core::stringify!(#name),
-                })
+            /// This instance's typed state. Every instance holds a state of
+            /// its contract's state type: that is checked when the instance
+            /// is created, and this handle exists only for this contract.
+            pub fn state(&self) -> #state_ty {
+                self.0
+                    .state::<#state_ty>()
+                    .expect("an instance holds its contract's state type")
             }
         }
     } else {
@@ -911,7 +1000,11 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         quote! {
             /// The contract's address.
             pub fn address(&self, network: ::bitcoin::Network) -> ::bitcoin::Address {
-                ::bitcoin::Address::from_script(&self.contract.script_pubkey(), network.params())
+                let script_pubkey = self
+                    .contract
+                    .script_pubkey(&())
+                    .expect("an empty state commitment applies no key tweak");
+                ::bitcoin::Address::from_script(&script_pubkey, network.params())
                     .expect("a taproot script is always addressable")
             }
         }
@@ -944,6 +1037,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
     };
 
     let attrs = &def.attrs;
+    let spend_enum_ident = format_ident!("{}Spend", name);
 
     quote! {
         #(#args_structs)*
@@ -983,11 +1077,28 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             }
         }
 
+        /// A recorded spend of this contract: the clause it went through,
+        /// with that clause's typed arguments as revealed in the witness.
+        /// Generated by `contract!`; obtained from the handle's `spent`.
+        #[derive(::core::clone::Clone, ::core::fmt::Debug)]
+        pub enum #spend_enum_ident {
+            #(#clause_variants(#spend_arg_tys),)*
+        }
+
+        impl #spend_enum_ident {
+            /// The clause this spend went through.
+            pub fn clause(&self) -> #clause_enum_ident {
+                match self {
+                    #(Self::#clause_variants(_) => #clause_enum_ident::#clause_variants,)*
+                }
+            }
+        }
+
         #(#attrs)*
         /// Contract template (params + built taproot contract), generated by `contract!`.
         pub struct #name {
             #ctx_struct_field
-            contract: #contract_ty,
+            contract: ::std::sync::Arc<#contract_ty>,
         }
 
         impl #name {
@@ -997,22 +1108,25 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                 params: #params_ty #ctx_new_param
             ) -> ::core::result::Result<Self, ::mattrs::contracts::ContractError> {
                 #ctx_init
+                #validation
                 #ikey_init
                 #(#clause_locals)*
                 #tree_init
-                let contract = <#contract_ty>::new_with_identity::<#identity_ident>(
-                    ::core::stringify!(#name),
-                    internal_key,
-                    &params,
-                    tree,
-                )?;
+                let contract = ::std::sync::Arc::new(
+                    <#contract_ty>::new_with_identity::<#identity_ident>(
+                        ::core::stringify!(#name),
+                        __internal_key,
+                        &params,
+                        __tree,
+                    )?,
+                );
                 ::core::result::Result::Ok(Self { #ctx_self_field contract })
             }
 
             /// The immutable parameters captured by this contract.
             pub fn params(&self) -> #params_ty {
-                <#contract_ty as ::mattrs::contracts::ErasedContract>::params_any(&self.contract)
-                    .and_then(|p| p.downcast_ref::<#params_ty>())
+                <#contract_ty as ::mattrs::contracts::ErasedContract>::params_any(&*self.contract)
+                    .downcast_ref::<#params_ty>()
                     .expect("a generated contract carries its typed params")
                     .clone()
             }
@@ -1024,9 +1138,10 @@ fn codegen(def: ContractDef) -> TokenStream2 {
 
             #ctx_accessor
 
-            /// The contract as a type-erased `ErasedContract`.
+            /// The contract as a type-erased `ErasedContract` (a cheap
+            /// reference-counted handle to the same built contract).
             pub fn as_erased(&self) -> ::std::sync::Arc<dyn ::mattrs::contracts::ErasedContract> {
-                ::std::sync::Arc::new(self.contract.clone())
+                self.contract.clone()
             }
 
             /// The merkle root of the contract's script taptree (e.g. to commit
@@ -1073,6 +1188,21 @@ fn codegen(def: ContractDef) -> TokenStream2 {
                     .and_then(|n| #clause_enum_ident::from_name(&n))
             }
 
+            /// The recorded spend of this instance, decoded to its clause and
+            /// typed arguments (`None` while unspent).
+            pub fn spent(&self) -> ::core::option::Option<#spend_enum_ident> {
+                let clause = self.spent_clause()?;
+                let args = self.0.spending_args()?;
+                ::core::option::Option::Some(match clause {
+                    #(#clause_enum_ident::#clause_variants => #spend_enum_ident::#clause_variants(
+                        <#spend_arg_tys as ::mattrs::contracts::ClauseArgs>::decode_from_witness(
+                            &args,
+                        )
+                        .ok()?,
+                    ),)*
+                })
+            }
+
             #(#methods)*
         }
 
@@ -1117,6 +1247,9 @@ mod parser_tests {
     #[test]
     fn rejects_duplicate_sections_and_clauses() {
         assert!(error(
+            "contract C { params (); validate |_| Ok(()); validate |_| Ok(()); clause a { script |_| unimplemented!(); } tree [a]; }"
+        ).contains("duplicate `validate`"));
+        assert!(error(
             "contract C { params (); params (); clause a { script |_| unimplemented!(); } tree [a]; }"
         )
         .contains("duplicate `params`"));
@@ -1128,6 +1261,19 @@ mod parser_tests {
             "contract C { params (); clause a { script |_| unimplemented!(); script |_| unimplemented!(); } tree [a]; }"
         )
         .contains("duplicate `script`"));
+    }
+
+    #[test]
+    fn rejects_clause_names_that_collide_with_generated_items() {
+        for name in super::RESERVED_CLAUSE_NAMES {
+            let source = format!(
+                "contract C {{ params (); clause {name} {{ script |_| unimplemented!(); }} tree [{name}]; }}"
+            );
+            assert!(
+                error(&source).contains("cannot be used as a clause name"),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1149,7 +1295,7 @@ mod parser_tests {
         )
         .contains("at most three identifiers"));
         assert!(error(
-            "contract C { params (); clause a { args { #[signer([0u8; 32])] sig: Vec<u8> } script |_| unimplemented!(); } tree [a]; }"
+            "contract C { params (); clause a { args { #[signer(mattrs::nums_key())] sig: Vec<u8> } script |_| unimplemented!(); } tree [a]; }"
         )
         .contains("must have type `Signature`"));
         assert!(error(

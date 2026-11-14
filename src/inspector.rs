@@ -52,7 +52,7 @@ pub fn snapshot_instance(
     inst: &ContractInstance,
     network: bitcoin::Network,
 ) -> InstanceSnapshot {
-    let data = inst.committed_state_bytes().unwrap_or_default();
+    let data = inst.state_commitment().into_bytes();
 
     let address = inst
         .script_pubkey()
@@ -60,9 +60,12 @@ pub fn snapshot_instance(
         .and_then(|spk| bitcoin::Address::from_script(&spk, network.params()).ok())
         .map(|a| a.to_string());
 
-    let outpoint = inst.outpoint().map(|op| format!("{}:{}", op.txid, op.vout));
-    let funding_txid = inst.funding_tx().map(|tx| tx.compute_txid().to_string());
-    let funding_amount_sat = inst.prevout().map(|out| out.value.to_sat());
+    // An instance is funded from creation; the snapshot fields stay optional
+    // so the wire format read by inspector clients is unchanged.
+    let outpoint = inst.outpoint();
+    let outpoint = Some(format!("{}:{}", outpoint.txid, outpoint.vout));
+    let funding_txid = Some(inst.funding_tx().compute_txid().to_string());
+    let funding_amount_sat = Some(inst.amount().to_sat());
     let spending_txid = inst.spent_in_tx().map(|txid| txid.to_string());
     let spending_clause = inst.clause_name().map(|s| s.to_string());
     let spending_args = inst

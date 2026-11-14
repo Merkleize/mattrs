@@ -20,6 +20,7 @@
 //! [`older`](crate::script_helpers::older) fragment *and* seeds the spend's
 //! `nSequence`, so the script and the transaction cannot disagree.
 
+use crate::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
 use crate::contracts::ArgSpec;
 use crate::script_helpers::{concat, drop as script_drop, merkle_root};
 use bitcoin::ScriptBuf;
@@ -27,12 +28,16 @@ use bitcoin_script::{define_pushable, script};
 
 define_pushable!();
 
-/// How a CCV argument is sourced.
-pub enum Source<'a> {
+/// Untyped operand for [`StackScript::ccv_raw`]. Prefer the slot-specific types
+/// in [`crate::ccv`] with [`StackScript::ccv`].
+#[derive(Debug, Clone, Copy)]
+pub enum RawCcvSource<'a> {
     /// A tracked stack item, copied to the top.
     Item(&'a str),
     /// A 32-byte constant pushed by the script.
     Const([u8; 32]),
+    /// Arbitrary pushed bytes; no CCV argument validation is performed.
+    Bytes(&'a bitcoin::script::PushBytes),
     /// "None" (`0`): no data / NUMS key / no taptree, depending on the slot.
     None,
     /// "Same as the current input" (`-1`): key or taptree slots only.
@@ -63,7 +68,12 @@ impl StackScript {
     pub fn from_specs(specs: &[ArgSpec]) -> Self {
         let mut stack = Vec::new();
         for spec in specs {
-            let count = spec.arg_type.witness_elements();
+            let count = spec.arg_type.witness_elements().unwrap_or_else(|| {
+                panic!(
+                    "argument `{}` has a value-dependent witness layout",
+                    spec.name
+                )
+            });
             assert!(
                 count > 0,
                 "argument `{}` has an empty witness layout",
@@ -224,31 +234,102 @@ impl StackScript {
         self.equal_verify();
     }
 
-    fn push_source(&mut self, source: Source<'_>) {
+    fn push_source(&mut self, source: RawCcvSource<'_>) {
         match source {
-            Source::Item(name) => self.pick(name),
-            Source::Const(value) => self.push_const("<const>", value),
-            Source::None => self.push_num("<none>", 0),
-            Source::Current => self.push_num("<current>", -1),
+            RawCcvSource::Item(name) => self.pick(name),
+            RawCcvSource::Const(value) => self.push_const("<const>", value),
+            RawCcvSource::Bytes(value) => {
+                self.parts.push(
+                    bitcoin::script::Builder::new()
+                        .push_slice(value)
+                        .into_script(),
+                );
+                self.stack.push("<bytes>".into());
+            }
+            RawCcvSource::None => self.push_num("<none>", 0),
+            RawCcvSource::Current => self.push_num("<current>", -1),
         }
     }
 
     /// Emit a full `OP_CHECKCONTRACTVERIFY`: `<data> <index> <pk> <taptree>
-    /// <flags>`, each argument sourced independently. `index` and `flags` are
-    /// numeric (`-1` index = same as this input).
+    /// <mode>`. Slot-specific arguments prevent mixing up sentinel meanings,
+    /// and the mode cannot be an undefined value. Named stack items are copied,
+    /// not consumed; their values still need to be constrained by the script.
+    /// This method does not generate host-side `next` metadata.
+    ///
+    /// ```
+    /// use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
+    /// use mattrs::stack::StackScript;
+    /// let mut script = StackScript::with_witness(&["state"]);
+    /// script.ccv(CcvData::Item("state"), CcvIndex::CURRENT,
+    ///     CcvKey::Nums, CcvTaptree::Current, CcvMode::CheckInput);
+    /// let script = script.into_script();
+    /// ```
+    ///
+    /// Modes are not raw integers or combinable flags:
+    /// ```compile_fail
+    /// use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvTaptree};
+    /// use mattrs::stack::StackScript;
+    /// StackScript::with_witness(&[]).ccv(CcvData::Empty, CcvIndex::CURRENT,
+    ///     CcvKey::Nums, CcvTaptree::None, 3);
+    /// ```
+    /// Key/taptree sentinels cannot be supplied in the data slot:
+    /// ```compile_fail
+    /// use mattrs::ccv::{CcvIndex, CcvKey, CcvMode, CcvTaptree};
+    /// use mattrs::stack::StackScript;
+    /// StackScript::with_witness(&[]).ccv(CcvKey::CurrentInternalKey, CcvIndex::CURRENT,
+    ///     CcvKey::Nums, CcvTaptree::None, CcvMode::Preserve);
+    /// ```
     pub fn ccv(
         &mut self,
-        data: Source<'_>,
+        data: CcvData<'_>,
+        index: CcvIndex,
+        pk: CcvKey<'_>,
+        taptree: CcvTaptree<'_>,
+        mode: CcvMode,
+    ) {
+        let data = match data {
+            CcvData::Item(name) => RawCcvSource::Item(name),
+            CcvData::Const(value) => RawCcvSource::Const(value),
+            CcvData::Bytes(value) => RawCcvSource::Bytes(value),
+            CcvData::Empty => RawCcvSource::None,
+        };
+        let pk = match pk {
+            CcvKey::Item(name) => RawCcvSource::Item(name),
+            CcvKey::Const(value) => RawCcvSource::Const(value.serialize()),
+            CcvKey::Nums => RawCcvSource::None,
+            CcvKey::CurrentInternalKey => RawCcvSource::Current,
+        };
+        let taptree = match taptree {
+            CcvTaptree::Item(name) => RawCcvSource::Item(name),
+            CcvTaptree::Const(value) => RawCcvSource::Const(value),
+            CcvTaptree::None => RawCcvSource::None,
+            CcvTaptree::Current => RawCcvSource::Current,
+        };
+        self.ccv_raw(data, index.as_i64(), pk, taptree, mode.as_i32());
+    }
+
+    /// Emit CCV with unchecked operands, for low-level script experiments.
+    ///
+    /// **Warning:** undefined modes immediately succeed validation for the
+    /// current input; they do not merely disable amount checks. No index,
+    /// key, data, or taptree validation is performed here. Prefer [`Self::ccv`].
+    /// `RawCcvSource::Current` emits `-1` even in the data slot, where it is
+    /// ordinary data rather than a sentinel. Stack tracking assumes the usual
+    /// five-operand consumption; undefined modes actually terminate execution.
+    pub fn ccv_raw(
+        &mut self,
+        data: RawCcvSource<'_>,
         index: i64,
-        pk: Source<'_>,
-        taptree: Source<'_>,
-        flags: i32,
+        pk: RawCcvSource<'_>,
+        taptree: RawCcvSource<'_>,
+        mode: i32,
     ) {
         self.push_source(data);
         self.push_num("<index>", index);
         self.push_source(pk);
         self.push_source(taptree);
-        self.push_num("<flags>", flags as i64);
+        self.push_num("<mode>", mode as i64);
         self.parts.push(script! { CHECKCONTRACTVERIFY });
         for _ in 0..5 {
             self.stack.pop();
@@ -296,7 +377,7 @@ mod tests {
             },
         ];
 
-        assert_eq!(specs[1].arg_type.witness_elements(), 3);
+        assert_eq!(specs[1].arg_type.witness_elements(), Some(3));
         let stack = StackScript::from_specs(&specs);
         assert_eq!(stack.depth("prefix"), 4);
         assert_eq!(stack.depth("proof"), 1);
@@ -307,5 +388,121 @@ mod tests {
     #[should_panic(expected = "cannot reduce an empty Merkle tree")]
     fn merkle_top_rejects_an_empty_tree() {
         StackScript::with_witness(&[]).merkle_top(0, "root");
+    }
+
+    #[test]
+    fn typed_ccv_preserves_raw_script_bytes_and_stack_tracking() {
+        use RawCcvSource as Raw;
+        let bytes = <&bitcoin::script::PushBytes>::from(&[0x61, 0x62, 0x63]);
+        let data = [
+            (CcvData::Empty, Raw::None),
+            (CcvData::Item("data"), Raw::Item("data")),
+            (CcvData::Const([0x42; 32]), Raw::Const([0x42; 32])),
+            (CcvData::Bytes(bytes), Raw::Bytes(bytes)),
+        ];
+        let keys = [
+            (CcvKey::Nums, Raw::None),
+            (CcvKey::CurrentInternalKey, Raw::Current),
+            (CcvKey::Item("key"), Raw::Item("key")),
+            (
+                CcvKey::Const(crate::nums_key()),
+                Raw::Const(crate::NUMS_KEY),
+            ),
+        ];
+        let trees = [
+            (CcvTaptree::None, Raw::None),
+            (CcvTaptree::Current, Raw::Current),
+            (CcvTaptree::Item("tree"), Raw::Item("tree")),
+            (CcvTaptree::Const([0x24; 32]), Raw::Const([0x24; 32])),
+        ];
+        for (data, raw_data) in data {
+            for (key, raw_key) in keys {
+                for (tree, raw_tree) in trees {
+                    for number in [-1, 0, 128, i64::from(i32::MAX)] {
+                        for mode in [
+                            CcvMode::CheckInput,
+                            CcvMode::Preserve,
+                            CcvMode::IgnoreAmount,
+                            CcvMode::DeductAmount,
+                        ] {
+                            let mut typed = StackScript::with_witness(&["data", "key", "tree"]);
+                            let mut raw = StackScript::with_witness(&["data", "key", "tree"]);
+                            typed.ccv(data, CcvIndex::try_from(number).unwrap(), key, tree, mode);
+                            raw.ccv_raw(raw_data, number, raw_key, raw_tree, mode.as_i32());
+                            assert_eq!(typed.stack, ["data", "key", "tree"]);
+                            // A subsequent named operation must see the original depths.
+                            typed.pick("data");
+                            raw.pick("data");
+                            assert_eq!(typed.into_script(), raw.into_script());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_ccv_encodes_all_modes_and_sentinels_minimally() {
+        for mode in [
+            CcvMode::CheckInput,
+            CcvMode::Preserve,
+            CcvMode::IgnoreAmount,
+            CcvMode::DeductAmount,
+        ] {
+            let mut s = StackScript::with_witness(&[]);
+            s.ccv(
+                CcvData::Empty,
+                CcvIndex::CURRENT,
+                CcvKey::Nums,
+                CcvTaptree::Current,
+                mode,
+            );
+            assert_eq!(
+                s.into_script(),
+                script! {
+                    OP_0 -1 OP_0 -1 { mode.as_i32() }
+                    CHECKCONTRACTVERIFY OP_TRUE
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn data_bytes_and_key_sentinel_are_emitted_verbatim() {
+        let bytes = <&bitcoin::script::PushBytes>::from(&[0x61, 0x62, 0x63]);
+        let mut s = StackScript::with_witness(&[]);
+        s.ccv(
+            CcvData::Bytes(bytes),
+            CcvIndex::at(1).unwrap(),
+            CcvKey::CurrentInternalKey,
+            CcvTaptree::None,
+            CcvMode::Preserve,
+        );
+        assert_eq!(
+            s.into_script().as_bytes(),
+            &[
+                3, 0x61, 0x62, 0x63, // data, without hashing
+                0x51, 0x4f, 0, 0, // index 1, current internal key, no tree, preserve
+                0xbb, 0x51, // CCV, true
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_ccv_explicitly_allows_undefined_modes_and_indices() {
+        let mut s = StackScript::with_witness(&[]);
+        s.ccv_raw(
+            RawCcvSource::Current,
+            -2,
+            RawCcvSource::None,
+            RawCcvSource::None,
+            3,
+        );
+        assert_eq!(
+            s.into_script(),
+            script! {
+                -1 -2 OP_0 OP_0 OP_3 CHECKCONTRACTVERIFY OP_TRUE
+            }
+        );
     }
 }

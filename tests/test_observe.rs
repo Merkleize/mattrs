@@ -30,7 +30,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 
     let amount = 49_999_900u64;
     let vault_a = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
-    let funding_outpoint = vault_a.handle().outpoint().unwrap();
+    let funding_outpoint = vault_a.handle().outpoint();
 
     let ctv_template = vec![(
         Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?.assume_checked(),
@@ -54,7 +54,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
         })
         .collect();
     unvaulting_a
-        .withdraw()?
+        .withdraw()
         .outputs(withdraw_outputs)
         .exec_none(&mut actor)?;
 
@@ -66,7 +66,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 
     let vault_b = observer.track_instance(
         Vault::new(params.clone())?.as_erased(),
-        None,
+        (),
         funding_outpoint,
     )?;
 
@@ -83,7 +83,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
         unvaulting_b.handle().outpoint(),
         unvaulting_a.handle().outpoint()
     );
-    assert_eq!(unvaulting_b.state().unwrap().ctv_hash, ctv_hash);
+    assert_eq!(unvaulting_b.state().ctv_hash, ctv_hash);
 
     // Follow the terminal withdraw: no children, clause + args recorded.
     let final_children = observer.wait_for_spend(unvaulting_b.handle())?;
@@ -101,7 +101,8 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 #[ignore = "requires a running regtest bitcoind"]
 fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>> {
     // Two vaults triggered by a single batch transaction; the observer tracks
-    // both and `wait_for_spends` returns the merged unvaulting child once.
+    // both and `wait_for_batch` validates the combined contribution and returns
+    // the merged unvaulting child once.
     let params = VaultParams {
         alternate_pk: None,
         spend_delay: 10,
@@ -125,16 +126,10 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     let mut observer =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
     let vault_contract = Vault::new(params.clone())?.as_erased();
-    let tracked_1 = observer.track_instance(
-        vault_contract.clone(),
-        None,
-        vault_1.handle().outpoint().unwrap(),
-    )?;
-    let tracked_2 = observer.track_instance(
-        vault_contract.clone(),
-        None,
-        vault_2.handle().outpoint().unwrap(),
-    )?;
+    let tracked_1 =
+        observer.track_instance(vault_contract.clone(), (), vault_1.handle().outpoint())?;
+    let tracked_2 =
+        observer.track_instance(vault_contract.clone(), (), vault_2.handle().outpoint())?;
 
     // An unspent instance times out within the polling window...
     let err = observer
@@ -157,7 +152,7 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(children.len(), 1);
     actor.mine_blocks(1)?;
 
-    let observed = observer.wait_for_spends(&[tracked_1.clone(), tracked_2.clone()])?;
+    let observed = observer.wait_for_batch(&[&tracked_1, &tracked_2])?;
     assert_eq!(observed.len(), 1);
     assert_eq!(tracked_1.clause_name().as_deref(), Some("trigger"));
     assert_eq!(tracked_2.clause_name().as_deref(), Some("trigger"));
@@ -168,10 +163,10 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     let unvaulting: UnvaultingHandle = observed[0].clone().try_into().unwrap();
     assert_eq!(unvaulting.handle().outpoint(), children[0].outpoint());
     assert_eq!(
-        unvaulting.handle().prevout().unwrap().value,
+        unvaulting.handle().prevout().value,
         Amount::from_sat(2 * amount)
     );
-    assert_eq!(unvaulting.state().unwrap().ctv_hash, ctv_hash);
+    assert_eq!(unvaulting.state().ctv_hash, ctv_hash);
 
     Ok(())
 }

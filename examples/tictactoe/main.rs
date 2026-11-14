@@ -33,16 +33,14 @@ mod contracts;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::rc::Rc;
 use std::str::FromStr;
 
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
-use mattrs::contracts::ErasedState;
 use mattrs::manager::ContractManager;
-use mattrs::protocol::{ProtocolError, RpcChain, Runner};
+use mattrs::protocol::{ProtocolError, Runner};
 
 use contracts::roles::{PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role};
 use contracts::{
@@ -164,9 +162,7 @@ fn validate_terms(stake: i64, timeout_blocks: u32) -> AppResult {
     if stake <= 0 || stake > i64::MAX / 2 {
         return Err("stake must be positive and small enough to double".into());
     }
-    if timeout_blocks == 0 {
-        return Err("timeout must be at least one block".into());
-    }
+    mattrs::BlockDelay::new(timeout_blocks)?;
     Ok(())
 }
 
@@ -219,7 +215,7 @@ fn run_alice(
         TttState::initial(),
     )?;
     let entry = game.handle().clone();
-    let outpoint = entry.outpoint().expect("just funded");
+    let outpoint = entry.outpoint();
     println!("Game funded at {outpoint}");
     send_json(
         &mut stream,
@@ -231,8 +227,7 @@ fn run_alice(
         xpriv,
         strategy: prompt_strategy(),
     };
-    let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
-    let outcome = Runner::new(manager, chain, alice_role(), data, entry).run_one()?;
+    let outcome = Runner::new(manager, alice_role(), data, entry).run_one()?;
     print_outcome(&outcome, stake);
     Ok(())
 }
@@ -282,7 +277,7 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     maybe_enable_inspector(&mut manager, inspector)?;
     let entry = manager.track_instance(
         TicTacToe::new(params)?.as_erased(),
-        Some(Box::new(TttState::initial()) as Box<dyn ErasedState>),
+        TttState::initial(),
         outpoint,
     )?;
     println!("Tracking the game at {outpoint}");
@@ -292,8 +287,7 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
         xpriv,
         strategy: prompt_strategy(),
     };
-    let chain = Rc::new(RpcChain::new(rpc_client(wallet)));
-    let outcome = Runner::new(manager, chain, bob_role(), data, entry).run_one()?;
+    let outcome = Runner::new(manager, bob_role(), data, entry).run_one()?;
     print_outcome(&outcome, stake);
     Ok(())
 }

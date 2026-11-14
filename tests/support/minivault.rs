@@ -33,26 +33,18 @@
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{
-    CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
-};
+use mattrs::ccv::{CcvIndex, CcvMode};
 use mattrs::{
-    ContractParams, ContractState, Signature, clause_tree, contract, internal_key_or_nums,
-    optional_key_script,
+    ContractState, Signature, clause_tree, contract, internal_key_or_nums, optional_key_script,
 };
 
 define_pushable!();
-
-fn output_index(value: i64, name: &str) -> Result<u32, ClauseError> {
-    u32::try_from(value)
-        .map_err(|_| ClauseError::Other(format!("{name} must be between 0 and u32::MAX")))
-}
 
 // ============================================================================
 // MiniUnvaulting — fixed clause set, so the contract! DSL applies
 // ============================================================================
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct MiniUnvaultingParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
@@ -60,6 +52,7 @@ pub struct MiniUnvaultingParams {
 }
 
 #[derive(Debug, Clone, ContractState)]
+#[commit(identity)]
 pub struct MiniUnvaultingState {
     pub withdrawal_pk: [u8; 32],
 }
@@ -100,7 +93,7 @@ impl MiniUnvaulting {
             -1
             { optional_key_script(params.alternate_pk) }
             -1
-            { CCV_FLAG_CHECK_INPUT }
+            { CcvMode::CheckInput.as_i32() }
             CHECKCONTRACTVERIFY
             { params.spend_delay }
             CSV
@@ -131,7 +124,7 @@ impl MiniUnvaulting {
 // MiniVault — runtime-shaped clause set, via the DSL's dynamic `tree |p| {..}`
 // ============================================================================
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct MiniVaultParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
@@ -157,13 +150,9 @@ contract! {
             script MiniVault::trigger_script;
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
-                Ok(vec![ClauseOutput::at(output_index(a.out_i, "out_i")?)
-                    .to(unvaulting.as_erased())
-                    .with_state(&MiniUnvaultingState {
+                Ok(vec![unvaulting.output(CcvIndex::try_from(a.out_i)?, MiniUnvaultingState {
                         withdrawal_pk: a.withdrawal_pk,
-                    })
-                    .preserve_amount()
-                    .build()])
+                    })])
             }
         }
 
@@ -180,17 +169,10 @@ contract! {
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
                 Ok(vec![
-                    ClauseOutput::at(output_index(a.revault_out_i, "revault_out_i")?)
-                        .to(MiniVault::new(p.clone())?.as_erased())
-                        .deduct_amount()
-                        .build(),
-                    ClauseOutput::at(output_index(a.out_i, "out_i")?)
-                        .to(unvaulting.as_erased())
-                        .with_state(&MiniUnvaultingState {
+                    MiniVault::new(p.clone())?.output(CcvIndex::try_from(a.revault_out_i)?).deduct_amount(),
+                    unvaulting.output(CcvIndex::try_from(a.out_i)?, MiniUnvaultingState {
                             withdrawal_pk: a.withdrawal_pk,
-                        })
-                        .preserve_amount()
-                        .build(),
+                        }),
                 ])
             }
         }
@@ -227,29 +209,29 @@ impl MiniVault {
         }
     }
 
-    fn trigger_script(params: &MiniVaultParams) -> ScriptBuf {
-        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))
-            .expect("MiniUnvaulting contract definition is valid")
-            .taptree_root();
-        script! {
+    fn trigger_script(
+        params: &MiniVaultParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))?.taptree_root();
+        Ok(script! {
             { optional_key_script(params.alternate_pk) }
             { unvaulting_root }
             0
             CHECKCONTRACTVERIFY
             { params.unvault_pk }
             CHECKSIG
-        }
+        })
     }
 
-    fn trigger_and_revault_script(params: &MiniVaultParams) -> ScriptBuf {
-        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))
-            .expect("MiniUnvaulting contract definition is valid")
-            .taptree_root();
-        script! {
+    fn trigger_and_revault_script(
+        params: &MiniVaultParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let unvaulting_root = MiniUnvaulting::new(Self::unvaulting_params(params))?.taptree_root();
+        Ok(script! {
             0 OP_SWAP
             -1
             -1
-            { CCV_FLAG_DEDUCT_OUTPUT_AMOUNT }
+            { CcvMode::DeductAmount.as_i32() }
             CHECKCONTRACTVERIFY
             { optional_key_script(params.alternate_pk) }
             { unvaulting_root }
@@ -257,7 +239,7 @@ impl MiniVault {
             CHECKCONTRACTVERIFY
             { params.unvault_pk }
             CHECKSIG
-        }
+        })
     }
 
     fn recover_script(params: &MiniVaultParams) -> ScriptBuf {

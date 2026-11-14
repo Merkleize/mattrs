@@ -31,10 +31,14 @@
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
-use mattrs::contracts::{ClauseError, ClauseOutput, ContractState, CtvTemplate, WitnessError};
-use mattrs::manager::{MissingStateError, SpendBuilder};
+use mattrs::ccv::CcvIndex;
+use mattrs::contracts::{
+    ClauseError, ClauseOutput, ContractState, CtvTemplate, StateCodec, StateCommitment,
+    WitnessError,
+};
+use mattrs::manager::SpendBuilder;
 use mattrs::script_helpers::{check_input_contract, concat, dup, key_path_p2tr, older};
-use mattrs::{ContractParams, Signature, contract};
+use mattrs::{Signature, contract};
 
 define_pushable!();
 
@@ -89,7 +93,7 @@ pub fn board_full(board: &[u8; 9]) -> bool {
     board.iter().all(|&c| c != EMPTY)
 }
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct TttParams {
     pub alice_pk: XOnlyPublicKey,
     pub bob_pk: XOnlyPublicKey,
@@ -100,8 +104,8 @@ pub struct TttParams {
 }
 
 /// The game state: whose turn it is and the nine cells. Committed on-chain as
-/// the raw 10 bytes `turn || board` (the framework hashes non-32-byte
-/// commitments, and the tapscripts rebuild that same sha256 with `OP_CAT`).
+/// SHA256 of the 10 bytes `turn || board`. Serialization keeps the preimage;
+/// the explicit commitment matches the tapscripts' `OP_CAT`/`OP_SHA256` logic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TttState {
     pub turn: u8,
@@ -146,13 +150,19 @@ impl TttState {
 }
 
 impl ContractState for TttState {
+    fn commitment(&self) -> StateCommitment {
+        StateCommitment::sha256(&self.preimage())
+    }
+}
+
+impl StateCodec for TttState {
     fn encode(&self) -> Vec<u8> {
         self.preimage().to_vec()
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, WitnessError> {
         let bytes: &[u8; 10] = bytes.try_into().map_err(|_| {
-            WitnessError::InvalidData("a TttState commits exactly 10 bytes".to_string())
+            WitnessError::InvalidData("a TttState serialization is exactly 10 bytes".to_string())
         })?;
         let turn = bytes[0];
         let board: [u8; 9] = bytes[1..].try_into().expect("9 bytes");
@@ -176,6 +186,7 @@ impl ContractState for TttState {
 contract! {
     contract TicTacToe {
         params TttParams;
+        validate |p| mattrs::BlockDelay::new(p.timeout_blocks).map(|_| ());
         state TttState;
 
         // witness: <prefix> <suffix> <alice_sig>
@@ -290,14 +301,13 @@ impl TicTacToe {
     /// expanded state and re-emit the contract with the updated board.
     fn next_after_move(
         p: &TttParams,
-        s: Option<&TttState>,
+        s: &TttState,
         prefix: &[u8],
         suffix: &[u8],
         turn: u8,
         mark: u8,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
-        let state =
-            s.ok_or_else(|| ClauseError::Other("a move needs the board state".to_string()))?;
+        let state = s;
         let cell = prefix.len();
         if cell >= 9 || suffix.len() != 8 - cell {
             return Err(ClauseError::Other(
@@ -318,11 +328,7 @@ impl TicTacToe {
             ));
         }
         Ok(vec![
-            ClauseOutput::at_same_index()
-                .to(TicTacToe::new(p.clone())?.as_erased())
-                .with_state(&state.after_move(cell, mark))
-                .preserve_amount()
-                .build(),
+            TicTacToe::new(p.clone())?.output(CcvIndex::CURRENT, state.after_move(cell, mark)),
         ])
     }
 
@@ -399,7 +405,7 @@ impl TicTacToe {
             OP_SWAP
             OP_CAT
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
 
             // build the next preimage: turn_new || prefix || mark || suffix
             { push_byte(turn_new) }
@@ -433,7 +439,7 @@ impl TicTacToe {
             { dup(10) }
             OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT OP_CAT
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
         }
     }
 
@@ -501,7 +507,7 @@ impl TicTacToe {
             OP_SWAP
             OP_CAT
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
         };
         // Consume the nine originals: each exactly one byte (the preimage
         // only pins their concatenation) and taken.
@@ -537,7 +543,7 @@ impl TicTacToe {
             OP_SWAP
             OP_CAT
             OP_SHA256
-            { check_input_contract(-1, None) }
+            { check_input_contract(CcvIndex::CURRENT, None) }
             { older(timeout_blocks) }
             { ctv_hash }
             OP_CHECKTEMPLATEVERIFY
@@ -565,32 +571,32 @@ impl TicTacToe {
 /// instance's typed state, so callers pass only what is genuinely new.
 impl TicTacToeHandle {
     /// The current player's move at `cell` (which must be empty).
-    pub fn make_move(&self, cell: usize) -> Result<SpendBuilder, MissingStateError> {
-        let s = self.state_req()?;
+    pub fn make_move(&self, cell: usize) -> SpendBuilder {
+        let s = self.state();
         let (prefix, suffix) = s.prefix_suffix(cell);
-        Ok(if s.turn == TURN_ALICE {
+        if s.turn == TURN_ALICE {
             self.move_alice(prefix, suffix)
         } else {
             self.move_bob(prefix, suffix)
-        })
+        }
     }
 
     /// The pot to the holder of a line of `mark` (the timeout claims need no
     /// wrapper: their board argument is `#[from_state]`-filled, so the
     /// generated `timeout_*_idle()` methods already take nothing).
-    pub fn claim_win(&self, mark: u8) -> Result<SpendBuilder, MissingStateError> {
-        let s = self.state_req()?;
+    pub fn claim_win(&self, mark: u8) -> SpendBuilder {
+        let s = self.state();
         let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = s.board.map(|b| [b]);
-        Ok(if mark == MARK_ALICE {
+        if mark == MARK_ALICE {
             self.alice_wins([s.turn], c0, c1, c2, c3, c4, c5, c6, c7, c8)
         } else {
             self.bob_wins([s.turn], c0, c1, c2, c3, c4, c5, c6, c7, c8)
-        })
+        }
     }
 
-    pub fn claim_tie(&self) -> Result<SpendBuilder, MissingStateError> {
-        let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = self.state_req()?.board.map(|b| [b]);
-        Ok(self.tie(c0, c1, c2, c3, c4, c5, c6, c7, c8))
+    pub fn claim_tie(&self) -> SpendBuilder {
+        let [c0, c1, c2, c3, c4, c5, c6, c7, c8] = self.state().board.map(|b| [b]);
+        self.tie(c0, c1, c2, c3, c4, c5, c6, c7, c8)
     }
 }
 
@@ -669,14 +675,12 @@ pub mod roles {
         Role::new()
             .on::<TicTacToe, _>(move |d: &mut PlayerData, h: TicTacToeHandle, _cx| {
                 let params = h.params();
-                let s = h.state().ok_or_else(|| {
-                    ProtocolError::Other("the game state is unavailable".to_string())
-                })?;
+                let s = h.state();
 
                 // My line is on the board: claim the pot.
                 if has_line(&s.board, my_mark) {
                     return Ok(Action::SendFinal(
-                        h.claim_win(my_mark)?,
+                        h.claim_win(my_mark),
                         TttOutcome {
                             result: my_win,
                             by_timeout: false,
@@ -692,7 +696,7 @@ pub mod roles {
                     }
                     if board_full(&s.board) {
                         return Ok(Action::SendFinal(
-                            h.claim_tie()?,
+                            h.claim_tie(),
                             TttOutcome {
                                 result: TttResult::Tie,
                                 by_timeout: false,
@@ -707,16 +711,16 @@ pub mod roles {
                         )));
                     }
                     return Ok(Action::Send(
-                        h.make_move(cell)?.sign(HotSigner::new(d.xpriv)),
+                        h.make_move(cell).sign(HotSigner::new(d.xpriv)),
                     ));
                 }
 
                 // The opponent's turn: watch the UTXO, and claim the forfait
                 // if they idle past the timeout.
                 let builder = if alice {
-                    h.timeout_bob_idle()?
+                    h.timeout_bob_idle()
                 } else {
-                    h.timeout_alice_idle()?
+                    h.timeout_alice_idle()
                 };
                 Ok(Action::wait_or_send_final(
                     params.timeout_blocks,
@@ -732,9 +736,7 @@ pub mod roles {
                 let clause = h.spent_clause().ok_or_else(|| {
                     ProtocolError::Other("the game instance is not settled".to_string())
                 })?;
-                let s = h.state().ok_or_else(|| {
-                    ProtocolError::Other("the game state is unavailable".to_string())
-                })?;
+                let s = h.state();
 
                 // Classify the counterparty's terminal claim, checking it
                 // against the board we know.

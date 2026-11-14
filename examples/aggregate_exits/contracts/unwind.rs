@@ -4,22 +4,21 @@ use bitcoin::ScriptBuf;
 use bitcoin_script::{define_pushable, script};
 use mattrs::ContractState;
 use mattrs::contract;
-use mattrs::contracts::{
-    ArgSpec, CCV_FLAG_CHECK_INPUT, CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, ClauseError, ClauseOutput,
-    WitnessReader,
-};
+use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{MerkleProof, NIL};
 use mattrs::script_utils::bn2vch;
 
 use super::pending_exit::{PendingExit, PendingExitState};
 use super::{ExitClaim, PoolParams, PoolTree, bit_root, spec, spec_num};
-use mattrs::stack::{Source, StackScript};
+use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
+use mattrs::stack::StackScript;
 
 define_pushable!();
 
 /// The pool's committed state: the account-tree root (identity commitment).
 #[derive(Debug, Clone, PartialEq, Eq, ContractState)]
+#[commit(identity)]
 pub struct UnwindState {
     pub root: [u8; 32],
 }
@@ -35,11 +34,12 @@ contract! {
     ///   a false claim is what the challenge clauses are for.
     contract Unwind {
         params PoolParams;
+        validate PoolParams::validate_timelocks;
         state UnwindState;
 
         // witness: <pk> <bal> (<h_l> <d_l>) x depth <root>
         clause withdraw_direct {
-            args raw |p| Unwind::withdraw_direct_specs(p);
+            args raw Unwind::withdraw_direct_specs;
             script Unwind::withdraw_direct_script;
             next(p, a) {
                 Unwind::withdraw_direct_outputs(p, &a.0)
@@ -48,7 +48,7 @@ contract! {
 
         // witness: <unwind_taptree> <root> <r_prime> <bit_u> x N <ingrid_pk> <trace_i> <x>
         clause start_exit {
-            args raw |p| Unwind::start_exit_specs(p);
+            args raw Unwind::start_exit_specs;
             script Unwind::start_exit_script;
             next(p, a) {
                 Unwind::start_exit_outputs(p, &a.0)
@@ -87,24 +87,24 @@ impl Unwind {
 
         // The claimed root is the input's committed state.
         s.ccv(
-            Source::Item("root"),
-            -1,
-            Source::None,
-            Source::Current,
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("root"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::CheckInput,
         );
 
         // Output 0 pays the revealed account key.
         // TODO(OP_AMOUNT): enforce that output 0 carries exactly `bal` sats.
-        // Until then a malicious spender could zero the leaf while paying the
-        // account less than its balance, which is why withdrawals stay
-        // honest-executor-only in the demo.
+        // Until then a spender can underpay and zero the account, or overpay
+        // its key using other users' funds. The remaining pool output only
+        // preserves what is left after this caller-selected deduction.
         s.ccv(
-            Source::None,
-            0,
-            Source::Item("pk"),
-            Source::None,
-            CCV_FLAG_DEDUCT_OUTPUT_AMOUNT,
+            CcvData::Empty,
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Item("pk"),
+            CcvTaptree::None,
+            CcvMode::DeductAmount,
         );
 
         // Walk leaf→root recomputing the current root (proving membership) and
@@ -120,11 +120,11 @@ impl Unwind {
 
         // Output 1 continues the pool committing to the zeroed root.
         s.ccv(
-            Source::Item("new_node"),
-            1,
-            Source::None,
-            Source::Current,
-            0,
+            CcvData::Item("new_node"),
+            CcvIndex::at(1).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Current,
+            CcvMode::Preserve,
         );
         s.into_script()
     }
@@ -165,11 +165,7 @@ impl Unwind {
 
         Ok(vec![
             ClauseOutput::pay_key(0, pk),
-            ClauseOutput::at(1)
-                .to(Unwind::new(p.clone())?.as_erased())
-                .with_state(&UnwindState { root: new_root })
-                .preserve_amount()
-                .build(),
+            Unwind::new(p.clone())?.output(1, UnwindState { root: new_root }),
         ])
     }
 
@@ -183,7 +179,9 @@ impl Unwind {
     }
 
     // Public so the tests can assert on the generated script (bit guards).
-    pub fn start_exit_script(p: &PoolParams) -> ScriptBuf {
+    pub fn start_exit_script(
+        p: &PoolParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
         let n = p.padded_size();
         let mut s = StackScript::from_specs(&Self::start_exit_specs(p));
 
@@ -191,11 +189,11 @@ impl Unwind {
         // its own hash; the dispute chain needs it later to revert here) and
         // the current root.
         s.ccv(
-            Source::Item("root"),
-            -1,
-            Source::None,
-            Source::Item("unwind_taptree"),
-            CCV_FLAG_CHECK_INPUT,
+            CcvData::Item("root"),
+            CcvIndex::CURRENT,
+            CcvKey::Nums,
+            CcvTaptree::Item("unwind_taptree"),
+            CcvMode::CheckInput,
         );
 
         // The exit set is *published* as one bit per slot and bound to its
@@ -239,17 +237,13 @@ impl Unwind {
         // Ingrid's bond (`p.bond` sats). Until then posting the bond is
         // honor-system (the demo always posts it via a batched ExitBond input).
         s.ccv(
-            Source::Item("pe_state"),
-            0,
-            Source::None,
-            Source::Const(
-                PendingExit::new(p.clone())
-                    .expect("PendingExit contract definition is valid")
-                    .taptree_root(),
-            ),
-            0,
+            CcvData::Item("pe_state"),
+            CcvIndex::at(0).expect("valid output index"),
+            CcvKey::Nums,
+            CcvTaptree::Const(PendingExit::new(p.clone())?.taptree_root()),
+            CcvMode::Preserve,
         );
-        s.into_script()
+        Ok(s.into_script())
     }
 
     fn start_exit_outputs(
@@ -279,13 +273,7 @@ impl Unwind {
             trace_i,
             x,
         };
-        Ok(vec![
-            ClauseOutput::at(0)
-                .to(PendingExit::new(p.clone())?.as_erased())
-                .with_state(&state)
-                .preserve_amount()
-                .build(),
-        ])
+        Ok(vec![PendingExit::new(p.clone())?.output(0, state)])
     }
 }
 

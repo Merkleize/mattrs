@@ -22,22 +22,24 @@ use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, ClauseOutput};
 use mattrs::{
-    ContractParams, ContractState, Signature, contract, contracts::CCV_FLAG_CHECK_INPUT,
-    contracts::CCV_FLAG_DEDUCT_OUTPUT_AMOUNT, internal_key_or_nums, optional_key_script,
+    ContractState, Signature,
+    ccv::{CcvIndex, CcvMode},
+    contract, internal_key_or_nums, optional_key_script,
 };
 
 define_pushable!();
 
-fn output_index(value: i64, name: &str) -> Result<u32, ClauseError> {
-    u32::try_from(value)
-        .map_err(|_| ClauseError::Other(format!("{name} must be between 0 and u32::MAX")))
+fn recovery_output(index: i64, key: XOnlyPublicKey) -> Result<ClauseOutput, ClauseError> {
+    // CCV with empty data and taptree pays the output key without a tweak.
+    let script = mattrs::script_helpers::opaque_p2tr(key);
+    Ok(ClauseOutput::at(CcvIndex::try_from(index)?).pay(script))
 }
 
 // ============================================================================
 // Vault Parameters & State
 // ============================================================================
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct VaultParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
@@ -45,7 +47,7 @@ pub struct VaultParams {
     pub unvault_pk: XOnlyPublicKey,
 }
 
-#[derive(Debug, Clone, ContractParams)]
+#[derive(Debug, Clone)]
 pub struct UnvaultingParams {
     pub alternate_pk: Option<XOnlyPublicKey>,
     pub spend_delay: u32,
@@ -53,6 +55,7 @@ pub struct UnvaultingParams {
 }
 
 #[derive(Debug, Clone, ContractState)]
+#[commit(identity)]
 pub struct UnvaultingState {
     pub ctv_hash: [u8; 32],
 }
@@ -64,6 +67,7 @@ pub struct UnvaultingState {
 contract! {
     contract Vault {
         params VaultParams;
+        validate |p| mattrs::BlockDelay::new(p.spend_delay).map(|_| ());
         internal_key |p| internal_key_or_nums(p.alternate_pk);
 
         // witness: <sig> <ctv-hash> <out_i>
@@ -78,7 +82,7 @@ contract! {
             next(p, a) {
                 Vault::new(p.clone())?.trigger_outputs(
                     a.ctv_hash,
-                    output_index(a.out_i, "out_i")?,
+                    CcvIndex::try_from(a.out_i)?,
                 )
             }
         }
@@ -96,8 +100,8 @@ contract! {
             next(p, a) {
                 Vault::new(p.clone())?.trigger_and_revault_outputs(
                     a.ctv_hash,
-                    output_index(a.out_i, "out_i")?,
-                    output_index(a.revault_out_i, "revault_out_i")?,
+                    CcvIndex::try_from(a.out_i)?,
+                    CcvIndex::try_from(a.revault_out_i)?,
                 )
             }
         }
@@ -108,6 +112,7 @@ contract! {
                 out_i: i64,
             }
             script Vault::recover_script;
+            next(p, a) { recovery_output(a.out_i, p.recover_pk) }
         }
 
         tree [trigger, [trigger_and_revault, recover]];
@@ -127,69 +132,56 @@ impl Vault {
     pub fn trigger_outputs(
         &self,
         ctv_hash: [u8; 32],
-        out_i: u32,
+        out_i: impl Into<CcvIndex>,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let params = self.params();
         let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
         let state = UnvaultingState { ctv_hash };
 
-        Ok(vec![
-            ClauseOutput::at(out_i)
-                .to(unvaulting.as_erased())
-                .with_state(&state)
-                .preserve_amount()
-                .build(),
-        ])
+        Ok(vec![unvaulting.output(out_i, state)])
     }
 
     pub fn trigger_and_revault_outputs(
         &self,
         ctv_hash: [u8; 32],
-        out_i: u32,
-        revault_out_i: u32,
+        out_i: impl Into<CcvIndex>,
+        revault_out_i: impl Into<CcvIndex>,
     ) -> Result<Vec<ClauseOutput>, ClauseError> {
         let params = self.params();
         let unvaulting = Unvaulting::new(Self::unvaulting_params(&params))?;
         let state = UnvaultingState { ctv_hash };
 
         Ok(vec![
-            ClauseOutput::at(revault_out_i)
-                .to(Vault::new(params)?.as_erased())
-                .deduct_amount()
-                .build(),
-            ClauseOutput::at(out_i)
-                .to(unvaulting.as_erased())
-                .with_state(&state)
-                .preserve_amount()
-                .build(),
+            Vault::new(params)?.output(revault_out_i).deduct_amount(),
+            unvaulting.output(out_i, state),
         ])
     }
 
-    fn trigger_script(params: &VaultParams) -> ScriptBuf {
-        let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
-            .expect("Unvaulting contract definition is valid")
-            .taptree_root();
+    fn trigger_script(params: &VaultParams) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let unvaulting_taptree_root =
+            Unvaulting::new(Self::unvaulting_params(params))?.taptree_root();
 
-        script! {
+        Ok(script! {
             { optional_key_script(params.alternate_pk) }
             { unvaulting_taptree_root }
             0
             CHECKCONTRACTVERIFY
             { params.unvault_pk }
             CHECKSIG
-        }
+        })
     }
 
-    fn trigger_and_revault_script(params: &VaultParams) -> ScriptBuf {
-        let unvaulting_taptree_root = Unvaulting::new(Self::unvaulting_params(params))
-            .expect("Unvaulting contract definition is valid")
-            .taptree_root();
+    fn trigger_and_revault_script(
+        params: &VaultParams,
+    ) -> Result<ScriptBuf, mattrs::contracts::ContractError> {
+        let unvaulting_taptree_root =
+            Unvaulting::new(Self::unvaulting_params(params))?.taptree_root();
 
-        script! {
+        Ok(script! {
             0 OP_SWAP
             -1
             -1
-            { CCV_FLAG_DEDUCT_OUTPUT_AMOUNT }
+            { CcvMode::DeductAmount.as_i32() }
             CHECKCONTRACTVERIFY
             { optional_key_script(params.alternate_pk) }
             { unvaulting_taptree_root }
@@ -197,7 +189,7 @@ impl Vault {
             CHECKCONTRACTVERIFY
             { params.unvault_pk }
             CHECKSIG
-        }
+        })
     }
 
     fn recover_script(params: &VaultParams) -> ScriptBuf {
@@ -231,6 +223,12 @@ contract! {
             }
             timelock |p| p.spend_delay;
             script Unvaulting::withdraw_script;
+            next(_p, a, s) {
+                if a.ctv_hash != s.ctv_hash {
+                    return Err(ClauseError::Other("withdrawal hash does not match committed state".into()));
+                }
+                Ok(mattrs::contracts::NextOutputs::TemplateHash(s.ctv_hash))
+            }
         }
 
         // witness: <out_i> — terminal (spends to recover_pk)
@@ -239,6 +237,7 @@ contract! {
                 out_i: i64,
             }
             script Unvaulting::recover_script;
+            next(p, a) { recovery_output(a.out_i, p.recover_pk) }
         }
 
         tree [withdraw, recover];
@@ -252,7 +251,7 @@ impl Unvaulting {
             -1
             { optional_key_script(params.alternate_pk) }
             -1
-            { CCV_FLAG_CHECK_INPUT }
+            { CcvMode::CheckInput.as_i32() }
             CHECKCONTRACTVERIFY
             CHECKTEMPLATEVERIFY
         }
