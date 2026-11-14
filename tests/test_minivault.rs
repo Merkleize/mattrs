@@ -11,7 +11,7 @@ mod support;
 use bitcoin::{Amount, TxOut, XOnlyPublicKey};
 use mattrs::manager::ContractManager;
 use mattrs::report::Report;
-use mattrs::script_helpers::opaque_p2tr;
+use mattrs::script::opaque_p2tr;
 use mattrs::signer::HotSigner;
 use support::minivault::{MiniUnvaulting, MiniUnvaultingHandle, MiniVault, MiniVaultParams};
 use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client, report_spend};

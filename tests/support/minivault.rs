@@ -32,13 +32,10 @@
 //! ```
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::{CcvIndex, CcvMode};
-use mattrs::{
-    ContractState, Signature, clause_tree, contract, internal_key_or_nums, optional_key_script,
-};
-
-define_pushable!();
+use mattrs::script;
+use mattrs::script::{check_output_pays_key, optional_key_script};
+use mattrs::{ContractState, Signature, clause_tree, contract, internal_key_or_nums};
 
 // ============================================================================
 // MiniUnvaulting — fixed clause set, so the contract! DSL applies
@@ -109,12 +106,7 @@ impl MiniUnvaulting {
 
     fn recover_script(params: &MiniUnvaultingParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }
@@ -244,12 +236,7 @@ impl MiniVault {
 
     fn recover_script(params: &MiniVaultParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }

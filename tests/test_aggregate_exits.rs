@@ -12,7 +12,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, Network, Transaction};
 use mattrs::manager::{ContractManager, InstanceHandle, SpendBuilder};
 use mattrs::merkle::NIL;
-use mattrs::script_helpers::opaque_p2tr;
+use mattrs::script::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
 // The demo cast (pool, keys, exit set) is shared with the demo binary.

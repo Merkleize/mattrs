@@ -21,8 +21,10 @@ The crate is unpublished; use it as a path dependency:
 [dependencies]
 mattrs = { path = "../mattrs" }
 bitcoin = "0.32"
-bitcoin-script = { path = "../mattrs/bitcoin-script" }   # patched vendor, see below
 ```
+
+`use mattrs::prelude::*;` brings in the names nearly every contract file needs,
+including `contract!`, `script!` and the `script` module of reusable fragments.
 
 Then run the offline example — it defines a two-clause contract with the
 `contract!` DSL, derives its address, then funds and spends it on an in-memory
@@ -32,8 +34,9 @@ chain, without a node:
 cargo run --example getting_started
 ```
 
-> **Note on `bitcoin-script/`**: this repository vendors a *patched* copy of
-> [BitVM/rust-bitcoin-script](https://github.com/BitVM/rust-bitcoin-script) v0.2.0.
+> **Note on `bitcoin-script/`**: `mattrs::script!` is built on a *patched* copy of
+> [BitVM/rust-bitcoin-script](https://github.com/BitVM/rust-bitcoin-script) v0.2.0,
+> vendored in this repository (you do not depend on it directly).
 > The patch (`bitcoin-script/src/parse.rs`) teaches the `script!` macro the MATT
 > opcodes `OP_CHECKTEMPLATEVERIFY` (0xb3), `OP_CHECKCONTRACTVERIFY` (0xbb), and
 > `OP_CHECKSIGFROMSTACK` (0xcc),
@@ -279,7 +282,8 @@ script.ccv(
 let script = script.into_script();
 ```
 
-`CcvIndex::at(n)?` validates an explicit index's Script-number range;
+An index argument takes a small literal (`0`, `1`) or `CcvIndex::CURRENT`;
+`CcvIndex::at(n)?` validates a larger explicit index's Script-number range;
 `CcvIndex::try_from(n)?` also accepts the current-input sentinel `-1`.
 `CcvMode::{CheckInput, Preserve, IgnoreAmount, DeductAmount}` are alternatives,
 not bit flags. `CcvMode::try_from(n)?` rejects undefined modes, which would
@@ -293,8 +297,12 @@ current **internal** key, not the untweaked naked key. Constant keys use `XOnlyP
 Named stack items still require script-side validation. These types do not
 generate or validate the clause's host-side `next` metadata.
 
-The shared `check_input_contract`, `check_output_contract`, and bisection
-`state_output_script` helpers also take `CcvIndex`. For intentionally
+For the common cases there are ready fragments in `mattrs::script`, taking the
+same index type: `check_input_contract` (the state this input carries),
+`check_output_contract` (an output in another contract),
+`check_output_same_contract` (an output back in this contract) and
+`check_output_pays_key` (an output paying a bare key, e.g. `recover`). The
+bisection `state_output_script` helper builds on them. For intentionally
 unchecked operands, use `StackScript::ccv_raw` with `RawCcvSource`, or raw
 `script!` assembly (interpolate `CcvMode::DeductAmount.as_i32()` and friends;
 modes are alternatives, never flags to combine).
@@ -426,7 +434,7 @@ stack tracker for assembling tapscripts against *named* witness elements
 instead of hand-counted `OP_PICK` depths (`mattrs::stack`), the
 `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
 `check_output_contract` / `older` / `opaque_p2tr` script
-fragments (`mattrs::script_helpers`), `commit_int` (`mattrs::script_utils`),
+fragments and `commit_int` (`mattrs::script`),
 bare-key payout and burn outputs (the `ClauseOutput::pay_key` /
 `ClauseOutput::burn` constructors), a `WitnessReader`
 for parsing raw-args witnesses sequentially, the `opaque_merkle_state!` macro

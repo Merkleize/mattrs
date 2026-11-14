@@ -7,7 +7,7 @@
 //! key must sign them). It mirrors the Python ArgType system from pymatt.
 
 use crate::contracts::{ArgType as ArgTypeTrait, WitnessEncodable, WitnessError};
-use crate::script_utils::vch2bn;
+use crate::script::vch2bn;
 use bitcoin::XOnlyPublicKey;
 use std::marker::PhantomData;
 
@@ -115,7 +115,7 @@ impl ArgTypeTrait for SignerType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::script_utils::bn2vch;
+    use crate::script::bn2vch;
 
     #[test]
     fn test_int_type_consume() {

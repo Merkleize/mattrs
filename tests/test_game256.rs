@@ -7,7 +7,7 @@ mod support;
 
 use bitcoin::XOnlyPublicKey;
 
-use mattrs::script_helpers::{dup, merkle_root};
+use mattrs::script::{dup, merkle_root};
 use support::game256::{BisectParams, G256Params, G256S0, G256S1, G256S2, bisect1, bisect2, leaf};
 
 // Regenerate the pinned roots with pymatt (from the repo root):
@@ -95,7 +95,7 @@ fn test_g256_stage_taptrees_match_reference() {
 
 #[test]
 fn test_merkle_root_and_dup_script_bytes() {
-    // Byte-exact against pymatt's script_helpers.merkle_root(3) / dup(1).
+    // Byte-exact against pymatt's script.merkle_root(3) / dup(1).
     assert_eq!(hex::encode(merkle_root(3).as_bytes()), "6b7ea86c7ea8");
     assert_eq!(hex::encode(dup(1).as_bytes()), "76");
 }
@@ -161,7 +161,7 @@ fn test_game256_state_transitions() {
         .sign(HotSigner::new(bob_xpriv()))
         .build_tx()
         .unwrap();
-    let commit = |v: i64| mattrs::script_utils::commit_int(v);
+    let commit = |v: i64| mattrs::script::commit_int(v);
     assert_eq!(
         tx.output[0].script_pubkey,
         addr(

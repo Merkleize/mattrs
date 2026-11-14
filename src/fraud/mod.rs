@@ -50,9 +50,9 @@ pub mod roles;
 use std::sync::Arc;
 
 use crate::ccv::CcvIndex;
+use crate::script;
 use bitcoin::hashes::{Hash, sha256};
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 
 use crate::Signature;
 use crate::argtypes::{BytesType, SignerType};
@@ -60,12 +60,10 @@ use crate::contracts::ContractError;
 use crate::contracts::{ArgSpec, ClauseError, ClauseOutput};
 use crate::manager::SpendBuilder;
 use crate::merkle::is_power_of_2;
-use crate::script_helpers::{
+use crate::script::{
     check_input_contract, check_output_contract, concat, drop as script_drop, dup, merkle_root,
 };
 use mattrs_derive::{ContractState, contract};
-
-define_pushable!();
 
 /// Invalid public input to the generic fraud-proof construction.
 #[derive(Debug, Clone, PartialEq, Eq)]

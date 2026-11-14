@@ -1,7 +1,7 @@
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
 use mattrs::argtypes::IntType;
 use mattrs::contracts::*;
-use mattrs::script_utils;
+use mattrs::script;
 use mattrs::{ClauseArgs as DeriveClauseArgs, ContractState as DeriveContractState};
 use std::fmt::Debug;
 use std::str::FromStr;
@@ -57,15 +57,15 @@ struct TriggerArgs {
 
 impl ClauseArgs for TriggerArgs {
     fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-        vec![script_utils::bn2vch(self.withdraw_amount)]
+        vec![script::bn2vch(self.withdraw_amount)]
     }
 
     fn decode_from_witness(witness: &[Vec<u8>]) -> Result<Self, WitnessError> {
         if witness.is_empty() {
             return Err(WitnessError::StackUnderflow);
         }
-        let withdraw_amount = script_utils::vch2bn(&witness[0])
-            .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
+        let withdraw_amount =
+            script::vch2bn(&witness[0]).map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
         Ok(TriggerArgs { withdraw_amount })
     }
 }
@@ -518,7 +518,7 @@ fn test_expanded_state_flows_to_next_outputs() {
     }
     impl ContractState for CounterState {
         fn commitment(&self) -> StateCommitment {
-            StateCommitment::identity(script_utils::commit_int(self.secret).to_vec())
+            StateCommitment::identity(script::commit_int(self.secret).to_vec())
         }
     }
 
@@ -638,6 +638,6 @@ fn test_canonical_option_flags_and_checked_script_numbers() {
     assert!(<Option<i64> as WitnessEncodable>::decode_from_witness(&[vec![0]]).is_err());
     assert!(<Option<i64> as WitnessEncodable>::decode_from_witness(&[vec![2]]).is_err());
 
-    let too_large = script_utils::bn2vch(i64::from(i32::MAX) + 1);
+    let too_large = script::bn2vch(i64::from(i32::MAX) + 1);
     assert!(<i32 as WitnessEncodable>::decode_from_witness(&[too_large]).is_err());
 }

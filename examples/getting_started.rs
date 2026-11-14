@@ -13,19 +13,12 @@
 
 use std::str::FromStr;
 
-use bitcoin::bip32::Xpriv;
-use bitcoin::{Amount, ScriptBuf, TxOut, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use std::rc::Rc;
 
-use mattrs::ccv::CcvIndex;
-use mattrs::chain::LocalChain;
-use mattrs::contracts::InstanceStatus;
-use mattrs::manager::ContractManager;
-use mattrs::signer::HotSigner;
-use mattrs::{Signature, contract};
-
-define_pushable!();
+use bitcoin::bip32::Xpriv;
+use bitcoin::{Amount, ScriptBuf, TxOut, XOnlyPublicKey};
+use mattrs::prelude::*;
+use mattrs::script::check_output_pays_key;
 
 // ============================================================================
 // Contract definition
@@ -74,12 +67,7 @@ impl TimeLock {
 
     fn recover_script(params: &TimeLockParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }

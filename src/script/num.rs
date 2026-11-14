@@ -1,7 +1,4 @@
-//! Bitcoin Script encoding utilities.
-//!
-//! This module provides functions for encoding and decoding values to/from
-//! Bitcoin Script format, particularly for witness stack manipulation.
+//! Script-number encoding, for values that travel on the witness stack.
 
 use crate::contracts::WitnessError;
 
@@ -13,7 +10,7 @@ use crate::contracts::WitnessError;
 /// # Examples
 ///
 /// ```
-/// use mattrs::script_utils::bn2vch;
+/// use mattrs::script::bn2vch;
 ///
 /// // Small positive numbers
 /// assert_eq!(bn2vch(0), Vec::<u8>::new());
@@ -62,7 +59,7 @@ pub fn bn2vch(value: i64) -> Vec<u8> {
 /// # Examples
 ///
 /// ```
-/// use mattrs::script_utils::vch2bn;
+/// use mattrs::script::vch2bn;
 ///
 /// assert_eq!(vch2bn(&[]).unwrap(), 0);
 /// assert_eq!(vch2bn(&[0x01]).unwrap(), 1);

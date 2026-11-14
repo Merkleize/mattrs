@@ -22,7 +22,7 @@ use bitcoin::Amount;
 use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
 use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{LocalChain, Progress, Runner};
-use mattrs::script_helpers::key_path_p2tr as p2tr;
+use mattrs::script::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
 use support::game256::{FORFAIT_TIMEOUT, G256Params, G256S0};

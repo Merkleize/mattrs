@@ -24,7 +24,7 @@ use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
 use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::protocol::Runner;
 use mattrs::report::Report;
-use mattrs::script_helpers::key_path_p2tr as p2tr;
+use mattrs::script::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
 use support::game256::{G256Params, G256S0};

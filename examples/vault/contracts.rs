@@ -19,19 +19,18 @@
 //! ```
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::{ClauseError, ClauseOutput};
+use mattrs::script;
+use mattrs::script::{check_output_pays_key, optional_key_script};
 use mattrs::{
     ContractState, Signature,
     ccv::{CcvIndex, CcvMode},
-    contract, internal_key_or_nums, optional_key_script,
+    contract, internal_key_or_nums,
 };
-
-define_pushable!();
 
 fn recovery_output(index: CcvIndex, key: XOnlyPublicKey) -> Result<ClauseOutput, ClauseError> {
     // CCV with empty data and taptree pays the output key without a tweak.
-    let script = mattrs::script_helpers::opaque_p2tr(key);
+    let script = mattrs::script::opaque_p2tr(key);
     Ok(ClauseOutput::at(index).pay(script))
 }
 
@@ -194,12 +193,7 @@ impl Vault {
 
     fn recover_script(params: &VaultParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }
@@ -259,12 +253,7 @@ impl Unvaulting {
 
     fn recover_script(params: &UnvaultingParams) -> ScriptBuf {
         script! {
-            0
-            SWAP
-            { params.recover_pk }
-            0
-            0
-            CHECKCONTRACTVERIFY
+            { check_output_pays_key(params.recover_pk) }
             TRUE
         }
     }

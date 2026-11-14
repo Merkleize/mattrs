@@ -19,7 +19,7 @@ use mattrs::fraud::roles::{
 };
 use mattrs::fraud::trace;
 use mattrs::protocol::{Action, ProtocolError, Role};
-use mattrs::script_utils::{bn2vch, commit_int, vch2bn};
+use mattrs::script::{bn2vch, commit_int, vch2bn};
 
 use super::game256::{
     G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Handle, G256S2Spend,

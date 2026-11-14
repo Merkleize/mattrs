@@ -7,7 +7,7 @@ use mattrs::ccv::CcvIndex;
 use mattrs::contract;
 use mattrs::contracts::{ClauseOutput, InstanceStatus, NextOutputs};
 use mattrs::manager::{InstanceHandle, ManagerError};
-use mattrs::script_helpers::opaque_p2tr;
+use mattrs::script::opaque_p2tr;
 use support::testkit::{alice_pk, bob_pk};
 use support::vault::{
     Unvaulting, UnvaultingHandle, UnvaultingParams, UnvaultingState, Vault, VaultHandle,

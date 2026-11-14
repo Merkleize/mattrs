@@ -16,10 +16,10 @@
 use std::sync::Arc;
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::argtypes::IntType;
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::ArgSpec;
+use mattrs::script;
 use mattrs::{ContractState, Signature, contract};
 
 // Re-exported so tests can import the whole game through this module; each test
@@ -29,9 +29,7 @@ pub use mattrs::fraud::{
     Bisect1, Bisect1Handle, Bisect1State, Bisect2, Bisect2Handle, Bisect2State, BisectCtx,
     BisectParams, Computer, Leaf, LeafFactory, LeafHandle, LeafParams, LeafState,
 };
-use mattrs::script_helpers::{check_input_contract, check_output_contract, dup, merkle_root};
-
-define_pushable!();
+use mattrs::script::{check_input_contract, check_output_contract, dup, merkle_root};
 
 /// The challenge timeout (blocks) for the bisection's forfait clauses.
 pub const FORFAIT_TIMEOUT: u32 = 10;
@@ -230,7 +228,7 @@ contract! {
             }
             script G256S2::start_challenge_script;
             next(p, a) {
-                let commit = mattrs::script_utils::commit_int;
+                let commit = mattrs::script::commit_int;
                 Ok(vec![bisect1(p.bisect()).entry_output(
                     commit(a.x),
                     commit(a.y),

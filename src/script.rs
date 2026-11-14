@@ -1,16 +1,65 @@
-//! Reusable `CHECKCONTRACTVERIFY` / timelock script fragments, ported from
-//! pymatt's `matt/script_helpers.py`. These build the small CCV/CSV building
-//! blocks that MATT contracts assemble their tapscripts from.
+//! Everything for writing tapscripts: the [`script!`](crate::script!) macro,
+//! reusable `CHECKCONTRACTVERIFY` / timelock / Merkle fragments (ported from
+//! pymatt's `matt/script_helpers.py`), output scripts, and script-number
+//! encoding.
+//!
+//! ```
+//! use mattrs::script;
+//! use mattrs::script::older;
+//!
+//! let key = mattrs::nums_key();
+//! let after_a_day = script! {
+//!     { older(144) }
+//!     { key }
+//!     OP_CHECKSIG
+//! };
+//! assert_eq!(after_a_day.len(), 3 + 1 + 1 + 33 + 1);
+//! ```
 
-use crate::{
-    ccv::{CcvIndex, CcvMode},
-    optional_key_script,
-};
+mod num;
+
+pub use num::{bn2vch, commit_int, vch2bn};
+
+use crate::ccv::{CcvIndex, CcvMode};
 use bitcoin::key::TweakedPublicKey;
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 
-define_pushable!();
+// The builder `script!` expands to. Public because the expansion names it
+// from the caller's crate; not meant to be used directly.
+bitcoin_script::define_pushable!();
+
+/// Build a [`ScriptBuf`] inline: opcodes (`OP_DUP`, or without the prefix),
+/// integer and `0x` hex literals, and Rust expressions in `{ .. }` — integers,
+/// byte vectors and 32-byte arrays, keys, other scripts (spliced in
+/// byte-for-byte), and `Vec`s of those.
+///
+/// ```
+/// use mattrs::script;
+///
+/// let digest = [7u8; 32];
+/// let s = script! { OP_SHA256 { digest } OP_EQUALVERIFY 1 };
+/// assert_eq!(s.len(), 1 + 33 + 1 + 1);
+/// ```
+#[macro_export]
+macro_rules! script {
+    ($($tokens:tt)*) => {{
+        #[allow(unused_imports)]
+        use $crate::script::pushable;
+        $crate::__bitcoin_script!($($tokens)*)
+    }};
+}
+
+/// Returns a script fragment that pushes the x-only key if `Some`, or `OP_0` if
+/// `None`. Used inside `script!` blocks for CHECKCONTRACTVERIFY key arguments.
+pub fn optional_key_script(maybe_pk: Option<XOnlyPublicKey>) -> ScriptBuf {
+    let builder = bitcoin::script::Builder::new();
+    let builder = if let Some(pk) = maybe_pk {
+        builder.push_x_only_key(&pk)
+    } else {
+        builder.push_int(0)
+    };
+    builder.into_script()
+}
 
 /// The P2TR scriptPubKey (`OP_1 <key>`) that pays `key` *directly as the witness
 /// program*, with no key tweak or script path.
@@ -38,7 +87,11 @@ pub fn key_path_p2tr(key: XOnlyPublicKey) -> ScriptBuf {
 /// input's taptree (the committed data is expected on the stack).
 /// [`CcvIndex::CURRENT`] selects the executing input; `pubkey` is the naked key
 /// before the data tweak, or `None` for the NUMS default.
-pub fn check_input_contract(index: CcvIndex, pubkey: Option<XOnlyPublicKey>) -> ScriptBuf {
+pub fn check_input_contract(
+    index: impl Into<CcvIndex>,
+    pubkey: Option<XOnlyPublicKey>,
+) -> ScriptBuf {
+    let index = index.into();
     script! {
         { index.as_i64() }
         { optional_key_script(pubkey) }
@@ -53,13 +106,45 @@ pub fn check_input_contract(index: CcvIndex, pubkey: Option<XOnlyPublicKey>) -> 
 /// "same index as this input".
 pub fn check_output_contract(
     taptree_root: [u8; 32],
-    index: CcvIndex,
+    index: impl Into<CcvIndex>,
     pubkey: Option<XOnlyPublicKey>,
 ) -> ScriptBuf {
+    let index = index.into();
     script! {
         { index.as_i64() }
         { optional_key_script(pubkey) }
         { taptree_root }
+        { CcvMode::Preserve.as_i32() }
+        CHECKCONTRACTVERIFY
+    }
+}
+
+/// CCV fragment that constrains an output to *this same contract* (the
+/// executing input's taptree), carrying the data expected on the stack and
+/// the input's amount: the step of a contract that updates its own state.
+pub fn check_output_same_contract(
+    index: impl Into<CcvIndex>,
+    pubkey: Option<XOnlyPublicKey>,
+) -> ScriptBuf {
+    let index = index.into();
+    script! {
+        { index.as_i64() }
+        { optional_key_script(pubkey) }
+        -1
+        { CcvMode::Preserve.as_i32() }
+        CHECKCONTRACTVERIFY
+    }
+}
+
+/// CCV fragment that sends the input's amount to `key` itself (an
+/// [`opaque_p2tr`] output: no data, no taptree), at the output whose index is
+/// on top of the stack. The usual body of a `recover(out_i)` clause.
+pub fn check_output_pays_key(key: XOnlyPublicKey) -> ScriptBuf {
+    script! {
+        0
+        OP_SWAP
+        { key }
+        0
         { CcvMode::Preserve.as_i32() }
         CHECKCONTRACTVERIFY
     }

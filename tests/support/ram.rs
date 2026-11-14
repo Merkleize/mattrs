@@ -12,15 +12,13 @@
 //! Fixed to a depth-2 tree (`size = 4`) via the const `WitProof<2>` proof arg.
 
 use bitcoin::ScriptBuf;
-use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::ClauseError;
+use mattrs::script;
 use mattrs::{ContractState, contract};
 
 use mattrs::merkle::{WitProof, floor_lg};
-use mattrs::script_helpers::{check_input_contract, concat};
-
-define_pushable!();
+use mattrs::script::{check_input_contract, check_output_same_contract, concat};
 
 #[derive(Debug, Clone)]
 pub struct RamParams {
@@ -137,7 +135,7 @@ impl Ram {
             OP_EQUALVERIFY
 
             // commit the new root to the same contract at the same output index
-            -1 0 -1 0 CHECKCONTRACTVERIFY
+            { check_output_same_contract(CcvIndex::CURRENT, None) }
 
             OP_TRUE
         };

@@ -138,7 +138,7 @@ fn merkle_commitments_keep_expanded_state_without_a_codec() {
     };
     let root = mattrs::merkle::MerkleTree::new(vec![
         state.first,
-        mattrs::script_utils::commit_int(state.number),
+        mattrs::script::commit_int(state.number),
         [2; 32],
         [3; 32],
     ])
@@ -210,7 +210,7 @@ fn commitments_are_independent_of_optional_serialization() {
         .spend_clause("spend", vec![])
         .outputs(vec![TxOut {
             value: Amount::from_sat(900),
-            script_pubkey: mattrs::script_helpers::opaque_p2tr(mattrs::nums_key()),
+            script_pubkey: mattrs::script::opaque_p2tr(mattrs::nums_key()),
         }])
         .build_tx()
         .unwrap();
@@ -220,10 +220,9 @@ fn commitments_are_independent_of_optional_serialization() {
 #[test]
 #[ignore = "requires a running MATT-enabled regtest bitcoind"]
 fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
-    use bitcoin_script::{define_pushable, script};
     use mattrs::ccv::CcvIndex;
     use mattrs::contracts::ArgSpec;
-    define_pushable!();
+    use mattrs::script;
     let contract = Arc::new(StandardP2TR::<(), RawState>::new(
         "RawData",
         mattrs::nums_key(),
@@ -231,7 +230,7 @@ fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error:
         ClauseTree::leaf(Arc::new(StandardClause::<(), RawState, RawArgs>::new(
             "reveal".into(),
             script! {
-                { mattrs::script_helpers::check_input_contract(CcvIndex::CURRENT, None) } OP_TRUE
+                { mattrs::script::check_input_contract(CcvIndex::CURRENT, None) } OP_TRUE
             },
             vec![ArgSpec {
                 name: "data".into(),
@@ -258,7 +257,7 @@ fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error:
             .spend_clause("reveal", vec![bytes])
             .outputs(vec![TxOut {
                 value: Amount::from_sat(9_000),
-                script_pubkey: mattrs::script_helpers::opaque_p2tr(mattrs::nums_key()),
+                script_pubkey: mattrs::script::opaque_p2tr(mattrs::nums_key()),
             }])
             .exec_none(&mut manager)?;
     }

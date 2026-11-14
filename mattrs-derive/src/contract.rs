@@ -643,8 +643,8 @@ fn timelock_tokens(
                     let __csv_blocks = ::mattrs::BlockDelay::new(__csv_blocks)?.blocks();
                 },
                 quote! {
-                    ::mattrs::script_helpers::concat(&[
-                        ::mattrs::script_helpers::older(__csv_blocks),
+                    ::mattrs::script::concat(&[
+                        ::mattrs::script::older(__csv_blocks),
                         #script_call,
                     ])
                 },

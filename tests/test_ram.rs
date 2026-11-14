@@ -11,7 +11,7 @@ use mattrs::merkle::{
     MerkleError, MerkleProof, MerkleProofType, MerkleTree, WitProof, ceil_lg, floor_lg,
     get_directions,
 };
-use mattrs::script_utils::bn2vch;
+use mattrs::script::bn2vch;
 use support::ram::{Ram, RamHandle, RamParams, RamState};
 
 fn ref_leaves() -> Vec<[u8; 32]> {
@@ -167,7 +167,7 @@ fn test_merkle_proof_type_arg_consumes_2n_plus_1() {
     assert!(mpt.consume(&bad_hash).is_err());
 
     let mut bad_direction = stack.clone();
-    bad_direction[1] = mattrs::script_utils::bn2vch(2);
+    bad_direction[1] = mattrs::script::bn2vch(2);
     assert!(mpt.consume(&bad_direction).is_err());
 
     let mut bad_leaf = stack;

@@ -44,7 +44,7 @@ impl BlockDelay {
 
     /// The matching `CSV DROP` script fragment.
     pub fn script(self) -> ScriptBuf {
-        crate::script_helpers::older(self.blocks())
+        crate::script::older(self.blocks())
     }
 
     /// Whether a transaction input's sequence satisfies this block constraint.
@@ -70,7 +70,7 @@ mod tests {
         for blocks in [1, 10, 65_535] {
             let delay = BlockDelay::new(blocks).unwrap();
             assert_eq!(delay.sequence().to_consensus_u32(), blocks);
-            assert_eq!(delay.script(), crate::script_helpers::older(blocks));
+            assert_eq!(delay.script(), crate::script::older(blocks));
         }
     }
 

@@ -6,7 +6,7 @@
 //! a contract commits to, and the membership proofs a spend reveals.
 
 use crate::contracts::{ArgType, WitnessEncodable, WitnessError};
-use crate::script_utils::{bn2vch, vch2bn};
+use crate::script::{bn2vch, vch2bn};
 use bitcoin::hashes::{Hash, sha256};
 
 /// Errors produced while constructing or converting Merkle proofs.

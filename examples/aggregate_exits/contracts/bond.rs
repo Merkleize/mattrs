@@ -7,13 +7,11 @@
 //! about the target is re-declared or carried in the bond's witness.
 
 use bitcoin::{ScriptBuf, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::contracts::NextOutputs;
+use mattrs::script;
 use mattrs::{Signature, contract};
 
 use super::PoolParams;
-
-define_pushable!();
 
 /// A bond UTXO's parameters: the pool it stakes into and its owner. The pool
 /// params ride along for self-description; only the owner key reaches the

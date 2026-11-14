@@ -375,14 +375,14 @@ macro_rules! impl_scriptnum_witness {
             const ELEMENTS: Option<usize> = Some(1);
 
             fn encode_to_witness(&self) -> Vec<Vec<u8>> {
-                vec![crate::script_utils::bn2vch(*self as i64)]
+                vec![crate::script::bn2vch(*self as i64)]
             }
 
             fn decode_from_witness(witness: &[Vec<u8>]) -> Result<(Self, usize), WitnessError> {
                 if witness.is_empty() {
                     return Err(WitnessError::StackUnderflow);
                 }
-                let val = crate::script_utils::vch2bn(&witness[0])
+                let val = crate::script::vch2bn(&witness[0])
                     .map_err(|e| WitnessError::DecodingFailed(e.to_string()))?;
                 let value = <$t>::try_from(val).map_err(|_| {
                     WitnessError::InvalidValue(format!(
@@ -780,7 +780,7 @@ impl<'a> WitnessReader<'a> {
     /// The next element, as a Bitcoin script number.
     pub fn num(&mut self) -> Result<i64, WitnessError> {
         let pos = self.pos;
-        crate::script_utils::vch2bn(self.take()?)
+        crate::script::vch2bn(self.take()?)
             .map_err(|e| WitnessError::DecodingFailed(format!("witness element {pos}: {e}")))
     }
 
@@ -922,7 +922,7 @@ pub enum OutputTarget {
 ///
 /// ```
 /// use mattrs::contracts::{ClauseOutput, NextOutputs};
-/// let payment = ClauseOutput::at(0).pay(mattrs::script_helpers::opaque_p2tr(mattrs::nums_key()));
+/// let payment = ClauseOutput::at(0).pay(mattrs::script::opaque_p2tr(mattrs::nums_key()));
 /// let next: NextOutputs = payment.into();
 /// ```
 #[derive(Debug, Clone)]
@@ -967,12 +967,12 @@ impl ClauseOutput {
 
     /// A deduct-amount payout to `pk` at output `index`: the key is the
     /// *output* key, used verbatim (see
-    /// [`opaque_p2tr`](crate::script_helpers::opaque_p2tr)). The spender
+    /// [`opaque_p2tr`](crate::script::opaque_p2tr)). The spender
     /// supplies the amount via
     /// [`SpendBuilder::output_amount`](crate::manager::SpendBuilder::output_amount).
     pub fn pay_key(index: impl Into<CcvIndex>, pk: XOnlyPublicKey) -> ClauseOutput {
         ClauseOutput::at(index)
-            .pay(crate::script_helpers::opaque_p2tr(pk))
+            .pay(crate::script::opaque_p2tr(pk))
             .deduct_amount()
     }
 
@@ -1937,7 +1937,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> StandardP2TR<P, S>
     /// stateless contract).
     pub fn script_pubkey(&self, state: &S) -> Result<ScriptBuf, ContractError> {
         let output_key = self.output_key(state)?;
-        Ok(crate::script_helpers::opaque_p2tr(output_key))
+        Ok(crate::script::opaque_p2tr(output_key))
     }
 }
 
@@ -2002,7 +2002,7 @@ impl<P: ContractParams + 'static, S: ContractState + 'static> ErasedContract
     fn script_pubkey(&self, commitment: &StateCommitment) -> Result<ScriptBuf, ContractError> {
         let internal_key = self.internal_key_from_committed(commitment.as_bytes())?;
         let output_key = compute_taproot_output_key(&internal_key, Some(&self.core.taptree));
-        Ok(crate::script_helpers::opaque_p2tr(output_key))
+        Ok(crate::script::opaque_p2tr(output_key))
     }
 
     fn control_block_internal_key(

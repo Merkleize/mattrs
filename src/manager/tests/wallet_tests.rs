@@ -9,7 +9,7 @@ fn wallet_input(tag: u8) -> (ExternalInput, TxIn) {
         },
         prevout: TxOut {
             value: sat(10_000),
-            script_pubkey: crate::script_helpers::opaque_p2tr(crate::nums_key()),
+            script_pubkey: crate::script::opaque_p2tr(crate::nums_key()),
         },
     };
     let input = TxIn {

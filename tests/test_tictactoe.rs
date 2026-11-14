@@ -20,7 +20,7 @@ use bitcoin::{Amount, Sequence};
 use mattrs::contracts::{ContractState, StateCodec};
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{LocalChain, ProtocolError, Runner};
-use mattrs::script_helpers::key_path_p2tr as p2tr;
+use mattrs::script::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
 use support::testkit::{
@@ -109,7 +109,7 @@ fn explicit_state_hash_preserves_the_previous_address() {
     assert_eq!(state.commitment().as_bytes(), legacy_data);
     let contract = TicTacToe::new(params()).unwrap().as_erased();
     let internal = apply_state_tweak(&mattrs::nums_key(), &legacy_data).unwrap();
-    let expected = mattrs::script_helpers::opaque_p2tr(compute_taproot_output_key(
+    let expected = mattrs::script::opaque_p2tr(compute_taproot_output_key(
         &internal,
         Some(contract.taptree()),
     ));

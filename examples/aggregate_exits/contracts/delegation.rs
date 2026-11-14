@@ -1,18 +1,16 @@
 //! [`DelegationChallenge`]: "user k never delegated to you — prove it."
 
 use bitcoin::ScriptBuf;
-use bitcoin_script::{define_pushable, script};
 use mattrs::contract;
 use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
+use mattrs::script;
 
 use super::pending_exit::PendingExit;
 use super::unwind::{Unwind, UnwindState};
 use super::{ChallengeContext, PoolParams, spec};
 use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
 use mattrs::stack::StackScript;
-
-define_pushable!();
 
 /// The challenge's committed state: seven leaves (in [`Self::leaves`] order)
 /// carrying everything either outcome needs. The expanded state additionally
@@ -133,7 +131,7 @@ impl DelegationChallenge {
         // TODO(OP_AMOUNT): enforce that output 0 carries exactly `bond / 2`.
         s.ccv(
             CcvData::Empty,
-            CcvIndex::at(0).expect("valid output index"),
+            0,
             CcvKey::Item("ingrid_pk"),
             CcvTaptree::None,
             CcvMode::DeductAmount,
@@ -142,7 +140,7 @@ impl DelegationChallenge {
         // TODO(OP_AMOUNT): enforce that output 1 carries `bond - bond / 2`.
         s.ccv(
             CcvData::Empty,
-            CcvIndex::at(1).expect("valid output index"),
+            1,
             CcvKey::Const(mattrs::nums_key()),
             CcvTaptree::None,
             CcvMode::DeductAmount,
@@ -150,7 +148,7 @@ impl DelegationChallenge {
         // Output 2 resumes the claim (same state, fresh challenge period).
         s.ccv(
             CcvData::Item("resume"),
-            CcvIndex::at(2).expect("valid output index"),
+            2,
             CcvKey::Nums,
             CcvTaptree::Item("pe_taptree"),
             CcvMode::Preserve,
@@ -185,7 +183,7 @@ impl DelegationChallenge {
         // TODO(OP_AMOUNT): enforce that output 0 carries `bond + bond / 2`.
         s.ccv(
             CcvData::Empty,
-            CcvIndex::at(0).expect("valid output index"),
+            0,
             CcvKey::Item("challenger_pk"),
             CcvTaptree::None,
             CcvMode::DeductAmount,
@@ -194,7 +192,7 @@ impl DelegationChallenge {
         // TODO(OP_AMOUNT): enforce that output 1 carries `bond - bond / 2`.
         s.ccv(
             CcvData::Empty,
-            CcvIndex::at(1).expect("valid output index"),
+            1,
             CcvKey::Const(mattrs::nums_key()),
             CcvTaptree::None,
             CcvMode::DeductAmount,
@@ -202,7 +200,7 @@ impl DelegationChallenge {
         // Output 2 reverts the pool to the pre-claim root.
         s.ccv(
             CcvData::Item("r"),
-            CcvIndex::at(2).expect("valid output index"),
+            2,
             CcvKey::Nums,
             CcvTaptree::Item("unwind_taptree"),
             CcvMode::Preserve,

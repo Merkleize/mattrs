@@ -17,16 +17,14 @@
 //!
 //! Relative timelocks are deliberately not offered here: declare them with the
 //! `contract!` DSL's `timelock` section, which prepends the
-//! [`older`](crate::script_helpers::older) fragment *and* seeds the spend's
+//! [`older`](crate::script::older) fragment *and* seeds the spend's
 //! `nSequence`, so the script and the transaction cannot disagree.
 
 use crate::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
 use crate::contracts::ArgSpec;
-use crate::script_helpers::{concat, drop as script_drop, merkle_root};
+use crate::script;
+use crate::script::{concat, drop as script_drop, merkle_root};
 use bitcoin::ScriptBuf;
-use bitcoin_script::{define_pushable, script};
-
-define_pushable!();
 
 /// Untyped operand for [`StackScript::ccv_raw`]. Prefer the slot-specific types
 /// in [`crate::ccv`] with [`StackScript::ccv`].
@@ -283,7 +281,7 @@ impl StackScript {
     pub fn ccv(
         &mut self,
         data: CcvData<'_>,
-        index: CcvIndex,
+        index: impl Into<CcvIndex>,
         pk: CcvKey<'_>,
         taptree: CcvTaptree<'_>,
         mode: CcvMode,
@@ -306,7 +304,7 @@ impl StackScript {
             CcvTaptree::None => RawCcvSource::None,
             CcvTaptree::Current => RawCcvSource::Current,
         };
-        self.ccv_raw(data, index.as_i64(), pk, taptree, mode.as_i32());
+        self.ccv_raw(data, index.into().as_i64(), pk, taptree, mode.as_i32());
     }
 
     /// Emit CCV with unchecked operands, for low-level script experiments.

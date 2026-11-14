@@ -30,17 +30,17 @@
 //! immediately, and a winner who forgoes the claim only hurts themselves.
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::{
     ClauseError, ClauseOutput, ContractState, CtvTemplate, StateCodec, StateCommitment,
     WitnessError,
 };
 use mattrs::manager::SpendBuilder;
-use mattrs::script_helpers::{check_input_contract, concat, dup, key_path_p2tr, older};
+use mattrs::script;
+use mattrs::script::{
+    check_input_contract, check_output_same_contract, concat, dup, key_path_p2tr, older,
+};
 use mattrs::{Signature, contract};
-
-define_pushable!();
 
 /// The default stake (in sats) each player bets.
 pub const DEFAULT_STAKE: i64 = 1000;
@@ -418,7 +418,7 @@ impl TicTacToe {
             OP_SHA256
 
             // commit it to the same contract at the same output index
-            -1 0 -1 0 CHECKCONTRACTVERIFY
+            { check_output_same_contract(CcvIndex::CURRENT, None) }
             OP_TRUE
         }
     }

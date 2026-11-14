@@ -9,14 +9,12 @@
 //!   template. This exercises clause-owned CTV templates and CCV `check_in/out`.
 
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut, XOnlyPublicKey};
-use bitcoin_script::{define_pushable, script};
 use mattrs::ccv::CcvIndex;
 use mattrs::contracts::CtvTemplate;
-use mattrs::{ContractState, Signature, contract, script_utils::commit_int};
+use mattrs::script;
+use mattrs::{ContractState, Signature, contract, script::commit_int};
 
-use mattrs::script_helpers::{check_input_contract, check_output_contract, key_path_p2tr};
-
-define_pushable!();
+use mattrs::script::{check_input_contract, check_output_contract, key_path_p2tr};
 
 /// The default stake (in sats) each player bets.
 pub const DEFAULT_STAKE: i64 = 1000;
@@ -47,7 +45,7 @@ pub fn move_commitment(mv: i64) -> [u8; 32] {
 /// adjudicates the game.
 pub fn alice_move_commitment(m_a: i64, r_a: &[u8; 32]) -> [u8; 32] {
     use bitcoin::hashes::{Hash, sha256};
-    let mut preimage = mattrs::script_utils::bn2vch(m_a);
+    let mut preimage = mattrs::script::bn2vch(m_a);
     preimage.extend_from_slice(r_a);
     sha256::Hash::hash(&preimage).to_byte_array()
 }
@@ -94,7 +92,7 @@ impl RpsGameS0 {
 
             // commit sha256(m_b) into the next contract's state (output 0)
             OP_SHA256
-            { check_output_contract(s1_taptree_root, CcvIndex::at(0).expect("valid output index"), None) }
+            { check_output_contract(s1_taptree_root, 0, None) }
         })
     }
 }

@@ -52,7 +52,7 @@ fn pay(value: Amount, tag: u8) -> InstanceHandle {
 }
 
 fn script() -> bitcoin::ScriptBuf {
-    crate::script_helpers::opaque_p2tr(crate::nums_key())
+    crate::script::opaque_p2tr(crate::nums_key())
 }
 
 // Assemble deliberately invalid metadata-level transactions that the normal

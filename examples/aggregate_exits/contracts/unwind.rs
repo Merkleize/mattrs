@@ -1,20 +1,18 @@
 //! The [`Unwind`] pool: direct withdrawals and the entry into a delegated exit.
 
 use bitcoin::ScriptBuf;
-use bitcoin_script::{define_pushable, script};
 use mattrs::ContractState;
 use mattrs::contract;
 use mattrs::contracts::{ArgSpec, ClauseError, ClauseOutput, WitnessReader};
 use mattrs::manager::SpendBuilder;
 use mattrs::merkle::{MerkleProof, NIL};
-use mattrs::script_utils::bn2vch;
+use mattrs::script;
+use mattrs::script::bn2vch;
 
 use super::pending_exit::{PendingExit, PendingExitState};
 use super::{ExitClaim, PoolParams, PoolTree, bit_root, spec, spec_num};
 use mattrs::ccv::{CcvData, CcvIndex, CcvKey, CcvMode, CcvTaptree};
 use mattrs::stack::StackScript;
-
-define_pushable!();
 
 /// The pool's committed state: the account-tree root (identity commitment).
 #[derive(Debug, Clone, PartialEq, Eq, ContractState)]
@@ -67,7 +65,7 @@ contract! {
 /// This is the shared-direction dual walk with the one sibling duplicated:
 /// `<old> <new> <sib> <d>` becomes `<old> <new> <sib> <sib> <d>`.
 fn dual_update_layer() -> ScriptBuf {
-    mattrs::script_helpers::concat(&[script! { OP_SWAP OP_DUP OP_ROT }, super::dual_proof_layer()])
+    mattrs::script::concat(&[script! { OP_SWAP OP_DUP OP_ROT }, super::dual_proof_layer()])
 }
 
 impl Unwind {
@@ -101,7 +99,7 @@ impl Unwind {
         // preserves what is left after this caller-selected deduction.
         s.ccv(
             CcvData::Empty,
-            CcvIndex::at(0).expect("valid output index"),
+            0,
             CcvKey::Item("pk"),
             CcvTaptree::None,
             CcvMode::DeductAmount,
@@ -121,7 +119,7 @@ impl Unwind {
         // Output 1 continues the pool committing to the zeroed root.
         s.ccv(
             CcvData::Item("new_node"),
-            CcvIndex::at(1).expect("valid output index"),
+            1,
             CcvKey::Nums,
             CcvTaptree::Current,
             CcvMode::Preserve,
@@ -238,7 +236,7 @@ impl Unwind {
         // honor-system (the demo always posts it via a batched ExitBond input).
         s.ccv(
             CcvData::Item("pe_state"),
-            CcvIndex::at(0).expect("valid output index"),
+            0,
             CcvKey::Nums,
             CcvTaptree::Const(PendingExit::new(p.clone())?.taptree_root()),
             CcvMode::Preserve,

@@ -19,7 +19,7 @@ use bitcoin::{Amount, OutPoint, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
 use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::protocol::{Action, LocalChain, Progress, ProtocolError, Role, Runner};
-use mattrs::script_helpers::opaque_p2tr;
+use mattrs::script::opaque_p2tr;
 use mattrs::signer::HotSigner;
 
 use support::testkit::{alice_pk, alice_xpriv, bob_pk, drive_both, manager_on, regtest_client};
