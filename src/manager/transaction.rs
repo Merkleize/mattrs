@@ -307,7 +307,10 @@ fn derive_tx_outputs(
                         return Err(ManagerError::MixedOutputSemantics { index: idx });
                     }
                     semantics.insert(idx, Semantics::Preserve);
-                    entry.value += remaining;
+                    entry.value = entry
+                        .value
+                        .checked_add(remaining)
+                        .ok_or(ManagerError::AmountOverflow)?;
                     preserve_used = true;
                 }
                 AmountMode::Deduct => {
@@ -359,7 +362,10 @@ fn derive_tx_outputs(
         ) {
             return Err(ManagerError::MixedOutputSemantics { index: *index });
         }
-        entry.value += prevouts[input_index].value;
+        entry.value = entry
+            .value
+            .checked_add(prevouts[input_index].value)
+            .ok_or(ManagerError::AmountOverflow)?;
     }
 
     // Every caller-supplied amount must have been used by a DeductOutput;
