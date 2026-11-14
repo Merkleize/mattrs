@@ -106,27 +106,41 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     // body. An absolute cap also catches accidental sat/vB vs BTC/kvB mistakes.
     let signed =
         prepared.sign_funded(&manager, funded, external.clone(), Amount::from_sat(10_000))?;
-    let wallet_signed =
-        wallet.sign_raw_transaction_with_wallet(signed.transaction(), None, None)?;
-    // The wallet must sign every input it added. It may still report the
-    // transaction as incomplete: it re-verifies all inputs with its own script
-    // rules and cannot check covenant inputs, which the contract signers
-    // already authorized. Only an error on one of *its* inputs is a failure;
-    // the node's mempool acceptance below is the real validity check.
+    // The wallet only needs to sign the inputs it added. Hand it the
+    // transaction *without* the covenant witnesses: it cannot evaluate those
+    // scripts, and witnesses are not part of any signature hash, so they can
+    // be put back afterwards unchanged.
+    let is_wallet_input =
+        |outpoint: &bitcoin::OutPoint| external.iter().any(|x| x.outpoint == *outpoint);
+    let mut for_wallet = signed.transaction().clone();
+    for input in &mut for_wallet.input {
+        if !is_wallet_input(&input.previous_output) {
+            input.witness.clear();
+        }
+    }
+    let wallet_signed = wallet.sign_raw_transaction_with_wallet(&for_wallet, None, None)?;
+    // The wallet reports the covenant inputs as unsigned, which is expected;
+    // an error on one of *its* inputs is a failure.
     let unsigned_wallet_inputs: Vec<_> = wallet_signed
         .errors
         .iter()
         .flatten()
         .filter(|e| {
-            external
-                .iter()
-                .any(|x| x.outpoint.txid == e.txid && x.outpoint.vout == e.vout)
+            is_wallet_input(&bitcoin::OutPoint {
+                txid: e.txid,
+                vout: e.vout,
+            })
         })
         .collect();
     if !unsigned_wallet_inputs.is_empty() {
         return Err(format!("wallet signing incomplete: {unsigned_wallet_inputs:?}").into());
     }
-    let final_tx: Transaction = bitcoin::consensus::deserialize(&wallet_signed.hex)?;
+    let mut final_tx: Transaction = bitcoin::consensus::deserialize(&wallet_signed.hex)?;
+    for (input, ours) in final_tx.input.iter_mut().zip(&signed.transaction().input) {
+        if !is_wallet_input(&input.previous_output) {
+            input.witness = ours.witness.clone();
+        }
+    }
     signed.validate_final(&final_tx)?;
     let txid = wallet.send_raw_transaction(&final_tx)?;
     let result = signed.observe_final(&mut manager, &final_tx)?;
