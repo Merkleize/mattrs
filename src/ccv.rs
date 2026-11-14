@@ -252,6 +252,18 @@ mod tests {
     }
 
     #[test]
+    fn an_index_argument_is_the_script_number_and_rejects_undefined_ones() {
+        for index in [CcvIndex::CURRENT, CcvIndex::from(0), CcvIndex::from(7)] {
+            let witness = index.encode_to_witness();
+            assert_eq!(witness, index.as_i64().encode_to_witness());
+            assert_eq!(CcvIndex::decode_from_witness(&witness).unwrap(), (index, 1));
+        }
+        for undefined in [-2i64, i64::from(i32::MAX) + 1] {
+            assert!(CcvIndex::decode_from_witness(&undefined.encode_to_witness()).is_err());
+        }
+    }
+
+    #[test]
     fn indices_validate_script_number_boundaries() {
         assert_eq!(CcvIndex::try_from(-1i64), Ok(CcvIndex::CURRENT));
         assert_eq!(CcvIndex::CURRENT.as_i64(), -1);

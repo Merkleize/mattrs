@@ -74,7 +74,7 @@ contract! {
         // witness: <out_i> — terminal (spends to recover_pk)
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script MiniUnvaulting::recover_script;
         }
@@ -145,12 +145,12 @@ contract! {
                 #[signer(p.unvault_pk)]
                 sig: Signature,
                 withdrawal_pk: [u8; 32],
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script MiniVault::trigger_script;
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
-                Ok(vec![unvaulting.output(CcvIndex::try_from(a.out_i)?, MiniUnvaultingState {
+                Ok(vec![unvaulting.output(a.out_i, MiniUnvaultingState {
                         withdrawal_pk: a.withdrawal_pk,
                     })])
             }
@@ -162,15 +162,15 @@ contract! {
                 #[signer(p.unvault_pk)]
                 sig: Signature,
                 withdrawal_pk: [u8; 32],
-                out_i: i64,
-                revault_out_i: i64,
+                out_i: CcvIndex,
+                revault_out_i: CcvIndex,
             }
             script MiniVault::trigger_and_revault_script;
             next(p, a) {
                 let unvaulting = MiniUnvaulting::new(MiniVault::unvaulting_params(p))?;
                 Ok(vec![
-                    MiniVault::new(p.clone())?.output(CcvIndex::try_from(a.revault_out_i)?).deduct_amount(),
-                    unvaulting.output(CcvIndex::try_from(a.out_i)?, MiniUnvaultingState {
+                    MiniVault::new(p.clone())?.output(a.revault_out_i).deduct_amount(),
+                    unvaulting.output(a.out_i, MiniUnvaultingState {
                             withdrawal_pk: a.withdrawal_pk,
                         }),
                 ])
@@ -180,7 +180,7 @@ contract! {
         // witness: <out_i> — terminal (immediate recovery to the recovery key)
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script MiniVault::recover_script;
         }

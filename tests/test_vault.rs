@@ -10,7 +10,7 @@ use bitcoin::{
 };
 
 use mattrs::{
-    contracts::{CcvIndex, ClauseError, InstanceStatus},
+    contracts::{CcvIndex, InstanceStatus},
     ctv::create_ctv_template,
     manager::{ContractManager, ManagerError},
     signer::HotSigner,
@@ -123,16 +123,14 @@ fn test_vault_output_indices_follow_ccv_semantics() {
         )
         .unwrap();
 
-    let err = handle.trigger([0; 32], -2).build_tx().unwrap_err();
-    assert!(matches!(
-        err,
-        ManagerError::ClauseError(ClauseError::Other(message))
-            if message.contains("CCV index -2")
-    ));
-
-    // `-1` is CCV's "same index as this input", exactly as the script reads it.
-    // The clause accepts it; the spend only lacks its (unprovided) signer.
-    let err = handle.trigger([0; 32], -1).build_tx().unwrap_err();
+    // The index argument is a `CcvIndex`, so an undefined one (`-2`) cannot be
+    // written. `CURRENT` is CCV's `-1`, "same index as this input", exactly as
+    // the script reads it: the clause accepts it, and the spend only lacks its
+    // (unprovided) signer.
+    let err = handle
+        .trigger([0; 32], CcvIndex::CURRENT)
+        .build_tx()
+        .unwrap_err();
     assert!(matches!(err, ManagerError::MissingSigner(_)));
 }
 
@@ -417,7 +415,7 @@ fn test_observe_spend_decodes_clause_and_children() {
     };
     assert_eq!(typed.spent().unwrap().clause(), VaultClause::Trigger);
     assert_eq!(args.ctv_hash, ctv_hash);
-    assert_eq!(args.out_i, 0);
+    assert_eq!(args.out_i, CcvIndex::from(0));
     assert!(!args.sig.is_empty());
 
     // The child is the Unvaulting instance, carrying the ctv_hash as its state.

@@ -77,7 +77,7 @@ contract! {
             args {
                 #[signer(p.unvault_pk)] sig: Signature,   // auto-filled at spend time
                 ctv_hash: [u8; 32],
-                out_i: i64,
+                out_i: CcvIndex,                          // an output index, as CCV reads it
             }
             // fn(&VaultParams) -> ScriptBuf, or Result<ScriptBuf, ContractError>
             script Vault::trigger_script;
@@ -104,7 +104,7 @@ let output  = unvaulting.output(0, UnvaultingState { ctv_hash });  // in a `next
 match tracked.spent() {
     Some(VaultSpend::Trigger(args)) => println!("unvaulting to {:?}", args.ctv_hash),
     Some(VaultSpend::Recover(_)) => println!("recovered"),
-    Some(VaultSpend::TriggerAndRevault(args)) => println!("revault at {}", args.revault_out_i),
+    Some(VaultSpend::TriggerAndRevault(args)) => println!("revault at {:?}", args.revault_out_i),
     None => println!("unspent"),
 }
 ```
@@ -300,9 +300,12 @@ unchecked operands, use `StackScript::ccv_raw` with `RawCcvSource`, or raw
 modes are alternatives, never flags to combine).
 
 Host-side `next` metadata uses the same vocabulary: an output's index is a
-`CcvIndex` (`ClauseOutput::at(0)`, or `CcvIndex::try_from(a.out_i)?` for a
-witness-supplied script number, where `-1` means the input's own index) and
-its amount rule is an `AmountMode`.
+`CcvIndex` (`ClauseOutput::at(0)`, or `ClauseOutput::at(a.out_i)` for a
+witness-supplied one) and its amount rule is an `AmountMode`. Declare such a
+clause argument as `out_i: CcvIndex`: it is the script number CCV consumes, so
+the script is unchanged, while the spend method takes `0`, `1`, … or
+`CcvIndex::CURRENT` (the input's own index, `-1` on the stack) and nothing
+else can be written.
 
 ### Observing a whole batch
 

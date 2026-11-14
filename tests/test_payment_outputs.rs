@@ -3,6 +3,7 @@
 mod support;
 
 use bitcoin::{Amount, ScriptBuf, TxOut};
+use mattrs::ccv::CcvIndex;
 use mattrs::contract;
 use mattrs::contracts::{ClauseOutput, InstanceStatus, NextOutputs};
 use mattrs::manager::{InstanceHandle, ManagerError};
@@ -89,9 +90,6 @@ fn explicit_recovery_outputs_cannot_change_destination_or_reduce_value() {
         Err(ManagerError::PaymentOutputMismatch { index: 0 })
     ));
     assert!(h.recover(0).outputs(tx.output).build_tx().is_ok());
-    for invalid in [-2, i64::MAX] {
-        assert!(h.recover(invalid).build_tx().is_err());
-    }
 }
 
 #[test]
@@ -99,7 +97,11 @@ fn recovery_respects_explicit_and_same_input_indices() {
     let mut manager = mattrs::testutil::local_manager();
     let a = vault(&mut manager);
     let b = unvaulting(&mut manager);
-    let tx = mattrs::manager::build_batch_tx(&[a.recover(-1), b.recover(-1)]).unwrap();
+    let tx = mattrs::manager::build_batch_tx(&[
+        a.recover(CcvIndex::CURRENT),
+        b.recover(CcvIndex::CURRENT),
+    ])
+    .unwrap();
     assert_eq!(
         tx.output.iter().map(|out| out.value).collect::<Vec<_>>(),
         vec![sat(10_000), sat(20_000)]

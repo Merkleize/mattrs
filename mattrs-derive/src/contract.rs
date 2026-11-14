@@ -848,13 +848,15 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         // --- The per-clause method on the typed handle ---
         // Signer args are filled by the manager at spend time and `#[from_state]`
         // args from the instance's typed state; the method takes the rest.
+        // Each is taken as `impl Into<T>`, so an index argument (`CcvIndex`)
+        // accepts a plain `0` and an `i64` one an `i32`.
         let method_params = fields
             .iter()
             .filter(|f| !f.is_signer && !f.is_from_state)
             .map(|f| {
                 let fname = &f.name;
                 let fty = &f.ty;
-                quote! { #fname: #fty }
+                quote! { #fname: impl ::core::convert::Into<#fty> }
             });
         // `Args::new` takes the non-signer fields, in declaration order.
         let ctor_args = fields.iter().filter(|f| !f.is_signer).map(|f| {
@@ -862,7 +864,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             if f.is_from_state {
                 quote! { __state.#fname }
             } else {
-                quote! { #fname }
+                quote! { #fname.into() }
             }
         });
         let state_binding = if fields.iter().any(|f| f.is_from_state) {

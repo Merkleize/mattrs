@@ -9,8 +9,7 @@
 mod support;
 
 use bitcoin::{Amount, TxOut, XOnlyPublicKey};
-use mattrs::contracts::ClauseError;
-use mattrs::manager::{ContractManager, ManagerError};
+use mattrs::manager::ContractManager;
 use mattrs::report::Report;
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
@@ -118,27 +117,6 @@ fn test_minivault_trigger_commits_unvaulting_state() {
     assert_eq!(tx.output.len(), 1);
     assert_eq!(tx.output[0].script_pubkey, expected);
     assert_eq!(tx.output[0].value, Amount::from_sat(100_000));
-}
-
-#[test]
-fn test_minivault_rejects_invalid_output_indices() {
-    let mut manager = mattrs::testutil::local_manager();
-    let params = make_params(true, false);
-    let handle = MiniVault::new(params)
-        .unwrap()
-        .fund(&mut manager, Amount::from_sat(100_000))
-        .unwrap();
-
-    let err = handle
-        .trigger_and_revault(withdrawal_pk(), 0, -2)
-        .build_tx()
-        .unwrap_err();
-    // `-1` is CCV's "same index as this input"; anything below is undefined.
-    assert!(matches!(
-        err,
-        ManagerError::ClauseError(ClauseError::Other(message))
-            if message.contains("CCV index -2")
-    ));
 }
 
 // ----------------------------------------------------------------------------

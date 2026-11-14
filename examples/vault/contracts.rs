@@ -29,10 +29,10 @@ use mattrs::{
 
 define_pushable!();
 
-fn recovery_output(index: i64, key: XOnlyPublicKey) -> Result<ClauseOutput, ClauseError> {
+fn recovery_output(index: CcvIndex, key: XOnlyPublicKey) -> Result<ClauseOutput, ClauseError> {
     // CCV with empty data and taptree pays the output key without a tweak.
     let script = mattrs::script_helpers::opaque_p2tr(key);
-    Ok(ClauseOutput::at(CcvIndex::try_from(index)?).pay(script))
+    Ok(ClauseOutput::at(index).pay(script))
 }
 
 // ============================================================================
@@ -76,13 +76,13 @@ contract! {
                 #[signer(p.unvault_pk)]
                 sig: Signature,
                 ctv_hash: [u8; 32],
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script Vault::trigger_script;
             next(p, a) {
                 Vault::new(p.clone())?.trigger_outputs(
                     a.ctv_hash,
-                    CcvIndex::try_from(a.out_i)?,
+                    a.out_i,
                 )
             }
         }
@@ -93,15 +93,15 @@ contract! {
                 #[signer(p.unvault_pk)]
                 sig: Signature,
                 ctv_hash: [u8; 32],
-                out_i: i64,
-                revault_out_i: i64,
+                out_i: CcvIndex,
+                revault_out_i: CcvIndex,
             }
             script Vault::trigger_and_revault_script;
             next(p, a) {
                 Vault::new(p.clone())?.trigger_and_revault_outputs(
                     a.ctv_hash,
-                    CcvIndex::try_from(a.out_i)?,
-                    CcvIndex::try_from(a.revault_out_i)?,
+                    a.out_i,
+                    a.revault_out_i,
                 )
             }
         }
@@ -109,7 +109,7 @@ contract! {
         // witness: <out_i> — terminal (spends to recover_pk)
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script Vault::recover_script;
             next(p, a) { recovery_output(a.out_i, p.recover_pk) }
@@ -234,7 +234,7 @@ contract! {
         // witness: <out_i> — terminal (spends to recover_pk)
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script Unvaulting::recover_script;
             next(p, a) { recovery_output(a.out_i, p.recover_pk) }

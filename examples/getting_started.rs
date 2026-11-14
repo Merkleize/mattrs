@@ -18,6 +18,7 @@ use bitcoin::{Amount, ScriptBuf, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
 use std::rc::Rc;
 
+use mattrs::ccv::CcvIndex;
 use mattrs::chain::LocalChain;
 use mattrs::contracts::InstanceStatus;
 use mattrs::manager::ContractManager;
@@ -54,7 +55,7 @@ contract! {
         // witness: <out_i> — push the funds to the recovery key
         clause recover {
             args {
-                out_i: i64,
+                out_i: CcvIndex,
             }
             script TimeLock::recover_script;
         }
