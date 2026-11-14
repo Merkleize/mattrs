@@ -78,16 +78,6 @@ pub fn older(n: u32) -> ScriptBuf {
     }
 }
 
-/// `older(delay) <pk> OP_CHECKSIG`: spendable by `pk` after a relative timelock.
-/// The building block of timeout/forfait clauses.
-pub fn timeout_sig_script(delay: u32, pk: XOnlyPublicKey) -> ScriptBuf {
-    script! {
-        { older(delay) }
-        { pk }
-        OP_CHECKSIG
-    }
-}
-
 /// Concatenate script fragments (byte-for-byte, like embedding each fragment
 /// with `{ .. }` in a `script!` block).
 pub fn concat(parts: &[ScriptBuf]) -> ScriptBuf {

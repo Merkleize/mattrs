@@ -181,7 +181,7 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppR
             println!("Bob played {}", move_str(m_b));
             println!("Outcome: {}", clause_of(result).name());
             wait_for_enter("Press ENTER to broadcast the adjudication transaction...")
-                .map_err(|e| ProtocolError::Other(format!("failed to read confirmation: {e}")))
+                .map_err(|e| ProtocolError::other(format!("failed to read confirmation: {e}")))
         })),
     };
     // Run with no time limit: a human counterparty takes their time.

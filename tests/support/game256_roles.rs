@@ -22,7 +22,7 @@ use mattrs::protocol::{Action, ProtocolError, Role};
 use mattrs::script_utils::{bn2vch, commit_int, vch2bn};
 
 use super::game256::{
-    FORFAIT_TIMEOUT, G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Handle, G256S2Spend,
+    G256S0, G256S0Handle, G256S1, G256S1Handle, G256S2, G256S2Handle, G256S2Spend,
 };
 
 /// How the game ended, from one party's perspective.
@@ -74,7 +74,6 @@ pub fn game_fraud_data(payout: ScriptBuf) -> FraudPartyData {
         xs: Vec::new(),
         computer: off_chain_compute2x(),
         payout,
-        forfait_timeout: FORFAIT_TIMEOUT,
     }
 }
 
@@ -119,18 +118,13 @@ pub fn alice_game_role() -> Role<AliceGameData, GameOutcome> {
             let vals = (d.claim)(x);
             let n = vals.len() - 1;
             fill_fraud_data(&mut d.fraud, &vals);
-            let t_a = trace(&d.fraud.hs, 0, n - 1)
-                .map_err(|error| ProtocolError::Other(error.to_string()))?;
+            let t_a = trace(&d.fraud.hs, 0, n - 1).map_err(ProtocolError::internal)?;
             let builder = h.reveal(t_a, vals[n], vals[0]);
             Ok(Action::Send(builder))
         })
         .on::<G256S2, _>(|d, h: G256S2Handle, _cx| {
             let builder = h.withdraw().outputs(pot(h.handle(), &d.fraud.payout));
-            Ok(Action::wait_or_send_final(
-                FORFAIT_TIMEOUT,
-                builder,
-                GameOutcome::AliceWithdrew,
-            ))
+            Action::wait_or((builder, GameOutcome::AliceWithdrew))
         })
         .embed(
             fraud_alice_role(),
@@ -155,14 +149,13 @@ pub fn bob_game_role() -> Role<BobGameData, GameOutcome> {
                 // Alice's claim checks out: nothing to dispute.
                 return Ok(Action::Finish(GameOutcome::AliceHonest));
             }
-            let t_b = trace(&d.fraud.hs, 0, n - 1)
-                .map_err(|error| ProtocolError::Other(error.to_string()))?;
+            let t_b = trace(&d.fraud.hs, 0, n - 1).map_err(ProtocolError::internal)?;
             let builder = h.start_challenge(s.t_a, s.y, s.x, d.vals[n], t_b);
             Ok(Action::Send(builder))
         })
         .on_settled::<G256S2, _>(|_d, _h, spend, _cx| match spend {
             G256S2Spend::Withdraw(_) => Ok(GameOutcome::AliceWithdrew),
-            other => Err(ProtocolError::Other(format!(
+            other => Err(ProtocolError::internal(format!(
                 "unexpected terminal clause {:?} on G256S2",
                 other.clause()
             ))),

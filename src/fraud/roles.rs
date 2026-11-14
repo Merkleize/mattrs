@@ -89,9 +89,6 @@ pub struct FraudPartyData {
     pub computer: OffChainComputer,
     /// Where this party's terminal wins pay.
     pub payout: ScriptBuf,
-    /// The forfait timeout (blocks); must match the contracts'
-    /// [`BisectCtx`](super::BisectCtx).
-    pub forfait_timeout: u32,
 }
 
 struct RevealArgs {
@@ -118,15 +115,13 @@ impl FraudPartyData {
     fn reveal_args(&self, p: &BisectParams) -> Result<RevealArgs, ProtocolError> {
         let (i, j, m) = (p.i() as usize, p.j() as usize, p.m() as usize);
         let h_mid = self.hs.get(i + m).copied().ok_or_else(|| {
-            ProtocolError::Other(format!(
+            ProtocolError::internal(format!(
                 "claimed trace has {} commitment(s), too few for range [{i}, {j}]",
                 self.hs.len()
             ))
         })?;
-        let t_left = trace(&self.hs, i, i + m - 1)
-            .map_err(|error| ProtocolError::Other(error.to_string()))?;
-        let t_right =
-            trace(&self.hs, i + m, j).map_err(|error| ProtocolError::Other(error.to_string()))?;
+        let t_left = trace(&self.hs, i, i + m - 1).map_err(ProtocolError::internal)?;
+        let t_right = trace(&self.hs, i + m, j).map_err(ProtocolError::internal)?;
         Ok(RevealArgs {
             h_mid,
             trace_left: t_left,
@@ -224,7 +219,7 @@ fn leaf_step(cx: &StepCtx<'_>) -> Result<i64, ProtocolError> {
     match spend {
         Bisect2Spend::BobRevealLeft(_) => Ok(p.i()),
         Bisect2Spend::BobRevealRight(_) => Ok(p.i() + p.m()),
-        other => Err(ProtocolError::Other(format!(
+        other => Err(ProtocolError::internal(format!(
             "unexpected clause {:?} produced a Leaf",
             other.clause()
         ))),
@@ -256,13 +251,8 @@ fn wait_or_forfait(
         winner,
         resolution: FraudResolution::Forfait { i: p.i(), j: p.j() },
     };
-    // `wait_or_send_final` sets the builder's CSV sequence from the same
-    // timeout that drives the deadline.
-    Ok(Action::wait_or_send_final(
-        d.forfait_timeout,
-        builder,
-        outcome,
-    ))
+    // The deadline is the delay the `forfait` clause itself declares.
+    Action::wait_or((builder, outcome))
 }
 
 /// Re-run the disputed step on-chain and take the pot.
@@ -304,7 +294,7 @@ fn forfait_outcome(p: &BisectParams, winner: FraudWinner) -> FraudOutcome {
 }
 
 fn unexpected_terminal(clause: impl std::fmt::Debug, contract: &str) -> ProtocolError {
-    ProtocolError::Other(format!(
+    ProtocolError::internal(format!(
         "unexpected terminal clause {clause:?} on a {contract}"
     ))
 }

@@ -66,7 +66,7 @@ pub trait TypedContract {
     fn spent(handle: &InstanceHandle) -> Result<(Self::Handle, Self::Spend), ProtocolError> {
         let typed = Self::Handle::try_from(handle.clone())?;
         let spend = Self::spend_of(&typed).ok_or_else(|| {
-            ProtocolError::Other(format!(
+            ProtocolError::internal(format!(
                 "the `{}` instance has no decodable recorded spend",
                 Self::NAME
             ))
@@ -129,9 +129,9 @@ pub enum Action<O> {
     Wait,
     /// The counterparty's turn, with a deadline: once the current UTXO is
     /// `blocks` confirmations deep and still unspent, take the fallback action
-    /// (e.g. a `forfait` spend). Prefer the [`wait_or_send`](Action::wait_or_send)
-    /// / [`wait_or_send_final`](Action::wait_or_send_final) constructors, which
-    /// also set the fallback's CSV sequence from the same `blocks` value.
+    /// (e.g. a `forfait` spend). Build it with [`wait_or`](Action::wait_or) or
+    /// [`wait_or_after`](Action::wait_or_after), which also set the fallback
+    /// spend's CSV sequence from the same `blocks` value.
     WaitWithTimeout {
         /// Confirmations of the current UTXO after which the fallback fires.
         blocks: u32,
@@ -164,57 +164,66 @@ impl<O> From<TimeoutAction<O>> for Action<O> {
     }
 }
 
-impl<O> Action<O> {
-    /// Watch the UTXO; once it sits unspent for `blocks` confirmations, send
-    /// the CSV-gated fallback spend. The one `blocks` value drives both the
-    /// runner's deadline and the spend's input sequence
-    /// (`builder.sequence(blocks)`), so the clock the runner counts and the
-    /// `OP_CHECKSEQUENCEVERIFY` the script enforces cannot disagree.
-    pub fn wait_or_send(blocks: u32, builder: SpendBuilder) -> Self {
-        Action::WaitWithTimeout {
-            blocks,
-            on_timeout: TimeoutAction::Send(builder.sequence(blocks)),
-        }
-    }
-
-    /// [`wait_or_send`](Action::wait_or_send) with the deadline read from the
-    /// fallback's own clause: the delay it declares with `timelock`. Prefer
-    /// this whenever the clause declares one, so the role cannot repeat (and
-    /// drift from) a number the contract already states. Errors if the clause
-    /// declares no timelock.
-    pub fn wait_or(builder: SpendBuilder) -> Result<Self, ProtocolError> {
-        Ok(Self::wait_or_send(clause_delay(&builder)?, builder))
-    }
-
-    /// [`wait_or`](Action::wait_or) for a terminal fallback: broadcast the
-    /// spend and resolve with `outcome`.
-    pub fn wait_or_final(builder: SpendBuilder, outcome: O) -> Result<Self, ProtocolError> {
-        Ok(Self::wait_or_send_final(
-            clause_delay(&builder)?,
-            builder,
-            outcome,
-        ))
-    }
-
-    /// [`wait_or_send`](Action::wait_or_send) for a terminal fallback:
-    /// broadcast the spend and resolve with `outcome`.
-    pub fn wait_or_send_final(blocks: u32, builder: SpendBuilder, outcome: O) -> Self {
-        Action::WaitWithTimeout {
-            blocks,
-            on_timeout: TimeoutAction::SendFinal(builder.sequence(blocks), outcome),
-        }
+/// A spend is a fallback that sends it and follows its child instance.
+impl<O> From<SpendBuilder> for TimeoutAction<O> {
+    fn from(builder: SpendBuilder) -> Self {
+        TimeoutAction::Send(builder)
     }
 }
 
-/// The CSV delay a timeout fallback's clause declares.
-fn clause_delay(builder: &SpendBuilder) -> Result<u32, ProtocolError> {
-    builder.csv_blocks().ok_or_else(|| {
-        ProtocolError::Other(
-            "the fallback's clause declares no `timelock`; give the deadline explicitly \
-             with `wait_or_send`"
-                .to_string(),
-        )
-    })
+/// A spend with an outcome is a terminal fallback: send it and resolve.
+impl<O> From<(SpendBuilder, O)> for TimeoutAction<O> {
+    fn from((builder, outcome): (SpendBuilder, O)) -> Self {
+        TimeoutAction::SendFinal(builder, outcome)
+    }
+}
+
+impl<O> Action<O> {
+    /// Watch the UTXO; once it has sat unspent for the delay the fallback's
+    /// clause declares with `timelock`, take the fallback:
+    ///
+    /// ```ignore
+    /// Action::wait_or(h.forfait())?              // send, follow the child
+    /// Action::wait_or((h.withdraw(), outcome))?  // send, resolve with `outcome`
+    /// ```
+    ///
+    /// The role never repeats (and so cannot drift from) a number the contract
+    /// already states. Errors if the fallback is not a spend of a clause that
+    /// declares a timelock; give the deadline with
+    /// [`wait_or_after`](Action::wait_or_after) then.
+    pub fn wait_or(fallback: impl Into<TimeoutAction<O>>) -> Result<Self, ProtocolError> {
+        let fallback = fallback.into();
+        let blocks = match &fallback {
+            TimeoutAction::Send(builder) | TimeoutAction::SendFinal(builder, _) => {
+                builder.csv_blocks()
+            }
+            TimeoutAction::Finish(_) => None,
+        }
+        .ok_or_else(|| {
+            ProtocolError::internal(
+                "the fallback is not a spend of a clause declaring a `timelock`; give the \
+                 deadline explicitly with `wait_or_after`",
+            )
+        })?;
+        Ok(Self::wait_or_after(blocks, fallback))
+    }
+
+    /// [`wait_or`](Action::wait_or) with an explicit deadline of `blocks`
+    /// confirmations. For a fallback that only resolves
+    /// ([`TimeoutAction::Finish`]), or whose clause enforces its delay without
+    /// declaring it. The one `blocks` value drives both the runner's deadline
+    /// and a fallback spend's input sequence, so the clock the runner counts
+    /// and the `OP_CHECKSEQUENCEVERIFY` the script enforces cannot disagree.
+    pub fn wait_or_after(blocks: u32, fallback: impl Into<TimeoutAction<O>>) -> Self {
+        let on_timeout = match fallback.into() {
+            TimeoutAction::Send(builder) => TimeoutAction::Send(builder.sequence(blocks)),
+            TimeoutAction::SendFinal(builder, outcome) => {
+                TimeoutAction::SendFinal(builder.sequence(blocks), outcome)
+            }
+            finish @ TimeoutAction::Finish(_) => finish,
+        };
+        Action::WaitWithTimeout { blocks, on_timeout }
+    }
 }
 
 /// How the protocol token got to the state a handler runs at.
@@ -240,7 +249,7 @@ impl StepCtx<'_> {
     /// `C`.
     pub fn parent_spend<C: TypedContract>(&self) -> Result<(C::Handle, C::Spend), ProtocolError> {
         let parent = self.parent.ok_or_else(|| {
-            ProtocolError::Other(format!(
+            ProtocolError::internal(format!(
                 "the entry instance has no parent (expected a `{}`)",
                 C::NAME
             ))
@@ -271,9 +280,36 @@ pub enum ProtocolError {
     /// [`Runner::failed_at`] rather than attempting to resume a partially
     /// executed protocol step.
     RunnerFailed,
-    /// A protocol-specific failure raised by a role handler (e.g. the
-    /// counterparty broke an off-chain commitment).
+    /// The counterparty did something the protocol does not allow (e.g. it
+    /// broke an off-chain commitment): the chain is where the handler did not
+    /// expect it, through no fault of this party.
+    Violation(String),
+    /// The role reached a state its own definition rules out (a handler
+    /// returned a spend of the wrong instance, a settlement clause that cannot
+    /// be terminal, ...): a bug in the role or in the data it was given.
+    Internal(String),
+    /// Any other failure a handler reports (I/O while asking the user, ...).
     Other(String),
+}
+
+impl ProtocolError {
+    /// A [`Violation`](ProtocolError::Violation): the counterparty broke the
+    /// protocol.
+    pub fn violation(message: impl std::fmt::Display) -> Self {
+        ProtocolError::Violation(message.to_string())
+    }
+
+    /// An [`Internal`](ProtocolError::Internal) error: the role itself is
+    /// wrong.
+    pub fn internal(message: impl std::fmt::Display) -> Self {
+        ProtocolError::Internal(message.to_string())
+    }
+
+    /// An [`Other`](ProtocolError::Other) failure, from anything printable:
+    /// `.map_err(ProtocolError::other)`.
+    pub fn other(message: impl std::fmt::Display) -> Self {
+        ProtocolError::Other(message.to_string())
+    }
 }
 
 impl std::fmt::Display for ProtocolError {
@@ -288,6 +324,8 @@ impl std::fmt::Display for ProtocolError {
             }
             ProtocolError::Finished => write!(f, "the protocol already resolved"),
             ProtocolError::RunnerFailed => write!(f, "the protocol runner previously failed"),
+            ProtocolError::Violation(msg) => write!(f, "protocol violation: {}", msg),
+            ProtocolError::Internal(msg) => write!(f, "role error: {}", msg),
             ProtocolError::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -699,10 +737,7 @@ mod tests {
         }
         let sub: Role<u32, i64> = Role::new().on::<KeyB, _>(|d, _h, _cx| {
             *d += 1;
-            Ok(Action::WaitWithTimeout {
-                blocks: 5,
-                on_timeout: TimeoutAction::Finish(7),
-            })
+            Ok(Action::wait_or_after(5, TimeoutAction::Finish(7)))
         });
         let outer: Role<Outer, String> = Role::new()
             .on::<KeyA, _>(|_d, _h, _cx| Ok(Action::Wait))

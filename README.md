@@ -425,7 +425,7 @@ generic fraud-proof contracts (`mattrs::fraud`), a data `MerkleTree` /
 stack tracker for assembling tapscripts against *named* witness elements
 instead of hand-counted `OP_PICK` depths (`mattrs::stack`), the
 `merkle_root(n)` / `dup(n)` / `drop(n)` / `check_input_contract` /
-`check_output_contract` / `older` / `timeout_sig_script` / `opaque_p2tr` script
+`check_output_contract` / `older` / `opaque_p2tr` script
 fragments (`mattrs::script_helpers`), `commit_int` (`mattrs::script_utils`),
 bare-key payout and burn outputs (the `ClauseOutput::pay_key` /
 `ClauseOutput::burn` constructors), a `WitnessReader`

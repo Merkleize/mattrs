@@ -98,12 +98,12 @@ fn prompt_strategy() -> Strategy {
             print!("Your move [0-8]: ");
             std::io::stdout()
                 .flush()
-                .map_err(|e| ProtocolError::Other(format!("failed to flush the prompt: {e}")))?;
+                .map_err(|e| ProtocolError::other(format!("failed to flush the prompt: {e}")))?;
             let mut line = String::new();
             stdin
                 .lock()
                 .read_line(&mut line)
-                .map_err(|e| ProtocolError::Other(format!("failed to read a move: {e}")))?;
+                .map_err(|e| ProtocolError::other(format!("failed to read a move: {e}")))?;
             match line.trim().parse::<usize>() {
                 Ok(cell) if cell < 9 && board[cell] == EMPTY => return Ok(cell),
                 _ => println!("Invalid or taken cell — pick an empty one from the grid."),

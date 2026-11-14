@@ -89,16 +89,16 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             // *same* template (equal outputs ⇒ equal CTV hash), and each must
             // still find its withdrawal here.
             let outputs = d.withdrawals.get(&state.ctv_hash).cloned().ok_or_else(|| {
-                ProtocolError::Other("unvaulting with a CTV hash the owner never planned".into())
+                ProtocolError::violation("unvaulting with a CTV hash the owner never planned")
             })?;
             let amount = h.handle().prevout().value;
             // Nobody should spend this branch before us; the CSV delay is what
             // gates the withdrawal, so it rides the timeout fallback, whose
             // deadline is the delay the `withdraw` clause itself declares.
-            Action::wait_or_final(
+            Action::wait_or((
                 h.withdraw().outputs(outputs),
                 VaultOutcome::Withdrawn { amount },
-            )
+            ))
         })
         .on_settled::<Vault, _>(settled_vault)
         .on_settled::<Unvaulting, _>(settled_unvaulting)
@@ -141,7 +141,7 @@ fn settled_vault(
     let amount = h.handle().prevout().value;
     match spend {
         VaultSpend::Recover(_) => Ok(VaultOutcome::Recovered { amount }),
-        other => Err(ProtocolError::Other(format!(
+        other => Err(ProtocolError::internal(format!(
             "unexpected terminal clause {:?} on a Vault",
             other.clause()
         ))),

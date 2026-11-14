@@ -329,13 +329,13 @@ pub mod roles {
                 };
 
                 if alice_move_commitment(m_a, &r_a) != d.c_a {
-                    return Err(ProtocolError::Other(
-                        "Alice's revealed move breaks her commitment".into(),
+                    return Err(ProtocolError::violation(
+                        "Alice's revealed move breaks her commitment",
                     ));
                 }
                 let result = outcome_of(m_a, d.m_b);
                 if clause != clause_of(result) {
-                    return Err(ProtocolError::Other(format!(
+                    return Err(ProtocolError::violation(format!(
                         "adjudicated clause `{}` does not match the moves",
                         clause.name()
                     )));

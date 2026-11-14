@@ -703,7 +703,7 @@ pub mod roles {
                     }
                     let cell = (d.strategy)(&s.board)?;
                     if cell >= 9 || s.board[cell] != EMPTY {
-                        return Err(ProtocolError::Other(format!(
+                        return Err(ProtocolError::other(format!(
                             "the strategy chose an invalid cell ({cell})"
                         )));
                     }
@@ -717,14 +717,16 @@ pub mod roles {
                 } else {
                     h.timeout_alice_idle()
                 };
-                Ok(Action::wait_or_send_final(
+                Ok(Action::wait_or_after(
                     params.timeout_blocks,
-                    builder,
-                    TttOutcome {
-                        result: my_win,
-                        by_timeout: true,
-                        board: s.board,
-                    },
+                    (
+                        builder,
+                        TttOutcome {
+                            result: my_win,
+                            by_timeout: true,
+                            board: s.board,
+                        },
+                    ),
                 ))
             })
             .on_settled::<TicTacToe, _>(move |_d, h, spend, _cx| {
@@ -748,13 +750,11 @@ pub mod roles {
                         (TttResult::AliceWins, true, s.turn == TURN_BOB)
                     }
                     TicTacToeClause::MoveAlice | TicTacToeClause::MoveBob => {
-                        return Err(ProtocolError::Other(
-                            "a move is not a settlement".to_string(),
-                        ));
+                        return Err(ProtocolError::internal("a move is not a settlement"));
                     }
                 };
                 if !justified {
-                    return Err(ProtocolError::Other(format!(
+                    return Err(ProtocolError::violation(format!(
                         "the `{}` claim does not match the board",
                         clause.name()
                     )));

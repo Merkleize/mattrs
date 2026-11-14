@@ -29,9 +29,7 @@ pub use mattrs::fraud::{
     Bisect1, Bisect1Handle, Bisect1State, Bisect2, Bisect2Handle, Bisect2State, BisectCtx,
     BisectParams, Computer, Leaf, LeafFactory, LeafHandle, LeafParams, LeafState,
 };
-use mattrs::script_helpers::{
-    check_input_contract, check_output_contract, dup, merkle_root, timeout_sig_script,
-};
+use mattrs::script_helpers::{check_input_contract, check_output_contract, dup, merkle_root};
 
 define_pushable!();
 
@@ -215,7 +213,8 @@ contract! {
                 #[signer(p.alice_pk)]
                 alice_sig: Signature,
             }
-            script G256S2::withdraw_script;
+            timelock |_p| FORFAIT_TIMEOUT;
+            script |p| script! { { p.alice_pk } OP_CHECKSIG };
         }
 
         // <bob_sig> <t_a> <y> <x> <z> <t_b>
@@ -247,10 +246,6 @@ contract! {
 }
 
 impl G256S2 {
-    fn withdraw_script(p: &G256Params) -> ScriptBuf {
-        timeout_sig_script(FORFAIT_TIMEOUT, p.alice_pk)
-    }
-
     fn start_challenge_script(p: &G256Params) -> ScriptBuf {
         script! {
             OP_TOALTSTACK

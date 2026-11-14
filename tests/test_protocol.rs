@@ -151,7 +151,7 @@ fn action_cannot_spend_a_different_token() {
     let mut runner = Runner::new(manager, role, (), entry.clone());
 
     let err = runner.step().unwrap_err();
-    assert!(matches!(&err, ProtocolError::Other(msg) if msg.contains("different instance")));
+    assert!(matches!(&err, ProtocolError::Internal(msg) if msg.contains("different instance")));
     assert_eq!(runner.state(), RunnerState::Failed);
     assert_eq!(runner.failed_at(), Some(&entry));
     assert!(chain.find_spending_tx(entry.outpoint()).unwrap().is_none());
@@ -165,12 +165,8 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     let game = RpsGameS0::new(params(c_a)).unwrap();
     let mut zero_manager = mattrs::testutil::local_manager();
     let zero_entry = game.fund(&mut zero_manager, pot).unwrap();
-    let zero_role: Role<(), ()> = Role::new().on::<RpsGameS0, _>(|_d, _h, _cx| {
-        Ok(Action::WaitWithTimeout {
-            blocks: 0,
-            on_timeout: TimeoutAction::Finish(()),
-        })
-    });
+    let zero_role: Role<(), ()> = Role::new()
+        .on::<RpsGameS0, _>(|_d, _h, _cx| Ok(Action::wait_or_after(0, TimeoutAction::Finish(()))));
     let mut zero = Runner::new(zero_manager, zero_role, (), zero_entry);
     assert!(matches!(
         zero.step(),
@@ -186,12 +182,8 @@ fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     let entry: InstanceHandle = game.fund(&mut manager, pot).unwrap().into();
     let txid = entry.outpoint().txid;
     chain.assume_confirmed(txid, 5);
-    let role: Role<(), ()> = Role::new().on::<RpsGameS0, _>(|_d, _h, _cx| {
-        Ok(Action::WaitWithTimeout {
-            blocks: 3,
-            on_timeout: TimeoutAction::Finish(()),
-        })
-    });
+    let role: Role<(), ()> = Role::new()
+        .on::<RpsGameS0, _>(|_d, _h, _cx| Ok(Action::wait_or_after(3, TimeoutAction::Finish(()))));
     let mut runner = Runner::new(manager, role, (), entry);
     assert!(matches!(runner.step().unwrap(), Progress::Waiting));
 
@@ -220,7 +212,7 @@ fn parent_spend_checks_where_the_token_came_from() {
             // The entry instance has no parent.
             assert!(matches!(
                 cx.parent_spend::<RpsGameS0>(),
-                Err(ProtocolError::Other(_))
+                Err(ProtocolError::Internal(_))
             ));
             Ok(Action::Send(h.bob_move(2)))
         })

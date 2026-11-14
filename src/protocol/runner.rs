@@ -254,7 +254,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
     pub fn run_one_within(&mut self, window: Option<Duration>) -> Result<O, ProtocolError> {
         let mut outcomes = self.run_within(window)?;
         if outcomes.len() != 1 {
-            return Err(ProtocolError::Other(format!(
+            return Err(ProtocolError::internal(format!(
                 "the protocol resolved {} outcomes where exactly one was expected",
                 outcomes.len()
             )));
@@ -309,8 +309,8 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         match action {
             Action::Send(builder) => {
                 if !builder.spends(&current) {
-                    return Err(ProtocolError::Other(
-                        "role returned a spend builder for a different instance".to_string(),
+                    return Err(ProtocolError::internal(
+                        "role returned a spend builder for a different instance",
                     ));
                 }
                 let children = self.manager.spend_batch(std::slice::from_ref(&builder))?;
@@ -318,8 +318,8 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             }
             Action::SendFinal(builder, outcome) => {
                 if !builder.spends(&current) {
-                    return Err(ProtocolError::Other(
-                        "role returned a final spend builder for a different instance".to_string(),
+                    return Err(ProtocolError::internal(
+                        "role returned a final spend builder for a different instance",
                     ));
                 }
                 self.manager.spend_batch(std::slice::from_ref(&builder))?;
@@ -362,7 +362,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 .map(|confirmed| {
                     confirmed
                         .checked_add(t.blocks - 1)
-                        .ok_or_else(|| ProtocolError::Other("timeout height overflow".to_string()))
+                        .ok_or_else(|| ProtocolError::internal("timeout height overflow"))
                 })
                 .transpose()?;
             if let Some(deadline) = deadline
