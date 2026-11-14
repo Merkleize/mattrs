@@ -367,6 +367,90 @@ fn join_links_are_atomic_with_interleaved_fee_inputs() {
     assert_eq!(result.fee, sat(1_000));
 }
 
+/// A wallet-funded spend whose builder carries no signer is signed by the
+/// manager's standing one: over every funded prevout, and only once the
+/// funding has been validated.
+#[test]
+fn standing_signer_signs_a_wallet_funded_spend() {
+    let (handle, mut builder, _) = signed_spend_fixture(true);
+    builder.signers.clear();
+    let calls = Rc::new(std::cell::Cell::new(0));
+    let signer = CountingSigner {
+        calls: calls.clone(),
+        signer: crate::signer::HotSigner::new(
+            bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &[42]).unwrap(),
+        ),
+    };
+    let key = signer.public_key();
+    let manager = offline_manager().with_signer(signer);
+
+    let plan = manager.prepare_wallet_spend(vec![builder]).unwrap();
+    let mut funded = plan.transaction().clone();
+    let external = add_wallet_input(&mut funded);
+
+    // Funding that is rejected never reaches the signer.
+    let mut altered = funded.clone();
+    altered.output[0].value = sat(9_999);
+    assert!(
+        plan.sign_funded(&manager, altered, vec![external.clone()], sat(10_000))
+            .is_err()
+    );
+    assert!(matches!(
+        plan.sign_funded(&manager, funded.clone(), vec![external.clone()], sat(999)),
+        Err(ManagerError::FeeTooHigh { .. })
+    ));
+    assert!(matches!(
+        plan.sign_funded(&manager, funded.clone(), vec![], sat(1_000)),
+        Err(ManagerError::IncompleteObservation { .. })
+    ));
+    assert_eq!(calls.get(), 0);
+
+    // Without the standing signer the same plan has nobody to sign it.
+    assert!(matches!(
+        plan.sign_funded(
+            &offline_manager(),
+            funded.clone(),
+            vec![external.clone()],
+            sat(1_000)
+        ),
+        Err(ManagerError::MissingSigner(missing)) if missing == key
+    ));
+
+    let signed = plan
+        .sign_funded(&manager, funded, vec![external.clone()], sat(1_000))
+        .unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(handle.status(), InstanceStatus::Funded);
+
+    // The signature commits to the contract prevout and the wallet's.
+    let witness = signed.transaction().input[0].witness.to_vec();
+    let leaf = bitcoin::taproot::TapLeafHash::from_script(
+        bitcoin::Script::from_bytes(&witness[1]),
+        bitcoin::taproot::LeafVersion::TapScript,
+    );
+    let signature = bitcoin::secp256k1::schnorr::Signature::from_slice(&witness[0]).unwrap();
+    let verify = |prevouts: &[TxOut]| {
+        let hash = crate::signer::compute_tap_sighash(
+            signed.transaction(),
+            0,
+            prevouts,
+            Some(leaf),
+            bitcoin::sighash::TapSighashType::Default,
+        )
+        .unwrap();
+        bitcoin::secp256k1::Secp256k1::verification_only().verify_schnorr(
+            &signature,
+            &bitcoin::secp256k1::Message::from_digest(hash),
+            &key,
+        )
+    };
+    let prevouts = [handle.prevout(), external.prevout.clone()];
+    verify(&prevouts).unwrap();
+    let mut wrong_prevouts = prevouts;
+    wrong_prevouts[1].value = sat(9_999);
+    assert!(verify(&wrong_prevouts).is_err());
+}
+
 #[test]
 fn late_missing_signer_is_detected_before_any_signing() {
     let manager = offline_manager();
