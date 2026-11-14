@@ -268,7 +268,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
         .write(proof, new_value, tree.root())
         .exec_one(&mut manager)?
         .try_into()?;
-    report_spend(&mut report, "RAM", "write (update cell 2)", ram.handle());
+    report_spend(&mut report, "RAM", "write (update cell 2)", &ram);
 
     // Withdraw from the updated RAM, proving the freshly written value.
     let mut updated = leaves.clone();
@@ -287,12 +287,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
             value: Amount::from_sat(100_000),
         }])
         .exec_none(&mut manager)?;
-    report_spend(
-        &mut report,
-        "RAM",
-        "withdraw (prove cell 2)",
-        child.handle(),
-    );
+    report_spend(&mut report, "RAM", "withdraw (prove cell 2)", &child);
 
     report.finalize("reports/report_ram.md")?;
     Ok(())

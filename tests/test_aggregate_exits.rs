@@ -790,7 +790,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
         &mut report,
         "AggregateExits",
         "withdraw_direct (user 2)",
-        unwind.handle(),
+        &unwind,
     );
     let mut after = pool.clone();
     after.zero(2);
@@ -804,12 +804,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
     let claim = compute_claim(&after, &bits);
     assert_eq!(claim.x, 7_000);
     let (pending, _) = regtest_claim(&mut manager, &unwind, &claim)?;
-    report_spend(
-        &mut report,
-        "AggregateExits",
-        "start_exit + bond",
-        unwind.handle(),
-    );
+    report_spend(&mut report, "AggregateExits", "start_exit + bond", &unwind);
 
     // The claim matures unchallenged; Ingrid finalizes.
     manager.mine_blocks(params().challenge_period as u64)?;
@@ -817,7 +812,7 @@ fn direct_and_happy_path_on_regtest() -> Result<(), Box<dyn std::error::Error>> 
         .finalize()
         .output_amount(0, Amount::from_sat((claim.x + BOND) as u64))
         .exec(&mut manager)?;
-    report_spend(&mut report, "AggregateExits", "finalize", pending.handle());
+    report_spend(&mut report, "AggregateExits", "finalize", &pending);
     let continued: UnwindHandle = try_handle(children[0].clone());
     assert_eq!(continued.state().root, claim.r_prime);
 
@@ -859,7 +854,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         &mut report,
         "AggregateExits",
         "challenge_state + bond",
-        pending.handle(),
+        &pending,
     );
 
     // Alternate reveals down to the disputed step.
@@ -886,7 +881,7 @@ fn fraud_proof_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         &mut report,
         "AggregateExits",
         "leaf reveal (challenger wins)",
-        leaf.handle(),
+        &leaf,
     );
     let reverted: UnwindHandle = try_handle(children[0].clone());
     assert_eq!(reverted.state().root, pool.root());
@@ -931,12 +926,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .output_amount(0, Amount::from_sat((BOND / 2) as u64))
         .output_amount(1, Amount::from_sat((BOND - BOND / 2) as u64))
         .exec(&mut manager)?;
-    report_spend(
-        &mut report,
-        "AggregateExits",
-        "defend (CSFS reveal)",
-        dc.handle(),
-    );
+    report_spend(&mut report, "AggregateExits", "defend (CSFS reveal)", &dc);
     let resumed: PendingExitHandle = try_handle(children[0].clone());
     assert_eq!(resumed.state(), claim_state);
 
@@ -950,7 +940,7 @@ fn delegation_challenge_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         &mut report,
         "AggregateExits",
         "finalize (resumed)",
-        resumed.handle(),
+        &resumed,
     );
 
     report.finalize("reports/report_aggregate_exits_delegation.md")?;

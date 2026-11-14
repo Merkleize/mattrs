@@ -65,7 +65,7 @@ fn construction_checks_the_committed_outputs_and_sequence() {
             .build_tx(),
         Err(ManagerError::CtvTemplateMismatch { input_index: 0 })
     ));
-    assert_eq!(handle.handle().status(), InstanceStatus::Funded);
+    assert_eq!(handle.status(), InstanceStatus::Funded);
 }
 
 #[test]
@@ -93,22 +93,17 @@ fn observation_checks_every_committed_transaction_field_before_marking_spent() {
         let mut invalid = tx.clone();
         mutate(&mut invalid);
         assert!(matches!(
-            manager.observe_spend(handle.handle(), &invalid),
+            manager.observe_spend(&handle, &invalid),
             Err(ManagerError::CtvTemplateMismatch { .. })
         ));
-        assert_eq!(handle.handle().status(), InstanceStatus::Funded);
-        assert!(handle.handle().spending_args().is_none());
-        assert!(handle.handle().outputs().is_empty());
+        assert_eq!(handle.status(), InstanceStatus::Funded);
+        assert!(handle.spending_args().is_none());
+        assert!(handle.outputs().is_empty());
     }
-    assert!(
-        manager
-            .observe_spend(handle.handle(), &tx)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(handle.handle().status(), InstanceStatus::Spent);
+    assert!(manager.observe_spend(&handle, &tx).unwrap().is_empty());
+    assert_eq!(handle.status(), InstanceStatus::Spent);
     assert_eq!(
-        handle.handle().spending_args().unwrap()[0],
+        handle.spending_args().unwrap()[0],
         tx.input[0].witness.to_vec()[0]
     );
 }
@@ -119,7 +114,6 @@ fn withdrawal_cannot_replace_the_hash_revealed_from_state() {
     let (handle, template) = fixture(&mut manager);
     assert!(
         handle
-            .handle()
             .spend_clause("withdraw", vec![vec![42; 32]])
             .outputs(template.outputs.clone())
             .build_tx()
@@ -133,8 +127,8 @@ fn withdrawal_cannot_replace_the_hash_revealed_from_state() {
     let mut witness = tx.input[0].witness.to_vec();
     witness[0] = vec![42; 32];
     tx.input[0].witness = bitcoin::Witness::from_slice(&witness);
-    assert!(manager.observe_spend(handle.handle(), &tx).is_err());
-    assert_eq!(handle.handle().status(), InstanceStatus::Funded);
+    assert!(manager.observe_spend(&handle, &tx).is_err());
+    assert_eq!(handle.status(), InstanceStatus::Funded);
 }
 
 #[test]

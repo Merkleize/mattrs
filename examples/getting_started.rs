@@ -136,9 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .exec_none(&mut manager)?;
 
     // The manager recorded the spend, and the handle decodes it.
-    assert_eq!(handle.handle().status(), InstanceStatus::Spent);
+    assert_eq!(handle.status(), InstanceStatus::Spent);
     assert_eq!(handle.spent_clause(), Some(TimeLockClause::Withdraw));
-    let tx = handle.handle().spending_tx().ok_or("no spending tx")?;
+    let tx = handle.spending_tx().ok_or("no spending tx")?;
 
     println!(
         "withdraw tx: {}",

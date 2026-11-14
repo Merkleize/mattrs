@@ -123,7 +123,7 @@ pub fn alice_game_role() -> Role<AliceGameData, GameOutcome> {
             Ok(Action::Send(builder))
         })
         .on::<G256S2, _>(|d, h: G256S2Handle, _cx| {
-            let builder = h.withdraw().outputs(pot(h.handle(), &d.fraud.payout));
+            let builder = h.withdraw().outputs(pot(&h, &d.fraud.payout));
             Action::wait_or((builder, GameOutcome::AliceWithdrew))
         })
         .embed(

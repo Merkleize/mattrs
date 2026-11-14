@@ -173,7 +173,7 @@ fn test_minivault_early_recover_on_regtest() -> Result<(), Box<dyn std::error::E
         &mut report,
         "MiniVault",
         "recover (straight from the vault)",
-        vault.handle(),
+        &vault,
     );
     report.finalize("reports/report_minivault_recover.md")?;
     Ok(())
@@ -197,7 +197,7 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
         .sign(HotSigner::new(alice_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
-    report_spend(&mut report, "MiniVault", "trigger", vault.handle());
+    report_spend(&mut report, "MiniVault", "trigger", &vault);
 
     let state = unvaulting.state();
     assert_eq!(state.withdrawal_pk, wpk);
@@ -210,7 +210,7 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
         &mut report,
         "MiniVault",
         "recover (from the unvaulting)",
-        unvaulting.handle(),
+        &unvaulting,
     );
     report.finalize("reports/report_minivault_trigger_recover.md")?;
     Ok(())
@@ -234,7 +234,7 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
         .sign(HotSigner::new(alice_xpriv()))
         .exec_one(&mut manager)?
         .try_into()?;
-    report_spend(&mut report, "MiniVault", "trigger", vault.handle());
+    report_spend(&mut report, "MiniVault", "trigger", &vault);
 
     // Withdrawing before the delay must be rejected as non-BIP68-final.
     let early = unvaulting
@@ -261,7 +261,7 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
         &mut report,
         "MiniVault",
         "withdraw (after the delay)",
-        unvaulting.handle(),
+        &unvaulting,
     );
     report.finalize("reports/report_minivault_trigger_withdraw.md")?;
     Ok(())
@@ -297,7 +297,7 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
         &mut report,
         "MiniVault",
         "trigger_and_revault + 2x trigger (3 vault inputs)",
-        v1.handle(),
+        &v1,
     );
 
     // Two children: the merged MiniUnvaulting (output 0) and the revaulted
@@ -329,7 +329,7 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
         &mut report,
         "MiniVault",
         "withdraw of the merged unvaulting",
-        unvaulting.handle(),
+        &unvaulting,
     );
     report.finalize("reports/report_minivault_revault.md")?;
     Ok(())

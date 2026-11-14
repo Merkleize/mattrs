@@ -171,12 +171,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         .try_into()?;
     let state = s1.state();
     assert_eq!(state.commitment, move_commitment(1));
-    report_spend(
-        &mut report,
-        "RPS",
-        "bob_move (Bob plays paper)",
-        s0.handle(),
-    );
+    report_spend(&mut report, "RPS", "bob_move (Bob plays paper)", &s0);
 
     // Rock vs paper: Bob wins. A cheating alice_wins spend must be rejected by
     // the node's script interpreter (the adjudication is consensus-enforced).
@@ -188,12 +183,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
 
     // The honest outcome pays the whole pot to Bob via the clause's CTV template.
     s1.bob_wins(1, 0, [0u8; 32]).exec_none(&mut manager)?;
-    report_spend(
-        &mut report,
-        "RPS",
-        "bob_wins (CTV payout of the pot)",
-        s1.handle(),
-    );
+    report_spend(&mut report, "RPS", "bob_wins (CTV payout of the pot)", &s1);
 
     report.finalize("reports/report_rps.md")?;
     Ok(())

@@ -142,13 +142,13 @@ pub fn alice_role() -> Role<FraudPartyData, FraudOutcome> {
             })
             .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
                 let p = h.params();
-                wait_or_forfait(d, h.forfait(), h.handle(), FraudWinner::Alice, &p)
+                wait_or_forfait(d, h.forfait(), &h, FraudWinner::Alice, &p)
             })
             .on::<Leaf, _>(|d, h: LeafHandle, cx| {
                 let step = leaf_step(cx)?;
                 if d.honest_at(step) {
                     let builder = h.alice_reveal(d.xs[step as usize].clone());
-                    Ok(win_leaf(d, builder, h.handle(), FraudWinner::Alice, step)?)
+                    Ok(win_leaf(d, builder, &h, FraudWinner::Alice, step)?)
                 } else {
                     // Our claim cannot survive this step; the counterparty's
                     // reveal will settle it.
@@ -166,7 +166,7 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
         Role::new()
             .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
                 let p = h.params();
-                wait_or_forfait(d, h.forfait(), h.handle(), FraudWinner::Bob, &p)
+                wait_or_forfait(d, h.forfait(), &h, FraudWinner::Bob, &p)
             })
             .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
                 let p = h.params();
@@ -185,7 +185,7 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
                 let step = leaf_step(cx)?;
                 if d.honest_at(step) {
                     let builder = h.bob_reveal(d.xs[step as usize].clone());
-                    Ok(win_leaf(d, builder, h.handle(), FraudWinner::Bob, step)?)
+                    Ok(win_leaf(d, builder, &h, FraudWinner::Bob, step)?)
                 } else {
                     Ok(Action::Wait)
                 }

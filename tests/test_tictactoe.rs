@@ -297,7 +297,7 @@ fn setup(
     let bob_entry = game
         .track(
             &mut bob_manager,
-            alice_entry.handle().outpoint(),
+            alice_entry.outpoint(),
             TttState::initial(),
         )
         .unwrap();
@@ -337,7 +337,7 @@ fn played_win_resolves_for_both_parties() {
     assert_eq!(b_out, Some(expected));
 
     // The terminal claim spent the last game state, paying Alice the pot.
-    let tip = walk_tip(bob_entry.handle());
+    let tip = walk_tip(&bob_entry);
     assert_eq!(tip.clause_name().as_deref(), Some("alice_wins"));
     let payout = tip.spending_tx().expect("adjudicated");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
@@ -364,7 +364,7 @@ fn full_board_resolves_as_a_tie() {
 
     // Bob (whose "turn" a full board always is) declared the tie; the stakes
     // went back to their owners.
-    let tip = walk_tip(bob_entry.handle());
+    let tip = walk_tip(&bob_entry);
     assert_eq!(tip.clause_name().as_deref(), Some("tie"));
     let payout = tip.spending_tx().expect("settled");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
@@ -394,7 +394,7 @@ fn idle_opponent_forfaits_after_the_timeout() {
         }
     );
 
-    let tip = walk_tip(alice_entry.handle());
+    let tip = walk_tip(&alice_entry);
     assert_eq!(tip.clause_name().as_deref(), Some("timeout_bob_idle"));
     let payout = tip.spending_tx().expect("forfait collected");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
@@ -462,7 +462,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
         &mut report,
         "TicTacToe",
         "alice_wins (CTV payout of the pot)",
-        won.handle(),
+        &won,
     );
 
     report.finalize("reports/report_tictactoe.md")?;
@@ -491,7 +491,7 @@ fn test_tictactoe_forfait_on_regtest() -> Result<(), Box<dyn std::error::Error>>
     // Alice the whole pot.
     manager.mine_blocks((TIMEOUT + 1).into())?;
     h.timeout_bob_idle().exec_none(&mut manager)?;
-    let payout = h.handle().spending_tx().expect("forfait collected");
+    let payout = h.spending_tx().expect("forfait collected");
     assert_eq!(payout.output[0].script_pubkey, p2tr(alice_pk()));
     assert_eq!(payout.output[0].value, Amount::from_sat(POT));
     Ok(())

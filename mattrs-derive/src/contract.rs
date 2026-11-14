@@ -1165,7 +1165,10 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         pub struct #handle_ident(::mattrs::manager::InstanceHandle);
 
         impl #handle_ident {
-            /// The underlying generic instance handle.
+            /// The underlying generic instance handle. The typed handle
+            /// dereferences to it, so this is only needed to name it
+            /// explicitly (e.g. to clone it, or to build an array of handles
+            /// of different contracts).
             pub fn handle(&self) -> &::mattrs::manager::InstanceHandle {
                 &self.0
             }
@@ -1206,6 +1209,18 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             }
 
             #(#methods)*
+        }
+
+        /// A typed handle is its instance handle with the contract known:
+        /// everything an `InstanceHandle` offers (`status`, `outpoint`,
+        /// `amount`, `outputs`, ...) is available on it directly, and it can
+        /// be passed wherever a `&InstanceHandle` is expected.
+        impl ::core::ops::Deref for #handle_ident {
+            type Target = ::mattrs::manager::InstanceHandle;
+
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
         }
 
         impl ::core::convert::From<#handle_ident> for ::mattrs::manager::InstanceHandle {

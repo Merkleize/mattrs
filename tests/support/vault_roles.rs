@@ -91,7 +91,7 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             let outputs = d.withdrawals.get(&state.ctv_hash).cloned().ok_or_else(|| {
                 ProtocolError::violation("unvaulting with a CTV hash the owner never planned")
             })?;
-            let amount = h.handle().prevout().value;
+            let amount = h.amount();
             // Nobody should spend this branch before us; the CSV delay is what
             // gates the withdrawal, so it rides the timeout fallback, whose
             // deadline is the delay the `withdraw` clause itself declares.
@@ -120,7 +120,7 @@ pub fn watchtower_role() -> Role<WatchtowerData, VaultOutcome> {
             if d.authorized.contains(&state.ctv_hash) {
                 return Ok(Action::Wait);
             }
-            let amount = h.handle().prevout().value;
+            let amount = h.amount();
             Ok(Action::SendFinal(
                 h.recover(0),
                 VaultOutcome::Recovered { amount },
@@ -138,7 +138,7 @@ fn settled_vault(
     spend: VaultSpend,
     _cx: &StepCtx<'_>,
 ) -> Result<VaultOutcome, ProtocolError> {
-    let amount = h.handle().prevout().value;
+    let amount = h.amount();
     match spend {
         VaultSpend::Recover(_) => Ok(VaultOutcome::Recovered { amount }),
         other => Err(ProtocolError::internal(format!(
@@ -155,7 +155,7 @@ fn settled_unvaulting(
     spend: UnvaultingSpend,
     _cx: &StepCtx<'_>,
 ) -> Result<VaultOutcome, ProtocolError> {
-    let amount = h.handle().prevout().value;
+    let amount = h.amount();
     Ok(match spend {
         UnvaultingSpend::Withdraw(_) => VaultOutcome::Withdrawn { amount },
         UnvaultingSpend::Recover(_) => VaultOutcome::Recovered { amount },

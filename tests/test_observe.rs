@@ -30,7 +30,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 
     let amount = 49_999_900u64;
     let vault_a = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
-    let funding_outpoint = vault_a.handle().outpoint();
+    let funding_outpoint = vault_a.outpoint();
 
     let ctv_template = vec![(
         Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?.assume_checked(),
@@ -77,20 +77,14 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 
     // The observed child matches the actor's, including its logical state.
     let unvaulting_b: UnvaultingHandle = children[0].clone().try_into().unwrap();
-    assert_eq!(
-        unvaulting_b.handle().outpoint(),
-        unvaulting_a.handle().outpoint()
-    );
+    assert_eq!(unvaulting_b.outpoint(), unvaulting_a.outpoint());
     assert_eq!(unvaulting_b.state().ctv_hash, ctv_hash);
 
     // Follow the terminal withdraw: no children, clause + args recorded.
-    let final_children = observer.wait_for_spend(unvaulting_b.handle())?;
+    let final_children = observer.wait_for_spend(&unvaulting_b)?;
     assert!(final_children.is_empty());
-    assert_eq!(
-        unvaulting_b.handle().clause_name().as_deref(),
-        Some("withdraw")
-    );
-    assert_eq!(unvaulting_b.handle().status(), InstanceStatus::Spent);
+    assert_eq!(unvaulting_b.clause_name().as_deref(), Some("withdraw"));
+    assert_eq!(unvaulting_b.status(), InstanceStatus::Spent);
 
     Ok(())
 }
@@ -125,10 +119,10 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
     let vault_contract = Vault::new(params.clone())?;
     let tracked_1: InstanceHandle = vault_contract
-        .track(&mut observer, vault_1.handle().outpoint())?
+        .track(&mut observer, vault_1.outpoint())?
         .into();
     let tracked_2: InstanceHandle = vault_contract
-        .track(&mut observer, vault_2.handle().outpoint())?
+        .track(&mut observer, vault_2.outpoint())?
         .into();
 
     // An unspent instance times out within the polling window...
@@ -161,11 +155,8 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
 
     // The merged child matches the actor's, holding both stakes.
     let unvaulting: UnvaultingHandle = observed[0].clone().try_into().unwrap();
-    assert_eq!(unvaulting.handle().outpoint(), children[0].outpoint());
-    assert_eq!(
-        unvaulting.handle().prevout().value,
-        Amount::from_sat(2 * amount)
-    );
+    assert_eq!(unvaulting.outpoint(), children[0].outpoint());
+    assert_eq!(unvaulting.amount(), Amount::from_sat(2 * amount));
     assert_eq!(unvaulting.state().ctv_hash, ctv_hash);
 
     Ok(())

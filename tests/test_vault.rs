@@ -324,7 +324,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
         .try_into()?;
 
     // The child Unvaulting instance is funded and carries the ctv_hash as its state.
-    assert_eq!(unvaulting.handle().status(), InstanceStatus::Funded);
+    assert_eq!(unvaulting.status(), InstanceStatus::Funded);
     let state = unvaulting.state();
     assert_eq!(state.ctv_hash, ctv_hash);
 
@@ -398,7 +398,7 @@ fn test_observe_spend_decodes_clause_and_children() {
     // The observer tracks the same outpoint in its own manager.
     let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
     let observed = vault
-        .track(&mut observer, actor_handle.handle().outpoint())
+        .track(&mut observer, actor_handle.outpoint())
         .unwrap()
         .handle()
         .clone();
@@ -474,7 +474,7 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
     let mut track = |h: &VaultHandle| {
         vault
-            .track(&mut observer, h.handle().outpoint())
+            .track(&mut observer, h.outpoint())
             .unwrap()
             .handle()
             .clone()
@@ -538,8 +538,8 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
         Err(ManagerError::Other("the relay refused it".into()))
     });
     assert!(matches!(refused, Err(ManagerError::Other(_))));
-    assert_eq!(handle.handle().status(), InstanceStatus::Funded);
-    assert!(handle.handle().outputs().is_empty());
+    assert_eq!(handle.status(), InstanceStatus::Funded);
+    assert!(handle.outputs().is_empty());
 
     // An accepted one is recorded, with the transaction the broadcaster saw.
     let mut sent = None;
@@ -549,13 +549,13 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
             Ok::<_, ManagerError>(())
         })
         .unwrap();
-    assert_eq!(handle.handle().status(), InstanceStatus::Spent);
+    assert_eq!(handle.status(), InstanceStatus::Spent);
     let sent = sent.expect("the broadcaster ran");
 
     // An observer of that transaction sees the same children, in the same order.
     let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
     let observed = vault
-        .track(&mut observer, handle.handle().outpoint())
+        .track(&mut observer, handle.outpoint())
         .unwrap()
         .handle()
         .clone();
@@ -624,7 +624,7 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
     })
     .unwrap();
     let funded = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
-    let outpoint = funded.handle().outpoint();
+    let outpoint = funded.outpoint();
     actor.mine_blocks(1).unwrap();
     assert_eq!(chain.confirmation_height(outpoint.txid).unwrap(), Some(1));
 
@@ -637,7 +637,7 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
         .unwrap();
     assert_eq!(children.len(), 1);
 
-    let seen = observer.wait_for_spend(watched.handle()).unwrap();
+    let seen = observer.wait_for_spend(&watched).unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].outpoint(), children[0].outpoint());
 
@@ -655,7 +655,7 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
         first.exec(&mut actor),
         Err(ManagerError::Chain(mattrs::chain::ChainError::Rejected(_)))
     ));
-    assert_eq!(again.handle().status(), InstanceStatus::Funded);
+    assert_eq!(again.status(), InstanceStatus::Funded);
 }
 
 /// A standing signer on the manager signs every spend it executes; a signer
@@ -700,7 +700,7 @@ fn test_standing_signers_fill_signatures() {
     manager.add_signer(HotSigner::new(alice_xpriv()));
     let spent = fund(&mut manager);
     spent.trigger([1; 32], 0).exec(&mut manager).unwrap();
-    assert_eq!(spent.handle().status(), InstanceStatus::Spent);
+    assert_eq!(spent.status(), InstanceStatus::Spent);
 
     // A per-spend signer takes precedence over the standing one.
     let kept = fund(&mut manager);
@@ -710,5 +710,5 @@ fn test_standing_signers_fill_signatures() {
             .exec(&mut manager)
             .is_err()
     );
-    assert_eq!(kept.handle().status(), InstanceStatus::Funded);
+    assert_eq!(kept.status(), InstanceStatus::Funded);
 }

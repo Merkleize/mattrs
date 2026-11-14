@@ -84,7 +84,7 @@ impl Stage {
                 short(&xonly(&user_xpriv(i)).serialize())
             );
         }
-        println!("  Unwind funded at {}", unwind.handle().outpoint());
+        println!("  Unwind funded at {}", unwind.outpoint());
 
         Ok(Stage {
             manager,

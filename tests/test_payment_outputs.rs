@@ -79,14 +79,14 @@ fn explicit_recovery_outputs_cannot_change_destination_or_reduce_value() {
         assert!(h.recover(0).outputs(invalid.clone()).build_tx().is_err());
         let mut observed = tx.clone();
         observed.output = invalid;
-        assert!(manager.observe_spend(h.handle(), &observed).is_err());
-        assert_eq!(h.handle().status(), InstanceStatus::Funded);
-        assert!(h.handle().spending_args().is_none());
+        assert!(manager.observe_spend(&h, &observed).is_err());
+        assert_eq!(h.status(), InstanceStatus::Funded);
+        assert!(h.spending_args().is_none());
     }
     let mut missing = tx.clone();
     missing.output.clear();
     assert!(matches!(
-        manager.observe_spend(h.handle(), &missing),
+        manager.observe_spend(&h, &missing),
         Err(ManagerError::PaymentOutputMismatch { index: 0 })
     ));
     assert!(h.recover(0).outputs(tx.output).build_tx().is_ok());
@@ -127,7 +127,7 @@ fn recovery_respects_explicit_and_same_input_indices() {
     ];
     let tx = a.recover(1).outputs(outputs.clone()).build_tx().unwrap();
     assert_eq!(tx.output, outputs);
-    assert!(manager.observe_spend(a.handle(), &tx).unwrap().is_empty());
+    assert!(manager.observe_spend(&a, &tx).unwrap().is_empty());
 }
 
 #[test]

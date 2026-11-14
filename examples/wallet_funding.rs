@@ -38,12 +38,8 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     // A separate observer knows the contracts, but not the actor's wallet coins.
     let mut observer = ContractManager::new(regtest_rpc_client("testwallet"), Network::Regtest);
     let vault = Vault::new(params)?;
-    let observed_first: InstanceHandle = vault
-        .track(&mut observer, first.handle().outpoint())?
-        .into();
-    let observed_second: InstanceHandle = vault
-        .track(&mut observer, second.handle().outpoint())?
-        .into();
+    let observed_first: InstanceHandle = vault.track(&mut observer, first.outpoint())?.into();
+    let observed_second: InstanceHandle = vault.track(&mut observer, second.outpoint())?.into();
 
     // The trigger commits to a later withdrawal. This example only triggers;
     // extending a fixed CTV withdrawal with fee inputs requires a compatible
@@ -146,8 +142,8 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
         result.children[0].prevout().value,
         Amount::from_sat(300_000)
     );
-    assert_eq!(first.handle().status(), InstanceStatus::Spent);
-    assert_eq!(second.handle().status(), InstanceStatus::Spent);
+    assert_eq!(first.status(), InstanceStatus::Spent);
+    assert_eq!(second.status(), InstanceStatus::Spent);
 
     // A passive observer can resolve spent wallet prevouts from a trusted cache
     // or funding transactions. `gettxout` alone no longer works after broadcast.
