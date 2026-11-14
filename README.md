@@ -548,7 +548,19 @@ RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps
 cargo test --all-targets --all-features
 ```
 
-The end-to-end tests are `#[ignore]`d by default because they need a configured
+The end-to-end tests are `#[ignore]`d by default because they need a
+MATT-enabled regtest node. One command runs them against a throwaway one: it
+starts the node on a temporary datadir, creates and funds `testwallet`, runs
+the ignored tests, and stops the node again.
+
+```sh
+BITCOIND=/path/to/bitcoind scripts/regtest-tests.sh              # all of them
+BITCOIND=/path/to/bitcoind scripts/regtest-tests.sh test_vault   # a subset
+```
+
+CI runs the same script in the `bigspider/bitcoin_matt` container.
+
+To use a node you manage yourself instead, the tests need a
 regtest `bitcoind` with a funded `testwallet` (cookie or env-var RPC auth; see
 `tests/support/testkit.rs`). They also write markdown reports of every
 transaction they broadcast (inputs, outputs, per-input witness breakdown with
