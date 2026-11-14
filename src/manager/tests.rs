@@ -218,6 +218,43 @@ fn template_hash_is_checked_before_signing_and_executes_without_children() {
     );
 }
 
+/// Asking `exec_one` for the wrong contract's handle is refused before the
+/// broadcast (which, with no node behind the manager, would report `NoNode`),
+/// so the error never comes with a spent instance.
+#[test]
+fn exec_one_rejects_a_wrong_handle_type_before_broadcast() {
+    #[derive(Debug)]
+    struct OtherHandle;
+    impl TryFrom<InstanceHandle> for OtherHandle {
+        type Error = crate::manager::WrongContractType;
+        fn try_from(_: InstanceHandle) -> Result<Self, Self::Error> {
+            Err(crate::manager::WrongContractType { expected: "Other" })
+        }
+    }
+
+    let mut manager = offline_manager();
+    let (handle, builder, _) = signed_spend_fixture(true);
+    assert!(matches!(
+        builder.exec_one::<OtherHandle>(&mut manager),
+        Err(ManagerError::WrongContract(_))
+    ));
+    assert_eq!(handle.status(), InstanceStatus::Funded);
+    assert!(handle.outputs().is_empty());
+    assert!(manager.instances.is_empty());
+}
+
+/// The handle `exec_one` returns is the child the manager registered.
+#[test]
+fn exec_one_returns_the_registered_child() {
+    let (handle, builder, _) = signed_spend_fixture(true);
+    let (rpc, server) = broadcast_rpc();
+    let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+    let child: InstanceHandle = builder.exec_one(&mut manager).unwrap();
+    server.join().unwrap();
+    assert_eq!(handle.outputs().into_vec(), vec![child.clone()]);
+    assert!(Rc::ptr_eq(&child.instance, &manager.instances[0]));
+}
+
 #[test]
 fn checked_execution_signs_once_and_records_the_broadcast_witness() {
     for child in [false, true] {

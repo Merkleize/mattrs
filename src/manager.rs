@@ -191,6 +191,22 @@ impl ContractManager {
         prepared: PreparedBatch,
         broadcast: impl FnOnce(&Self, &Transaction) -> Result<(), E>,
     ) -> Result<Children, E> {
+        let ((), children) =
+            self.execute_prepared_checked(builders, prepared, |_| Ok(()), broadcast)?;
+        Ok(children)
+    }
+
+    /// [`execute_prepared`](Self::execute_prepared), with a last `check` of
+    /// the staged children before the transaction is broadcast: what it
+    /// rejects is never sent, and what it returns is handed back with the
+    /// committed children. The staged handles are the ones later committed.
+    fn execute_prepared_checked<T, E: From<ManagerError>>(
+        &mut self,
+        builders: &[SpendBuilder],
+        prepared: PreparedBatch,
+        check: impl FnOnce(Vec<InstanceHandle>) -> Result<T, ManagerError>,
+        broadcast: impl FnOnce(&Self, &Transaction) -> Result<(), E>,
+    ) -> Result<(T, Children), E> {
         let tx = signing::sign_prepared(builders, prepared, &self.signers)?;
         let handles: Vec<_> = builders
             .iter()
@@ -200,8 +216,10 @@ impl ContractManager {
             .collect();
         let staged = self.stage_batch(&handles.iter().collect::<Vec<_>>(), &[], &tx)?;
 
+        let checked = check(staged.children())?;
+
         broadcast(self, &tx)?;
-        Ok(staged.commit(self))
+        Ok((checked, staged.commit(self)))
     }
 }
 
