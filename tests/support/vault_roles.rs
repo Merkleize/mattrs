@@ -14,12 +14,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bitcoin::bip32::Xpriv;
 use bitcoin::{Amount, Sequence, TxOut};
 use mattrs::ctv::compute_ctv_hash;
 use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{Action, ProtocolError, Role, StepCtx};
-use mattrs::signer::HotSigner;
 
 use super::vault::{
     Unvaulting, UnvaultingClause, UnvaultingHandle, Vault, VaultClause, VaultHandle,
@@ -52,8 +50,6 @@ pub struct TriggerStep {
 
 /// The vault owner's private data.
 pub struct OwnerData {
-    /// The key behind the vault's `unvault_pk`.
-    pub xpriv: Xpriv,
     /// Planned triggers, consumed front to back — one per `Vault` arrival
     /// (with none left, the owner just holds the vault and watches).
     pub plan: Vec<TriggerStep>,
@@ -63,9 +59,8 @@ pub struct OwnerData {
 }
 
 impl OwnerData {
-    pub fn new(xpriv: Xpriv, plan: Vec<TriggerStep>) -> Self {
+    pub fn new(plan: Vec<TriggerStep>) -> Self {
         OwnerData {
-            xpriv,
             plan,
             withdrawals: HashMap::new(),
         }
@@ -83,14 +78,12 @@ pub fn owner_role() -> Role<OwnerData, VaultOutcome> {
             let p = h.params();
             let ctv_hash = compute_ctv_hash(&step.outputs, Sequence(p.spend_delay));
             d.withdrawals.insert(ctv_hash, step.outputs);
-            let signer = HotSigner::new(d.xpriv);
             Ok(Action::Send(match step.revault {
                 // Output 0 is the unvaulting, output 1 the revaulted remainder.
                 Some(amount) => h
                     .trigger_and_revault(ctv_hash, 0, 1)
-                    .output_amount(1, amount)
-                    .sign(signer),
-                None => h.trigger(ctv_hash, 0).sign(signer),
+                    .output_amount(1, amount),
+                None => h.trigger(ctv_hash, 0),
             }))
         })
         .on::<Unvaulting, _>(|d: &mut OwnerData, h: UnvaultingHandle, _cx| {

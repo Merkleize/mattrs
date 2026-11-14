@@ -88,10 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN",
     )?;
     let owner_signer = HotSigner::new(owner_xpriv);
-    let owner_pk = {
-        use mattrs::signer::Signer;
-        owner_signer.public_key()
-    };
+    let owner_pk = owner_signer.public_key();
     let recover_pk = XOnlyPublicKey::from_str(
         "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0",
     )?;

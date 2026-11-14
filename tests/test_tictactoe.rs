@@ -253,10 +253,9 @@ fn strategy_errors_propagate_from_the_role() {
     let chain = Rc::new(LocalChain::new());
     let entry = funded_game(TttState::initial());
     let mut runner = Runner::new(
-        manager_on(chain),
+        manager_on(chain).with_signer(HotSigner::new(alice_xpriv())),
         alice_role(),
         PlayerData {
-            xpriv: alice_xpriv(),
             strategy: Box::new(|_| Err(ProtocolError::Other("input closed".to_string()))),
         },
         entry.handle().clone(),
@@ -295,19 +294,17 @@ fn setup(
     );
 
     let alice = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv())),
         alice_role(),
         PlayerData {
-            xpriv: alice_xpriv(),
             strategy: scripted(alice_moves),
         },
         alice_entry.clone(),
     );
     let bob = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv())),
         bob_role(),
         PlayerData {
-            xpriv: bob_xpriv(),
             strategy: scripted(bob_moves),
         },
         bob_entry.clone(),

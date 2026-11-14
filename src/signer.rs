@@ -59,6 +59,12 @@ impl HotSigner {
         Self { privkey }
     }
 
+    /// The x-only public key this signer signs for.
+    pub fn public_key(&self) -> XOnlyPublicKey {
+        let secp = Secp256k1::new();
+        self.privkey.to_priv().public_key(&secp).into()
+    }
+
     /// Get the secret key for signing.
     fn secret_key(&self) -> SecretKey {
         self.privkey.to_priv().inner
@@ -83,8 +89,7 @@ impl Signer for HotSigner {
     }
 
     fn public_key(&self) -> XOnlyPublicKey {
-        let secp = Secp256k1::new();
-        self.privkey.to_priv().public_key(&secp).into()
+        HotSigner::public_key(self)
     }
 }
 

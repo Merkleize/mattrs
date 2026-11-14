@@ -41,6 +41,7 @@ use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{ProtocolError, Runner};
+use mattrs::signer::HotSigner;
 
 use contracts::roles::{PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role};
 use contracts::{
@@ -223,8 +224,8 @@ fn run_alice(
     )?;
 
     println!("You are X and you move first.");
+    manager.add_signer(HotSigner::new(xpriv));
     let data = PlayerData {
-        xpriv,
         strategy: prompt_strategy(),
     };
     let outcome = Runner::new(manager, alice_role(), data, entry).run_one()?;
@@ -283,8 +284,8 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     println!("Tracking the game at {outpoint}");
 
     println!("You are O; waiting for Alice's first move on-chain...");
+    manager.add_signer(HotSigner::new(xpriv));
     let data = PlayerData {
-        xpriv,
         strategy: prompt_strategy(),
     };
     let outcome = Runner::new(manager, bob_role(), data, entry).run_one()?;

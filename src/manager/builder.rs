@@ -54,7 +54,11 @@ impl SpendBuilder {
         manager.execute_prepared(builders, prepared, ContractManager::send_to_node)
     }
 
-    /// Register a signer (matched to the clause's signature args by public key).
+    /// Register a signer for this spend (matched to the clause's signature
+    /// args by public key). It takes precedence over a standing signer the
+    /// executing manager holds for the same key
+    /// ([`ContractManager::add_signer`]); with standing signers registered,
+    /// most spends need no `sign` call at all.
     /// A `Box<dyn Signer>` works too, via the blanket [`Signer`] impl for boxes.
     pub fn sign(mut self, signer: impl Signer + 'static) -> Self {
         self.signers.insert(signer.public_key(), Box::new(signer));

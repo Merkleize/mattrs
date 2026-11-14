@@ -609,10 +609,8 @@ impl TicTacToeHandle {
 /// two-player demo (`main.rs`) and against the offline `LocalChain` in
 /// `tests/test_tictactoe.rs`.
 pub mod roles {
-    use bitcoin::bip32::Xpriv;
 
     use mattrs::protocol::{Action, ProtocolError, Role};
-    use mattrs::signer::HotSigner;
 
     use super::{
         EMPTY, MARK_ALICE, MARK_BOB, TURN_ALICE, TURN_BOB, TicTacToe, TicTacToeClause,
@@ -625,7 +623,6 @@ pub mod roles {
 
     /// A player's private side: their key and their move-picking strategy.
     pub struct PlayerData {
-        pub xpriv: Xpriv,
         pub strategy: Strategy,
     }
 
@@ -710,9 +707,7 @@ pub mod roles {
                             "the strategy chose an invalid cell ({cell})"
                         )));
                     }
-                    return Ok(Action::Send(
-                        h.make_move(cell).sign(HotSigner::new(d.xpriv)),
-                    ));
+                    return Ok(Action::Send(h.make_move(cell)));
                 }
 
                 // The opponent's turn: watch the UTXO, and claim the forfait

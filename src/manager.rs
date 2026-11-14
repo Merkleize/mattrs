@@ -49,10 +49,15 @@ pub use wallet::{BatchObservation, ExternalInput, SignedWalletSpend, WalletSpend
 
 /// Build and sign (without broadcasting or recording) a single transaction
 /// that spends several instances at once, merging their clause outputs by
-/// index. It needs no manager or node: everything comes from the builders.
+/// index. It needs no manager or node: everything comes from the builders,
+/// including the signers (a manager's standing signers are not consulted).
 /// [`ContractManager::spend_batch`] also broadcasts and records the spend.
 pub fn build_batch_tx(builders: &[SpendBuilder]) -> Result<Transaction, ManagerError> {
-    signing::sign_prepared(builders, transaction::prepare(builders)?)
+    signing::sign_prepared(
+        builders,
+        transaction::prepare(builders)?,
+        &Default::default(),
+    )
 }
 
 /// Manages contract instances and their lifecycle.
@@ -65,6 +70,9 @@ pub struct ContractManager {
 
     /// All instances managed by this manager.
     instances: Vec<Rc<RefCell<ContractInstance>>>,
+
+    /// This party's standing signers, by the key they sign for.
+    signers: signing::Signers,
 
     /// The snapshot shared with the inspector server, if enabled.
     #[cfg(feature = "inspector")]
@@ -106,11 +114,29 @@ impl ContractManager {
             chain: None,
             network,
             instances: Vec::new(),
+            signers: Default::default(),
             #[cfg(feature = "inspector")]
             inspector_state: None,
             #[cfg(feature = "inspector")]
             inspector_notify: None,
         }
+    }
+
+    /// Register a standing signer: every spend this manager executes fills
+    /// the signature arguments naming its key, with no per-spend
+    /// [`SpendBuilder::sign`]. A signer given to a builder still wins for
+    /// that spend. Registering a second signer for the same key replaces
+    /// the first.
+    pub fn add_signer(&mut self, signer: impl crate::signer::Signer + 'static) -> &mut Self {
+        self.signers.insert(signer.public_key(), Rc::new(signer));
+        self
+    }
+
+    /// [`add_signer`](Self::add_signer), for construction chains:
+    /// `ContractManager::on(chain, network).with_signer(signer)`.
+    pub fn with_signer(mut self, signer: impl crate::signer::Signer + 'static) -> Self {
+        self.add_signer(signer);
+        self
     }
 
     /// The network this manager's contracts live on.
@@ -165,7 +191,7 @@ impl ContractManager {
         prepared: PreparedBatch,
         broadcast: impl FnOnce(&Self, &Transaction) -> Result<(), E>,
     ) -> Result<Children, E> {
-        let tx = signing::sign_prepared(builders, prepared)?;
+        let tx = signing::sign_prepared(builders, prepared, &self.signers)?;
         let handles: Vec<_> = builders
             .iter()
             .map(|builder| InstanceHandle {

@@ -641,3 +641,58 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
     ));
     assert_eq!(again.handle().status(), InstanceStatus::Funded);
 }
+
+/// A standing signer on the manager signs every spend it executes; a signer
+/// given to one spend wins for that spend; a key nobody holds is an error.
+#[test]
+fn test_standing_signers_fill_signatures() {
+    use mattrs::chain::LocalChain;
+    use mattrs::signer::{HotSigner, Signer, SignerError};
+    use std::rc::Rc;
+    use support::testkit::alice_xpriv;
+
+    /// Signs for Alice's key, but refuses.
+    struct Refusing;
+    impl Signer for Refusing {
+        fn sign(&self, _: &[u8; 32]) -> Result<mattrs::Signature, SignerError> {
+            Err(SignerError("refused".into()))
+        }
+        fn public_key(&self) -> XOnlyPublicKey {
+            alice_pk()
+        }
+    }
+
+    let vault = Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })
+    .unwrap();
+    let chain = Rc::new(LocalChain::new());
+    let mut manager = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let fund =
+        |manager: &mut ContractManager| vault.fund(manager, Amount::from_sat(100_000)).unwrap();
+
+    // No signer anywhere.
+    assert!(matches!(
+        fund(&mut manager).trigger([1; 32], 0).exec(&mut manager),
+        Err(ManagerError::MissingSigner(key)) if key == alice_pk()
+    ));
+
+    // A standing signer: no `.sign(..)` on the spend.
+    manager.add_signer(HotSigner::new(alice_xpriv()));
+    let spent = fund(&mut manager);
+    spent.trigger([1; 32], 0).exec(&mut manager).unwrap();
+    assert_eq!(spent.handle().status(), InstanceStatus::Spent);
+
+    // A per-spend signer takes precedence over the standing one.
+    let kept = fund(&mut manager);
+    assert!(
+        kept.trigger([1; 32], 0)
+            .sign(Refusing)
+            .exec(&mut manager)
+            .is_err()
+    );
+    assert_eq!(kept.handle().status(), InstanceStatus::Funded);
+}

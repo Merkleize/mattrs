@@ -153,6 +153,7 @@ impl WalletSpend {
             for spec in clause.arg_specs() {
                 if let Some(key) = spec.arg_type.signer_pubkey()
                     && !builder.signers.contains_key(&key)
+                    && !manager.signers.contains_key(&key)
                 {
                     return Err(ManagerError::MissingSigner(key));
                 }
@@ -161,7 +162,7 @@ impl WalletSpend {
         // Only the contract inputs contribute to these CCV checks.
         validate_batch_constraints(&constraints, &funded)?;
         for (vin, builder) in self.builders.iter().enumerate() {
-            let witness = input_witness(builder, &funded, vin, &prevouts)?;
+            let witness = input_witness(builder, &funded, vin, &prevouts, &manager.signers)?;
             // The signer receives a default sighash. Do not accept a different
             // sighash suffix or silently exceed the weight advertised to wallets.
             if 164 + witness.size() as u64 != self.input_weights[vin] {

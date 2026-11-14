@@ -93,9 +93,9 @@ fn revault_forks_and_both_branches_withdraw() {
     ];
     let entry = fake_vault(SEED);
     let mut owner = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv())),
         owner_role(),
-        OwnerData::new(alice_xpriv(), plan),
+        OwnerData::new(plan),
         entry.clone(),
     );
 
@@ -164,9 +164,9 @@ fn identical_templates_on_both_branches_withdraw() {
         },
     ];
     let mut owner = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv())),
         owner_role(),
-        OwnerData::new(alice_xpriv(), plan),
+        OwnerData::new(plan),
         fake_vault(SEED),
     );
 
@@ -192,15 +192,12 @@ fn watchtower_recovers_an_unauthorized_unvaulting() {
     // The owner's key is compromised: the thief triggers a withdrawal whose
     // CTV hash the watchtower was never told about.
     let mut thief = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv())),
         owner_role(),
-        OwnerData::new(
-            alice_xpriv(),
-            vec![TriggerStep {
-                outputs: withdrawal(amount),
-                revault: None,
-            }],
-        ),
+        OwnerData::new(vec![TriggerStep {
+            outputs: withdrawal(amount),
+            revault: None,
+        }]),
         fake_vault(SEED),
     );
     let tower_entry = fake_vault(SEED);
@@ -241,15 +238,12 @@ fn watchtower_keeps_watching_the_revaulted_branch() {
     // The thief splits the vault, stealing the larger branch (and leaving the
     // revaulted remainder alone — for now).
     let mut thief = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv())),
         owner_role(),
-        OwnerData::new(
-            alice_xpriv(),
-            vec![TriggerStep {
-                outputs: withdrawal(rest),
-                revault: Some(revault),
-            }],
-        ),
+        OwnerData::new(vec![TriggerStep {
+            outputs: withdrawal(rest),
+            revault: Some(revault),
+        }]),
         fake_vault(SEED),
     );
     let mut tower = Runner::new(
@@ -301,9 +295,7 @@ fn trigger_only() -> Role<OwnerData, VaultOutcome> {
         let step = d.plan.remove(0);
         let p = h.params();
         let ctv_hash = compute_ctv_hash(&step.outputs, Sequence(p.spend_delay));
-        Ok(Action::Send(
-            h.trigger(ctv_hash, 0).sign(HotSigner::new(d.xpriv)),
-        ))
+        Ok(Action::Send(h.trigger(ctv_hash, 0)))
     })
 }
 
@@ -318,9 +310,9 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
 
     // Handling Vault but not Unvaulting: the spend's child is a loud error...
     let mut runner = Runner::new(
-        manager_on(Rc::new(LocalChain::new())),
+        manager_on(Rc::new(LocalChain::new())).with_signer(HotSigner::new(alice_xpriv())),
         trigger_only(),
-        OwnerData::new(alice_xpriv(), plan()),
+        OwnerData::new(plan()),
         fake_vault(SEED),
     );
     let err = runner
@@ -334,9 +326,9 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
     // ...unless the role explicitly ignores it: then every branch of the spend
     // is somebody else's business and the token resolves silently.
     let mut runner = Runner::new(
-        manager_on(Rc::new(LocalChain::new())),
+        manager_on(Rc::new(LocalChain::new())).with_signer(HotSigner::new(alice_xpriv())),
         trigger_only().ignore::<Unvaulting>(),
-        OwnerData::new(alice_xpriv(), plan()),
+        OwnerData::new(plan()),
         fake_vault(SEED),
     );
     match runner.step().expect("steps") {
@@ -367,9 +359,9 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
         },
     ];
     let mut owner = Runner::new(
-        manager,
+        manager.with_signer(HotSigner::new(alice_xpriv())),
         owner_role(),
-        OwnerData::new(alice_xpriv(), plan),
+        OwnerData::new(plan),
         entry.clone(),
     );
 

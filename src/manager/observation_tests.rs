@@ -73,8 +73,14 @@ fn transaction(handles: &[&InstanceHandle], output: Vec<TxOut>) -> Transaction {
     };
     let prevouts: Vec<_> = handles.iter().map(|h| h.prevout()).collect();
     for (vin, handle) in handles.iter().enumerate() {
-        tx.input[vin].witness =
-            input_witness(&handle.spend_clause("spend", vec![]), &tx, vin, &prevouts).unwrap();
+        tx.input[vin].witness = input_witness(
+            &handle.spend_clause("spend", vec![]),
+            &tx,
+            vin,
+            &prevouts,
+            &Default::default(),
+        )
+        .unwrap();
     }
     tx
 }

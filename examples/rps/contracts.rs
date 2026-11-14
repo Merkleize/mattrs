@@ -221,11 +221,9 @@ impl RpsGameS1 {
 /// the same roles work against a regtest node (see `main.rs`) and the offline
 /// `LocalChain` (see `tests/test_protocol.rs`).
 pub mod roles {
-    use bitcoin::bip32::Xpriv;
 
     use mattrs::contracts::ClauseArgs;
     use mattrs::protocol::{Action, ProtocolError, Role};
-    use mattrs::signer::HotSigner;
 
     use super::{
         RpsGameS0, RpsGameS0BobMoveArgs, RpsGameS0Handle, RpsGameS1, RpsGameS1Clause,
@@ -317,7 +315,6 @@ pub mod roles {
     pub struct BobData {
         pub m_b: i64,
         pub c_a: [u8; 32],
-        pub xpriv: Xpriv,
     }
 
     /// Bob reveals his move on-chain, then watches the adjudication and checks
@@ -325,9 +322,7 @@ pub mod roles {
     pub fn bob_role() -> Role<BobData, RpsOutcome> {
         Role::new()
             .on::<RpsGameS0, _>(|d: &mut BobData, h: RpsGameS0Handle, _cx| {
-                Ok(Action::Send(
-                    h.bob_move(d.m_b).sign(HotSigner::new(d.xpriv)),
-                ))
+                Ok(Action::Send(h.bob_move(d.m_b)))
             })
             .on::<RpsGameS1, _>(|_d, _h: RpsGameS1Handle, _cx| Ok(Action::Wait))
             .on_settled::<RpsGameS1, _>(|d, h: RpsGameS1Handle, _cx| {

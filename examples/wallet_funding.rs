@@ -12,7 +12,7 @@ use bitcoin::{Amount, Network, ScriptBuf, Sequence, Transaction, TxOut, Txid, bi
 use bitcoincore_rpc::RpcApi;
 use mattrs::contracts::InstanceStatus;
 use mattrs::manager::{ContractManager, ExternalInput, regtest_rpc_client};
-use mattrs::signer::{HotSigner, Signer};
+use mattrs::signer::HotSigner;
 use serde_json::{Value, json};
 use vault::{Vault, VaultParams};
 

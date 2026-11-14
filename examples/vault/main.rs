@@ -66,7 +66,6 @@ const SPEND_DELAY: u32 = 10;
 struct Repl {
     manager: ContractManager,
     params: VaultParams,
-    unvault_xpriv: Xpriv,
     /// Every instance ever shown to the user, addressed by its `list` index.
     items: Vec<InstanceHandle>,
     /// The withdrawal outputs behind each CTV hash committed by a trigger.
@@ -209,7 +208,7 @@ impl Repl {
             } else {
                 vault.trigger(ctv_hash, 0)
             };
-            builders.push(builder.sign(HotSigner::new(self.unvault_xpriv)));
+            builders.push(builder);
         }
 
         let children = self.manager.spend_batch(&builders)?;
@@ -365,12 +364,13 @@ fn main() -> AppResult {
     );
 
     let client = regtest_rpc_client(&wallet);
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    // The owner's key signs every trigger: register it once.
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest)
+        .with_signer(HotSigner::new(unvault_xpriv));
     maybe_enable_inspector(&mut manager, inspector)?;
     let mut repl = Repl {
         manager,
         params,
-        unvault_xpriv,
         items: Vec::new(),
         templates: HashMap::new(),
     };

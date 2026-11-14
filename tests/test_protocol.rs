@@ -17,6 +17,7 @@ use mattrs::protocol::{
     Action, ChainView, LocalChain, Progress, ProtocolError, Role, Runner, RunnerState,
     TimeoutAction,
 };
+use mattrs::signer::HotSigner;
 use mattrs::testutil::fund_fake;
 
 use support::rps::roles::{
@@ -68,13 +69,9 @@ fn play(m_a: i64, m_b: i64) -> (RpsOutcome, RpsOutcome) {
         alice_entry,
     );
     let mut bob = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv())),
         bob_role(),
-        BobData {
-            m_b,
-            c_a,
-            xpriv: bob_xpriv(),
-        },
+        BobData { m_b, c_a },
         bob_entry.clone(),
     );
 
@@ -127,13 +124,9 @@ fn missing_handler_is_reported() {
     );
 
     let mut bob = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv())),
         bob_role(),
-        BobData {
-            m_b: 1,
-            c_a,
-            xpriv: bob_xpriv(),
-        },
+        BobData { m_b: 1, c_a },
         fund_fake(
             RpsGameS0::new(params(c_a)).unwrap().as_erased(),
             (),

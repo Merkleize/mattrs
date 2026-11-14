@@ -19,12 +19,10 @@
 
 use std::rc::Rc;
 
-use bitcoin::bip32::Xpriv;
 use bitcoin::{ScriptBuf, TxOut};
 
 use crate::manager::{InstanceHandle, SpendBuilder};
 use crate::protocol::{Action, ProtocolError, Role, StepCtx};
-use crate::signer::HotSigner;
 
 use super::{
     Bisect1, Bisect1Clause, Bisect1Handle, Bisect2, Bisect2Clause, Bisect2Handle, BisectParams,
@@ -89,8 +87,6 @@ pub struct FraudPartyData {
     pub xs: Vec<StepValue>,
     /// The step function and commitment, off-chain.
     pub computer: OffChainComputer,
-    /// This party's signing key.
-    pub xpriv: Xpriv,
     /// Where this party's terminal wins pay.
     pub payout: ScriptBuf,
     /// The forfait timeout (blocks); must match the contracts'
@@ -146,9 +142,7 @@ pub fn alice_role() -> Role<FraudPartyData, FraudOutcome> {
         Role::new()
             .on::<Bisect1, _>(|d: &mut FraudPartyData, h: Bisect1Handle, _cx| {
                 let reveal = d.reveal_args(&h.params())?;
-                let builder = h
-                    .alice_reveal(reveal.h_mid, reveal.trace_left, reveal.trace_right)
-                    .sign(HotSigner::new(d.xpriv));
+                let builder = h.alice_reveal(reveal.h_mid, reveal.trace_left, reveal.trace_right);
                 Ok(Action::Send(builder))
             })
             .on::<Bisect2, _>(|d, h: Bisect2Handle, _cx| {
@@ -190,7 +184,7 @@ pub fn bob_role() -> Role<FraudPartyData, FraudOutcome> {
                 } else {
                     h.bob_reveal_right(reveal.h_mid, reveal.trace_left, reveal.trace_right)
                 };
-                Ok(Action::Send(builder.sign(HotSigner::new(d.xpriv))))
+                Ok(Action::Send(builder))
             })
             .on::<Leaf, _>(|d, h: LeafHandle, cx| {
                 let step = leaf_step(cx)?;
@@ -260,9 +254,7 @@ fn wait_or_forfait(
     winner: FraudWinner,
     p: &BisectParams,
 ) -> Result<Action<FraudOutcome>, ProtocolError> {
-    let builder = forfait
-        .outputs(pot(handle, &d.payout))
-        .sign(HotSigner::new(d.xpriv));
+    let builder = forfait.outputs(pot(handle, &d.payout));
     let outcome = FraudOutcome {
         winner,
         resolution: FraudResolution::Forfait { i: p.i(), j: p.j() },
@@ -284,9 +276,7 @@ fn win_leaf(
     winner: FraudWinner,
     step: i64,
 ) -> Result<Action<FraudOutcome>, ProtocolError> {
-    let builder = builder
-        .outputs(pot(handle, &d.payout))
-        .sign(HotSigner::new(d.xpriv));
+    let builder = builder.outputs(pot(handle, &d.payout));
     let outcome = FraudOutcome {
         winner,
         resolution: FraudResolution::LeafAdjudicated { step },

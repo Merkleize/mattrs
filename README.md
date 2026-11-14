@@ -158,13 +158,16 @@ tweak.
 ## Spending: a clause is a typed method call
 
 ```rust
-let vault = Vault::new(params).fund(&mut manager, amount)?;  // VaultHandle
+// A party's keys are registered once; every spend the manager executes is
+// then signed without further ceremony.
+manager.add_signer(HotSigner::new(unvault_key));
+
+let vault = Vault::new(params)?.fund(&mut manager, amount)?;  // VaultHandle
 // (augmented contracts take the initial state too: `.fund(&mut manager, amount, state)`)
 
 // trigger: signed, exactly one child, returned typed
 let unvaulting: UnvaultingHandle = vault
     .trigger(ctv_hash, 0)
-    .sign(HotSigner::new(unvault_key))
     .exec_one(&mut manager)?
     .try_into()?;
 
@@ -177,8 +180,10 @@ unvaulting
 
 Signatures are never hand-built: a `#[signer]` field stays in the `*Args` struct
 (so the struct alone is the witness layout), the generated `new()` omits it, and
-`.sign(..)` fills it by matching the clause's required pubkey — or the spend fails
-with `MissingSigner`.
+the manager fills it by matching the clause's required pubkey to one of its
+standing signers — or the spend fails with `MissingSigner`. `.sign(signer)` on
+a builder supplies a signer for that one spend (it wins over a standing one),
+and is what `build_tx()` uses, since building needs no manager.
 
 A complete worked example (a two-stage vault) lives in `examples/vault/contracts.rs`.
 

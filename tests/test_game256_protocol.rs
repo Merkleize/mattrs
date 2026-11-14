@@ -23,6 +23,7 @@ use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
 use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{LocalChain, Progress, Runner};
 use mattrs::script_helpers::key_path_p2tr as p2tr;
+use mattrs::signer::HotSigner;
 use mattrs::testutil::fund_fake;
 
 use support::game256::{FORFAIT_TIMEOUT, G256Params, G256S0};
@@ -69,28 +70,22 @@ fn setup(
 
     let alice_data = AliceGameData {
         claim: Box::new(claim),
-        fraud: game_fraud_data(alice_xpriv(), p2tr(alice_pk())),
-        xpriv: alice_xpriv(),
+        fraud: game_fraud_data(p2tr(alice_pk())),
     };
     let x = 2;
     let vals = honest_vals(x);
-    let mut fraud = game_fraud_data(bob_xpriv(), p2tr(bob_pk()));
+    let mut fraud = game_fraud_data(p2tr(bob_pk()));
     fill_fraud_data(&mut fraud, &vals);
-    let bob_data = BobGameData {
-        x,
-        vals,
-        fraud,
-        xpriv: bob_xpriv(),
-    };
+    let bob_data = BobGameData { x, vals, fraud };
 
     let alice = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv())),
         alice_game_role(),
         alice_data,
         alice_entry.clone(),
     );
     let bob_runner = Runner::new(
-        manager_on(chain.clone()),
+        manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv())),
         bob_game_role(),
         bob_data,
         bob_entry.clone(),

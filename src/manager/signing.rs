@@ -3,28 +3,38 @@ use super::validation::validate_clause_witness;
 use super::{ManagerError, SpendBuilder, transaction::PreparedBatch};
 use bitcoin::{Transaction, TxOut};
 
+/// Signers by the x-only key they sign for.
+pub(super) type Signers =
+    std::collections::HashMap<bitcoin::XOnlyPublicKey, std::rc::Rc<dyn crate::signer::Signer>>;
+
+/// `standing` are the manager's own signers, used for any key a builder
+/// registered no signer for.
 pub(super) fn sign_prepared(
     builders: &[SpendBuilder],
     prepared: PreparedBatch,
+    standing: &Signers,
 ) -> Result<Transaction, ManagerError> {
     let PreparedBatch {
         mut tx, prevouts, ..
     } = prepared;
     // Fill + finalize each input's witness (every sighash sees all prevouts).
     for (input_index, builder) in builders.iter().enumerate() {
-        tx.input[input_index].witness = input_witness(builder, &tx, input_index, &prevouts)?;
+        tx.input[input_index].witness =
+            input_witness(builder, &tx, input_index, &prevouts, standing)?;
     }
 
     Ok(tx)
 }
 /// Build the full script-path witness for one input: the clause arguments with
 /// signature elements filled (by matching each `SignerType` pubkey to a
-/// registered signer), followed by the leaf script and its control block.
+/// signer registered on the builder, else to one of the `standing` signers),
+/// followed by the leaf script and its control block.
 pub(super) fn input_witness(
     builder: &SpendBuilder,
     tx: &Transaction,
     input_index: usize,
     prevouts: &[TxOut],
+    standing: &Signers,
 ) -> Result<bitcoin::Witness, ManagerError> {
     let clause_name = builder.clause_name;
     let signers = &builder.signers;
@@ -72,7 +82,12 @@ pub(super) fn input_witness(
                 .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?;
 
             if let Some(xonly) = spec.arg_type.signer_pubkey() {
-                if let Some(signer) = signers.get(&xonly) {
+                // A signer given for this spend wins over a standing one.
+                let signer: Option<&dyn crate::signer::Signer> = match signers.get(&xonly) {
+                    Some(signer) => Some(signer.as_ref()),
+                    None => standing.get(&xonly).map(|signer| signer.as_ref()),
+                };
+                if let Some(signer) = signer {
                     witness_stack[offset] = signer
                         .sign(&sighash)
                         .map_err(|e| ManagerError::TransactionBuildError(e.to_string()))?

@@ -8,7 +8,7 @@ fn pure_preparation_and_signing_need_no_manager() {
     let prepared = transaction::prepare(&builders).unwrap();
     assert_eq!(calls.get(), 0);
     assert_eq!(prepared.child_count(), 1);
-    let tx = signing::sign_prepared(&builders, prepared).unwrap();
+    let tx = signing::sign_prepared(&builders, prepared, &Default::default()).unwrap();
     assert_eq!(calls.get(), 1);
     assert!(!tx.input[0].witness.is_empty());
     assert_eq!(handle.status(), InstanceStatus::Funded);
