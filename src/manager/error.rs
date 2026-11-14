@@ -121,8 +121,14 @@ pub enum ManagerError {
         got: usize,
     },
     /// A child instance was not of the requested contract type
-    /// ([`Children::typed`](super::Children::typed) / [`Children::one`](super::Children::one)).
+    /// ([`Children::at`](super::Children::at) / [`Children::one`](super::Children::one)).
     WrongContract(WrongContractType),
+    /// The spend created no tracked contract instance at this output index
+    /// (the output is a plain payment, or the clause does not produce it).
+    NoChildAtOutput {
+        /// The transaction output index asked for.
+        index: u32,
+    },
     /// A `NextOutputs::Join` contribution targets an output index no other
     /// input's clause defines.
     JoinWithoutTarget {
@@ -264,6 +270,12 @@ impl std::fmt::Display for ManagerError {
                 expected, got
             ),
             ManagerError::WrongContract(e) => write!(f, "{}", e),
+            ManagerError::NoChildAtOutput { index } => {
+                write!(
+                    f,
+                    "the spend created no contract instance at output {index}"
+                )
+            }
             ManagerError::JoinWithoutTarget { index } => write!(
                 f,
                 "a Join contribution targets output index {}, which no other input defines",

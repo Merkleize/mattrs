@@ -175,7 +175,7 @@ impl InstanceHandle {
 
 /// The child instances a spend produced (or an observation materialized), in
 /// merged-output order. Derefs to a slice of [`InstanceHandle`]s for
-/// positional access; [`typed`](Children::typed) / [`one`](Children::one)
+/// positional access; [`typed`](Children::at) / [`one`](Children::one)
 /// convert children into their `contract!`-generated typed handles.
 #[derive(Debug, Clone)]
 pub struct Children(Vec<InstanceHandle>);
@@ -185,19 +185,20 @@ impl Children {
         Children(handles)
     }
 
-    /// The child at `index`, as the typed handle `H`.
-    pub fn typed<H>(&self, index: usize) -> Result<H, ManagerError>
+    /// The child created at transaction output `vout`, as the typed handle
+    /// `H`. Children are looked up by the output they live at, never by their
+    /// position in this list: outputs that are plain payments are not
+    /// tracked, so positions and output indices differ.
+    pub fn at<H>(&self, vout: u32) -> Result<H, ManagerError>
     where
         H: TryFrom<InstanceHandle, Error = WrongContractType>,
     {
         let handle = self
             .0
-            .get(index)
+            .iter()
+            .find(|child| child.outpoint().vout == vout)
             .cloned()
-            .ok_or(ManagerError::UnexpectedOutputCount {
-                expected: index + 1,
-                got: self.0.len(),
-            })?;
+            .ok_or(ManagerError::NoChildAtOutput { index: vout })?;
         Ok(H::try_from(handle)?)
     }
 
@@ -206,13 +207,13 @@ impl Children {
     where
         H: TryFrom<InstanceHandle, Error = WrongContractType>,
     {
-        if self.0.len() != 1 {
-            return Err(ManagerError::UnexpectedOutputCount {
+        match <[InstanceHandle; 1]>::try_from(self.0) {
+            Ok([handle]) => Ok(H::try_from(handle)?),
+            Err(all) => Err(ManagerError::UnexpectedOutputCount {
                 expected: 1,
-                got: self.0.len(),
-            });
+                got: all.len(),
+            }),
         }
-        self.typed(0)
     }
 
     /// The untyped handles.

@@ -553,6 +553,18 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
         seen.iter().map(|c| c.outpoint().vout).collect::<Vec<_>>(),
         [0, 1]
     );
+
+    // Children are addressed by the output they live at, typed.
+    let _: UnvaultingHandle = children.at(0).unwrap();
+    let _: VaultHandle = children.at(1).unwrap();
+    assert!(matches!(
+        children.at::<VaultHandle>(0),
+        Err(ManagerError::WrongContract(_))
+    ));
+    assert!(matches!(
+        children.at::<VaultHandle>(2),
+        Err(ManagerError::NoChildAtOutput { index: 2 })
+    ));
 }
 
 /// An offline manager reports node operations as `NoNode` instead of trying to
