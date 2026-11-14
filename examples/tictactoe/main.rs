@@ -100,10 +100,14 @@ fn prompt_strategy() -> Strategy {
                 .flush()
                 .map_err(|e| ProtocolError::other(format!("failed to flush the prompt: {e}")))?;
             let mut line = String::new();
-            stdin
+            let read = stdin
                 .lock()
                 .read_line(&mut line)
                 .map_err(|e| ProtocolError::other(format!("failed to read a move: {e}")))?;
+            if read == 0 {
+                // End of input: asking again would never get an answer.
+                return Err(ProtocolError::other("no move given: standard input ended"));
+            }
             match line.trim().parse::<usize>() {
                 Ok(cell) if cell < 9 && board[cell] == EMPTY => return Ok(cell),
                 _ => println!("Invalid or taken cell — pick an empty one from the grid."),
