@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use bitcoin::Amount;
 use mattrs::fraud::roles::{FraudOutcome, FraudResolution, FraudWinner};
-use mattrs::manager::ContractManager;
+use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::protocol::Runner;
 use mattrs::report::Report;
 use mattrs::script_helpers::key_path_p2tr as p2tr;
@@ -58,7 +58,9 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     let mut bob_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
             .with_signer(HotSigner::new(bob_xpriv()));
-    let bob_entry = bob_manager.track_instance(G256S0::new(params)?.as_erased(), (), outpoint)?;
+    let bob_entry: InstanceHandle = G256S0::new(params)?
+        .track(&mut bob_manager, outpoint)?
+        .into();
 
     // The parties: Alice will cheat at step 5, Bob doubles honestly.
     let alice_data = AliceGameData {

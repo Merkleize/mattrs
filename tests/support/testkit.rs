@@ -1,18 +1,16 @@
-//! Shared test fixtures: keys, RPC clients, and fake-funded instances.
+//! Shared test fixtures: keys, managers and RPC clients.
 //!
-//! `SpendBuilder::build_tx` (and the batch `build_batch_tx`) perform no RPC, so a
-//! spend can be built and inspected offline against a fake-funded instance
-//! (`ContractManager::offline` + `fund_fake`). The `#[ignore]`d end-to-end tests use
-//! `regtest_client` against a real regtest `bitcoind` instead.
+//! Offline tests fund and spend on an in-memory `LocalChain`
+//! (`mattrs::testutil::local_manager`, or [`manager_on`] for parties sharing
+//! one chain). The `#[ignore]`d end-to-end tests use `regtest_client` against
+//! a real regtest `bitcoind` instead.
 
 use std::str::FromStr;
-use std::sync::Arc;
 
+use bitcoin::XOnlyPublicKey;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
-use bitcoin::{Amount, XOnlyPublicKey};
 use bitcoincore_rpc::Client;
-use mattrs::contracts::{ContractState, ErasedContract};
 use mattrs::manager::InstanceHandle;
 use mattrs::report::Report;
 
@@ -46,12 +44,6 @@ pub fn alice_pk() -> XOnlyPublicKey {
 /// The x-only pubkey of [`bob_xpriv`] (`5f6929a3…`).
 pub fn bob_pk() -> XOnlyPublicKey {
     xonly_of(&bob_xpriv())
-}
-
-/// A manager with no node behind it, for tests driving protocols on a
-/// `LocalChain`.
-pub fn offline_manager() -> mattrs::manager::ContractManager {
-    mattrs::manager::ContractManager::offline(bitcoin::Network::Regtest)
 }
 
 /// A manager on `chain`, for tests driving protocols on a `LocalChain` shared
@@ -115,19 +107,6 @@ where
     T::Error: std::fmt::Debug,
 {
     handle.try_into().expect("fixture contract type mismatch")
-}
-
-/// Fake a funded instance of `contract` (optionally carrying `expanded` logical
-/// state) holding `amount` sats, at a distinct outpoint keyed by `seed`.
-///
-/// Thin wrapper over [`mattrs::testutil::fund_fake`] taking sats directly.
-pub fn fund_fake(
-    contract: Arc<dyn ErasedContract>,
-    state: impl ContractState + 'static,
-    amount: u64,
-    seed: u8,
-) -> InstanceHandle {
-    mattrs::testutil::fund_fake(contract, state, Amount::from_sat(amount), seed)
 }
 
 /// Append the transaction that spent `handle` to `report` as a collapsible

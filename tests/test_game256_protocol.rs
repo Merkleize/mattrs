@@ -24,7 +24,6 @@ use mattrs::manager::InstanceHandle;
 use mattrs::protocol::{LocalChain, Progress, Runner};
 use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
-use mattrs::testutil::fund_fake;
 
 use support::game256::{FORFAIT_TIMEOUT, G256Params, G256S0};
 use support::game256_roles::{
@@ -36,9 +35,9 @@ use support::testkit::{
 };
 
 const AMOUNT: u64 = 20_000;
-const SEED: u8 = 77;
 
-/// Two runners over twin fake-funded `G256S0` entries and a shared chain.
+/// Two runners over one `G256S0` game on a shared chain: Alice funds it, Bob
+/// tracks it.
 /// Returns (alice, bob, alice's entry, bob's entry) — the entry handles let a
 /// test inspect each party's view of the spend chain afterwards.
 fn setup(
@@ -55,18 +54,18 @@ fn setup(
         bob_pk: bob_pk(),
     };
 
-    let alice_entry = fund_fake(
-        G256S0::new(params.clone()).unwrap().as_erased(),
-        (),
-        Amount::from_sat(AMOUNT),
-        SEED,
-    );
-    let bob_entry = fund_fake(
-        G256S0::new(params).unwrap().as_erased(),
-        (),
-        Amount::from_sat(AMOUNT),
-        SEED,
-    );
+    // Alice funds the game; Bob tracks the same output in his own manager.
+    let game = G256S0::new(params).unwrap();
+    let mut alice_manager = manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv()));
+    let mut bob_manager = manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv()));
+    let alice_entry: InstanceHandle = game
+        .fund(&mut alice_manager, Amount::from_sat(AMOUNT))
+        .unwrap()
+        .into();
+    let bob_entry: InstanceHandle = game
+        .track(&mut bob_manager, alice_entry.outpoint())
+        .unwrap()
+        .into();
 
     let alice_data = AliceGameData {
         claim: Box::new(claim),
@@ -79,17 +78,12 @@ fn setup(
     let bob_data = BobGameData { x, vals, fraud };
 
     let alice = Runner::new(
-        manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv())),
+        alice_manager,
         alice_game_role(),
         alice_data,
         alice_entry.clone(),
     );
-    let bob_runner = Runner::new(
-        manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv())),
-        bob_game_role(),
-        bob_data,
-        bob_entry.clone(),
-    );
+    let bob_runner = Runner::new(bob_manager, bob_game_role(), bob_data, bob_entry.clone());
     (alice, bob_runner, alice_entry, bob_entry)
 }
 

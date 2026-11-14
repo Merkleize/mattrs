@@ -177,12 +177,11 @@ fn test_merkle_proof_type_arg_consumes_2n_plus_1() {
 
 #[test]
 fn test_ram_write_commits_updated_root() {
+    let mut manager = mattrs::testutil::local_manager();
     // Spend the `write` clause: it decodes the Merkle proof from the witness
     // (MerkleProofType), reads the cells from the instance's expanded state, updates
     // cell 2, and commits the new Merkle root to the output. Builds locally, no RPC.
     use bitcoin::Amount;
-
-    use support::testkit::{fund_fake, try_handle};
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();
     let ram = Ram::new(RamParams { size: 4 }).unwrap();
@@ -190,14 +189,15 @@ fn test_ram_write_commits_updated_root() {
     // The instance commits the initial leaves' Merkle root, and carries the leaves
     // themselves as expanded state.
     let committed = MerkleTree::new(leaves.clone()).root();
-    let handle = try_handle::<RamHandle>(fund_fake(
-        ram.as_erased(),
-        RamState {
-            leaves: leaves.clone(),
-        },
-        100_000,
-        0,
-    ));
+    let handle = ram
+        .fund(
+            &mut manager,
+            Amount::from_sat(100_000),
+            RamState {
+                leaves: leaves.clone(),
+            },
+        )
+        .unwrap();
 
     // Prove cell 2 and write a new value into it.
     let tree = MerkleTree::new(leaves.clone());

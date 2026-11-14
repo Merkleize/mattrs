@@ -3,7 +3,7 @@
 //!
 //! Coverage mirrors the other examples:
 //! - state/rules unit tests;
-//! - build-level spend tests against fake-funded instances (no node): a move
+//! - build-level spend tests against instances funded on an in-memory chain (no node): a move
 //!   commits the updated board to the same contract, claims pay out via their
 //!   CTV templates, and `next_outputs` rejects illegal moves;
 //! - the full protocol offline: both players' [`Runner`]s over a shared
@@ -24,8 +24,7 @@ use mattrs::script_helpers::key_path_p2tr as p2tr;
 use mattrs::signer::HotSigner;
 
 use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, fund_fake, manager_on, try_handle,
-    walk_tip,
+    alice_pk, alice_xpriv, bob_pk, bob_xpriv, drive_both, manager_on, walk_tip,
 };
 use support::tictactoe::roles::{
     PlayerData, Strategy, TttOutcome, TttResult, alice_role, bob_role,
@@ -37,7 +36,6 @@ use support::tictactoe::{
 
 const POT: u64 = (2 * DEFAULT_STAKE) as u64;
 const TIMEOUT: u32 = 10;
-const SEED: u8 = 42;
 
 fn params() -> TttParams {
     TttParams {
@@ -48,14 +46,16 @@ fn params() -> TttParams {
     }
 }
 
-/// A fake-funded game holding the pot, carrying `state` as expanded state.
+/// A game holding the pot on a chain of its own, at board `state`.
 fn funded_game(state: TttState) -> TicTacToeHandle {
-    try_handle(fund_fake(
-        TicTacToe::new(params()).unwrap().as_erased(),
-        state,
-        POT,
-        SEED,
-    ))
+    TicTacToe::new(params())
+        .unwrap()
+        .fund(
+            &mut mattrs::testutil::local_manager(),
+            Amount::from_sat(POT),
+            state,
+        )
+        .unwrap()
 }
 
 /// A board from a compact picture: 'X', 'O', '.' per cell.
@@ -250,15 +250,18 @@ fn scripted(moves: &[usize]) -> Strategy {
 
 #[test]
 fn strategy_errors_propagate_from_the_role() {
-    let chain = Rc::new(LocalChain::new());
-    let entry = funded_game(TttState::initial());
+    let mut manager = mattrs::testutil::local_manager().with_signer(HotSigner::new(alice_xpriv()));
+    let entry = TicTacToe::new(params())
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(POT), TttState::initial())
+        .unwrap();
     let mut runner = Runner::new(
-        manager_on(chain).with_signer(HotSigner::new(alice_xpriv())),
+        manager,
         alice_role(),
         PlayerData {
             strategy: Box::new(|_| Err(ProtocolError::Other("input closed".to_string()))),
         },
-        entry.handle().clone(),
+        entry,
     );
 
     let err = runner.step().unwrap_err();
@@ -268,8 +271,9 @@ fn strategy_errors_propagate_from_the_role() {
     ));
 }
 
-/// Twin runners over the same fake-funded game and a shared chain. The two
-/// entry handles are each party's own view of the spend chain.
+/// Both parties' runners over one game on a shared chain: Alice funds it, Bob
+/// tracks it. The two entry handles are each party's own view of the spend
+/// chain.
 fn setup(
     chain: &Rc<LocalChain>,
     alice_moves: &[usize],
@@ -280,21 +284,26 @@ fn setup(
     TicTacToeHandle,
     TicTacToeHandle,
 ) {
-    let alice_entry = fund_fake(
-        TicTacToe::new(params()).unwrap().as_erased(),
-        TttState::initial(),
-        POT,
-        SEED,
-    );
-    let bob_entry = fund_fake(
-        TicTacToe::new(params()).unwrap().as_erased(),
-        TttState::initial(),
-        POT,
-        SEED,
-    );
+    let game = TicTacToe::new(params()).unwrap();
+    let mut alice_manager = manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv()));
+    let mut bob_manager = manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv()));
+    let alice_entry = game
+        .fund(
+            &mut alice_manager,
+            Amount::from_sat(POT),
+            TttState::initial(),
+        )
+        .unwrap();
+    let bob_entry = game
+        .track(
+            &mut bob_manager,
+            alice_entry.handle().outpoint(),
+            TttState::initial(),
+        )
+        .unwrap();
 
     let alice = Runner::new(
-        manager_on(chain.clone()).with_signer(HotSigner::new(alice_xpriv())),
+        alice_manager,
         alice_role(),
         PlayerData {
             strategy: scripted(alice_moves),
@@ -302,14 +311,14 @@ fn setup(
         alice_entry.clone(),
     );
     let bob = Runner::new(
-        manager_on(chain.clone()).with_signer(HotSigner::new(bob_xpriv())),
+        bob_manager,
         bob_role(),
         PlayerData {
             strategy: scripted(bob_moves),
         },
         bob_entry.clone(),
     );
-    (alice, bob, try_handle(alice_entry), try_handle(bob_entry))
+    (alice, bob, alice_entry, bob_entry)
 }
 
 #[test]

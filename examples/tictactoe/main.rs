@@ -276,11 +276,7 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector)?;
-    let entry = manager.track_instance(
-        TicTacToe::new(params)?.as_erased(),
-        TttState::initial(),
-        outpoint,
-    )?;
+    let entry = TicTacToe::new(params)?.track(&mut manager, outpoint, TttState::initial())?;
     println!("Tracking the game at {outpoint}");
 
     println!("You are O; waiting for Alice's first move on-chain...");

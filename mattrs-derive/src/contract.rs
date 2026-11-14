@@ -1206,6 +1206,14 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             #(#methods)*
         }
 
+        impl ::core::convert::From<#handle_ident> for ::mattrs::manager::InstanceHandle {
+            /// Forget the contract type (e.g. to hand the instance to a
+            /// `Runner` as its entry).
+            fn from(handle: #handle_ident) -> Self {
+                handle.0
+            }
+        }
+
         impl ::core::convert::TryFrom<::mattrs::manager::InstanceHandle> for #handle_ident {
             type Error = ::mattrs::manager::WrongContractType;
 

@@ -97,14 +97,20 @@ pub struct Runner<D, O> {
 
 impl<D: 'static, O: 'static> Runner<D, O> {
     /// A runner for `role` (with the party's private `data`), starting at the
-    /// funded or tracked `entry` instance.
-    pub fn new(manager: ContractManager, role: Role<D, O>, data: D, entry: InstanceHandle) -> Self {
+    /// funded or tracked `entry` instance (a typed handle, as returned by a
+    /// contract's `fund` / `track`, or an untyped one).
+    pub fn new(
+        manager: ContractManager,
+        role: Role<D, O>,
+        data: D,
+        entry: impl Into<InstanceHandle>,
+    ) -> Self {
         Runner {
             role,
             data,
             manager,
             tokens: vec![TokenState {
-                current: entry,
+                current: entry.into(),
                 parent: None,
                 phase: Phase::Arrived,
             }],

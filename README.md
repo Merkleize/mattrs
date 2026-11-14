@@ -25,7 +25,8 @@ bitcoin-script = { path = "../mattrs/bitcoin-script" }   # patched vendor, see b
 ```
 
 Then run the offline example — it defines a two-clause contract with the
-`contract!` DSL, derives its address, and builds a signed spend without a node:
+`contract!` DSL, derives its address, then funds and spends it on an in-memory
+chain, without a node:
 
 ```sh
 cargo run --example getting_started
@@ -426,8 +427,8 @@ fragments (`mattrs::script_helpers`), `commit_int` (`mattrs::script_utils`),
 bare-key payout and burn outputs (the `ClauseOutput::pay_key` /
 `ClauseOutput::burn` constructors), a `WitnessReader`
 for parsing raw-args witnesses sequentially, the `opaque_merkle_state!` macro
-for expanded states committed as a Merkle root, and `fund_fake(..)` /
-`apply_batch(..)` for building and applying spends without a node
+for expanded states committed as a Merkle root, and `local_manager()` /
+`apply_batch(..)` for funding and applying spends without a node
 (`mattrs::testutil`, behind the `test-util` feature; used by the examples and
 fixtures, together with
 `ContractManager::offline(network)`).

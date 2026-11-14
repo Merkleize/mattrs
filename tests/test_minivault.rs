@@ -14,12 +14,8 @@ use mattrs::manager::{ContractManager, ManagerError};
 use mattrs::report::Report;
 use mattrs::script_helpers::opaque_p2tr;
 use mattrs::signer::HotSigner;
-use support::minivault::{
-    MiniUnvaulting, MiniUnvaultingHandle, MiniVault, MiniVaultHandle, MiniVaultParams,
-};
-use support::testkit::{
-    alice_pk, alice_xpriv, bob_pk, fund_fake, regtest_client, report_spend, try_handle,
-};
+use support::minivault::{MiniUnvaulting, MiniUnvaultingHandle, MiniVault, MiniVaultParams};
+use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client, report_spend};
 
 const SPEND_DELAY: u32 = 10;
 
@@ -91,17 +87,16 @@ fn test_minivault_combos_have_distinct_taptrees() {
 
 #[test]
 fn test_minivault_trigger_commits_unvaulting_state() {
+    let mut manager = mattrs::testutil::local_manager();
     // Build (no node) a trigger spend and check output 0 commits a
     // MiniUnvaulting carrying the withdrawal key, preserving the amount.
     let params = make_params(false, false);
     let wpk = withdrawal_pk();
 
-    let handle = try_handle::<MiniVaultHandle>(fund_fake(
-        MiniVault::new(params.clone()).unwrap().as_erased(),
-        (),
-        100_000,
-        0,
-    ));
+    let handle = MiniVault::new(params.clone())
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(100_000))
+        .unwrap();
 
     let tx = handle
         .trigger(wpk, 0)
@@ -127,13 +122,12 @@ fn test_minivault_trigger_commits_unvaulting_state() {
 
 #[test]
 fn test_minivault_rejects_invalid_output_indices() {
+    let mut manager = mattrs::testutil::local_manager();
     let params = make_params(true, false);
-    let handle = try_handle::<MiniVaultHandle>(fund_fake(
-        MiniVault::new(params).unwrap().as_erased(),
-        (),
-        100_000,
-        8,
-    ));
+    let handle = MiniVault::new(params)
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(100_000))
+        .unwrap();
 
     let err = handle
         .trigger_and_revault(withdrawal_pk(), 0, -2)

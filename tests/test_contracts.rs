@@ -456,6 +456,7 @@ fn test_derived_state_roundtrip() {
 
 #[test]
 fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
+    let mut manager = mattrs::testutil::local_manager();
     use bitcoin::{Address, Amount, Sequence, TxOut};
 
     // The exact outputs + input sequence the clause commits to.
@@ -494,7 +495,9 @@ fn test_ctv_template_clause_fixes_tx_outputs_and_sequence() {
             .expect("contract definition is valid"),
     );
     // Fake a funded instance (building the tx does no RPC).
-    let handle = mattrs::testutil::fund_fake(erased, (), Amount::from_sat(100_000), 0);
+    let handle = manager
+        .fund_instance(erased, (), Amount::from_sat(100_000))
+        .unwrap();
 
     let witness =
         <TriggerArgs as ClauseArgs>::encode_to_witness(&TriggerArgs { withdraw_amount: 1 });

@@ -1,21 +1,27 @@
 //! Getting started with `mattrs`: define a contract with the `contract!` DSL,
-//! derive its address, and build a spending transaction — all offline.
+//! derive its address, fund it and spend it — all without a Bitcoin node.
 //!
 //! The contract is a minimal timelocked payment with two clauses:
 //! - `withdraw`: after `delay` blocks, the owner signs and takes the funds;
 //! - `recover`: anyone can push the funds to the recovery key (via
 //!   `CHECKCONTRACTVERIFY`), e.g. if the owner key is compromised.
 //!
-//! Run with `cargo run --example getting_started`. No Bitcoin node is needed:
-//! the instance is fake-funded and the spend is built (signed) but not broadcast.
+//! Run with `cargo run --example getting_started`. The manager here runs on an
+//! in-memory chain ([`LocalChain`]), which mints the funding and records the
+//! spend without executing scripts. Against a real node the code is the same
+//! with `ContractManager::new(rpc_client, network)`.
 
 use std::str::FromStr;
 
 use bitcoin::bip32::Xpriv;
 use bitcoin::{Amount, ScriptBuf, TxOut, XOnlyPublicKey};
 use bitcoin_script::{define_pushable, script};
+use std::rc::Rc;
+
+use mattrs::chain::LocalChain;
+use mattrs::contracts::InstanceStatus;
+use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
-use mattrs::testutil::fund_fake;
 use mattrs::{Signature, contract};
 
 define_pushable!();
@@ -105,26 +111,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         timelock.address(bitcoin::Network::Regtest)
     );
 
-    // 2. Fund it. Here we fake the funding so the example runs offline (see
-    //    `mattrs::testutil`); against a real node you would use
-    //    `timelock.fund(&mut manager, amount)` instead.
-    let handle: TimeLockHandle =
-        fund_fake(timelock.as_erased(), (), Amount::from_sat(100_000), 1).try_into()?;
+    // 2. A manager tracks instances and executes spends. The owner's key is
+    //    registered once; every spend it executes is signed from it.
+    let chain = Rc::new(LocalChain::new());
+    let mut manager =
+        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_signer(owner_signer);
 
-    // 3. Build the withdraw spend. The signature argument is filled automatically
-    //    from the registered signer — no placeholder is ever written by hand.
-    //    Building performs no RPC, so an unreachable client works offline.
+    // 3. Fund it: `fund` returns a typed handle with one method per clause.
+    let handle = timelock.fund(&mut manager, Amount::from_sat(100_000))?;
 
+    // 4. Spend it. `withdraw` is timelocked, so the funding must first be
+    //    `delay` blocks deep. The signature argument is filled automatically —
+    //    no placeholder is ever written by hand.
+    chain.mine(params.delay);
     let dest = bitcoin::Address::from_str("bcrt1qqy0kdmv0ckna90ap6efd6z39wcdtpfa3a27437")?
         .assume_checked();
-    let tx = handle
+    handle
         .withdraw()
-        .sign(owner_signer)
         .outputs(vec![TxOut {
             script_pubkey: dest.script_pubkey(),
             value: Amount::from_sat(99_000),
         }])
-        .build_tx()?;
+        .exec_none(&mut manager)?;
+
+    // The manager recorded the spend, and the handle decodes it.
+    assert_eq!(handle.handle().status(), InstanceStatus::Spent);
+    assert_eq!(handle.spent_clause(), Some(TimeLockClause::Withdraw));
+    let tx = handle.handle().spending_tx().ok_or("no spending tx")?;
 
     println!(
         "withdraw tx: {}",
@@ -143,6 +156,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("the signed witness is empty")?
             .is_empty()
     );
-    println!("done — the signature was auto-filled and the spend is fully signed.");
+    println!("done — funded, signed and spent on the in-memory chain.");
     Ok(())
 }

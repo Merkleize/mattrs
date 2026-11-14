@@ -163,10 +163,12 @@ impl LocalChain {
         inner.height += n;
     }
 
-    /// Declare an externally-created transaction (e.g. a fake funding) as
-    /// confirmed at `height`, so timeouts counted from it can fire.
+    /// Declare a transaction confirmed at `height` — one created outside this
+    /// chain, or one of its own moved there (which is how a test simulates a
+    /// reorg) — so timeouts counted from it can fire.
     pub fn assume_confirmed(&self, txid: Txid, height: u32) {
         let mut inner = self.inner.borrow_mut();
+        inner.mempool.retain(|pending| *pending != txid);
         inner.confirmed.insert(txid, height);
         inner.height = inner.height.max(height);
     }

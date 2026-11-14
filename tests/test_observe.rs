@@ -9,7 +9,7 @@ use std::str::FromStr;
 use bitcoin::{Address, Amount};
 use mattrs::contracts::{ClauseArgs, InstanceStatus};
 use mattrs::ctv::create_ctv_template;
-use mattrs::manager::ContractManager;
+use mattrs::manager::{ContractManager, InstanceHandle};
 use mattrs::signer::HotSigner;
 use support::testkit::{alice_pk, alice_xpriv, bob_pk, regtest_client};
 use support::vault::{UnvaultingHandle, Vault, VaultParams, VaultTriggerArgs};
@@ -64,11 +64,9 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     let observer_client = regtest_client("testwallet");
     let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
 
-    let vault_b = observer.track_instance(
-        Vault::new(params.clone())?.as_erased(),
-        (),
-        funding_outpoint,
-    )?;
+    let vault_b: InstanceHandle = Vault::new(params.clone())?
+        .track(&mut observer, funding_outpoint)?
+        .into();
 
     let children = observer.wait_for_spend(&vault_b)?;
     assert_eq!(children.len(), 1);
@@ -125,11 +123,13 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     // funding outpoints are still around to verify.
     let mut observer =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
-    let vault_contract = Vault::new(params.clone())?.as_erased();
-    let tracked_1 =
-        observer.track_instance(vault_contract.clone(), (), vault_1.handle().outpoint())?;
-    let tracked_2 =
-        observer.track_instance(vault_contract.clone(), (), vault_2.handle().outpoint())?;
+    let vault_contract = Vault::new(params.clone())?;
+    let tracked_1: InstanceHandle = vault_contract
+        .track(&mut observer, vault_1.handle().outpoint())?
+        .into();
+    let tracked_2: InstanceHandle = vault_contract
+        .track(&mut observer, vault_2.handle().outpoint())?
+        .into();
 
     // An unspent instance times out within the polling window...
     let err = observer

@@ -77,19 +77,18 @@ use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, ScriptBuf, Sequence, TxOut};
 use mattrs::manager::ContractManager;
 use mattrs::signer::HotSigner;
-use support::rps::{RpsGameS0Handle, RpsGameS1Handle, RpsGameS1State};
-use support::testkit::{bob_xpriv, fund_fake, try_handle};
+use support::rps::{RpsGameS1Handle, RpsGameS1State};
+use support::testkit::bob_xpriv;
 
 #[test]
 fn test_rps_bob_move_commits_s1_state() {
+    let mut manager = mattrs::testutil::local_manager();
     let params = reference_params();
 
-    let handle = try_handle::<RpsGameS0Handle>(fund_fake(
-        RpsGameS0::new(params.clone()).unwrap().as_erased(),
-        (),
-        2000,
-        0,
-    ));
+    let handle = RpsGameS0::new(params.clone())
+        .unwrap()
+        .fund(&mut manager, Amount::from_sat(2000))
+        .unwrap();
 
     // Bob plays paper (m_b = 1), signing with his key.
     let tx = handle
@@ -112,17 +111,20 @@ fn test_rps_bob_move_commits_s1_state() {
 
 #[test]
 fn test_rps_bob_wins_pays_out_via_ctv() {
+    let mut manager = mattrs::testutil::local_manager();
     let params = reference_params();
     let bob_pk = params.bob_pk;
 
-    let handle = try_handle::<RpsGameS1Handle>(fund_fake(
-        RpsGameS1::new(params).unwrap().as_erased(),
-        RpsGameS1State {
-            commitment: move_commitment(1),
-        },
-        2000,
-        0,
-    ));
+    let handle = RpsGameS1::new(params)
+        .unwrap()
+        .fund(
+            &mut manager,
+            Amount::from_sat(2000),
+            RpsGameS1State {
+                commitment: move_commitment(1),
+            },
+        )
+        .unwrap();
 
     // The bob_wins clause pays out the whole pot to Bob via a CTV template.
     let tx = handle.bob_wins(1, 0, [0u8; 32]).build_tx().unwrap();

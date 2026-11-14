@@ -232,7 +232,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
     let client = rpc_client(wallet);
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector)?;
-    let entry = manager.track_instance(RpsGameS0::new(params)?.as_erased(), (), outpoint)?;
+    let entry = RpsGameS0::new(params)?.track(&mut manager, outpoint)?;
     println!("Tracking the game at {outpoint}");
 
     // Bob's role does the rest: reveal the move on-chain (signed), then follow

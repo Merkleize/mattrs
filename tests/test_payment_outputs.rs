@@ -7,7 +7,7 @@ use mattrs::contract;
 use mattrs::contracts::{ClauseOutput, InstanceStatus, NextOutputs};
 use mattrs::manager::{InstanceHandle, ManagerError};
 use mattrs::script_helpers::opaque_p2tr;
-use support::testkit::{alice_pk, bob_pk, offline_manager};
+use support::testkit::{alice_pk, bob_pk};
 use support::vault::{
     Unvaulting, UnvaultingHandle, UnvaultingParams, UnvaultingState, Vault, VaultHandle,
     VaultParams,
@@ -17,46 +17,34 @@ fn sat(value: u64) -> Amount {
     Amount::from_sat(value)
 }
 
-fn vault(tag: u8) -> VaultHandle {
-    mattrs::testutil::fund_fake(
-        Vault::new(VaultParams {
-            alternate_pk: None,
-            spend_delay: 10,
-            recover_pk: bob_pk(),
-            unvault_pk: alice_pk(),
-        })
-        .unwrap()
-        .as_erased(),
-        (),
-        sat(10_000),
-        tag,
-    )
-    .try_into()
+fn vault(manager: &mut mattrs::manager::ContractManager) -> VaultHandle {
+    Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })
+    .unwrap()
+    .fund(manager, sat(10_000))
     .unwrap()
 }
 
-fn unvaulting(tag: u8) -> UnvaultingHandle {
-    mattrs::testutil::fund_fake(
-        Unvaulting::new(UnvaultingParams {
-            alternate_pk: None,
-            spend_delay: 10,
-            recover_pk: bob_pk(),
-        })
-        .unwrap()
-        .as_erased(),
-        UnvaultingState { ctv_hash: [42; 32] },
-        sat(20_000),
-        tag,
-    )
-    .try_into()
+fn unvaulting(manager: &mut mattrs::manager::ContractManager) -> UnvaultingHandle {
+    Unvaulting::new(UnvaultingParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+    })
+    .unwrap()
+    .fund(manager, sat(20_000), UnvaultingState { ctv_hash: [42; 32] })
     .unwrap()
 }
 
 #[test]
 fn recovery_derives_the_untweaked_payment_and_has_no_children() {
-    let a = vault(1);
-    let b = unvaulting(2);
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
+    let a = vault(&mut manager);
+    let b = unvaulting(&mut manager);
     for handle in [a.handle(), b.handle()] {
         let tx = handle
             .spend_clause("recover", vec![vec![]])
@@ -79,8 +67,8 @@ fn recovery_derives_the_untweaked_payment_and_has_no_children() {
 
 #[test]
 fn explicit_recovery_outputs_cannot_change_destination_or_reduce_value() {
-    let h = vault(1);
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
+    let h = vault(&mut manager);
     let tx = h.recover(0).build_tx().unwrap();
     let mut wrong_script = tx.output.clone();
     wrong_script[0].script_pubkey = opaque_p2tr(alice_pk());
@@ -108,9 +96,9 @@ fn explicit_recovery_outputs_cannot_change_destination_or_reduce_value() {
 
 #[test]
 fn recovery_respects_explicit_and_same_input_indices() {
-    let a = vault(1);
-    let b = unvaulting(2);
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
+    let a = vault(&mut manager);
+    let b = unvaulting(&mut manager);
     let tx = mattrs::manager::build_batch_tx(&[a.recover(-1), b.recover(-1)]).unwrap();
     assert_eq!(
         tx.output.iter().map(|out| out.value).collect::<Vec<_>>(),
@@ -119,7 +107,7 @@ fn recovery_respects_explicit_and_same_input_indices() {
     for h in [a.handle(), b.handle()] {
         assert!(manager.observe_spend(h, &tx).unwrap().is_empty());
     }
-    let a = vault(3);
+    let a = vault(&mut manager);
     // Gaps require explicit outputs; the manager does not invent fillers.
     assert!(matches!(
         a.recover(1).build_tx(),
@@ -142,9 +130,9 @@ fn recovery_respects_explicit_and_same_input_indices() {
 
 #[test]
 fn batched_recoveries_aggregate_without_creating_children() {
-    let a = vault(1);
-    let b = unvaulting(2);
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
+    let a = vault(&mut manager);
+    let b = unvaulting(&mut manager);
     let tx = mattrs::manager::build_batch_tx(&[a.recover(0), b.recover(0)]).unwrap();
     assert_eq!(
         tx.output,
@@ -182,21 +170,19 @@ contract! {
     }
 }
 
-fn split(ignore: bool) -> InstanceHandle {
-    mattrs::testutil::fund_fake(
-        SplitPayments::new(SplitParams { ignore })
-            .unwrap()
-            .as_erased(),
-        (),
-        sat(10_000),
-        1,
-    )
+fn split(manager: &mut mattrs::manager::ContractManager, ignore: bool) -> InstanceHandle {
+    SplitPayments::new(SplitParams { ignore })
+        .unwrap()
+        .fund(manager, sat(10_000))
+        .unwrap()
+        .handle()
+        .clone()
 }
 
 #[test]
 fn payment_amounts_use_the_shared_deduct_and_preserve_rules() {
-    let h = split(false);
-    let mut manager = offline_manager();
+    let mut manager = mattrs::testutil::local_manager();
+    let h = split(&mut manager, false);
     assert!(matches!(
         h.spend_clause("split", vec![]).build_tx(),
         Err(ManagerError::MissingDeductAmount { index: 0 })
@@ -232,7 +218,8 @@ fn payment_amounts_use_the_shared_deduct_and_preserve_rules() {
 
 #[test]
 fn ignored_payments_require_an_amount_but_do_not_reduce_the_residual() {
-    let h = split(true);
+    let mut manager = mattrs::testutil::local_manager();
+    let h = split(&mut manager, true);
     assert!(matches!(
         h.spend_clause("split", vec![]).build_tx(),
         Err(ManagerError::MissingIgnoredAmount { index: 0 })
