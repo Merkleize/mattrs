@@ -13,6 +13,13 @@
 //! cargo run --example vault -- --script examples/vault/scripts/normal.txt
 //! ```
 //!
+//! With `--local` no node is needed: the same commands run on an in-memory
+//! chain, which records the transactions without executing their scripts.
+//!
+//! ```sh
+//! cargo run --example vault -- --local --script examples/vault/scripts/revault.txt
+//! ```
+//!
 //! With `--inspector` (and a build with `--features inspector`) the manager
 //! also serves live state snapshots for the `mattrs-inspector` TUI:
 //!
@@ -48,6 +55,7 @@ use std::str::FromStr;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Address, Amount, Sequence, TxOut, XOnlyPublicKey};
+use mattrs::chain::LocalChain;
 use mattrs::contracts::InstanceStatus;
 use mattrs::ctv::create_ctv_template;
 use mattrs::manager::{ContractManager, InstanceHandle, regtest_rpc_client};
@@ -332,12 +340,14 @@ fn main() -> AppResult {
     let mut script: Option<String> = None;
     let mut wallet = "testwallet".to_string();
     let mut inspector: Option<u16> = None;
+    let mut local = false;
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--script" | "-s" => script = Some(it.next().ok_or("--script needs a file")?.clone()),
             "--wallet" => wallet = it.next().ok_or("--wallet needs a value")?.clone(),
+            "--local" => local = true,
             "--inspector" => inspector = inspector.or(Some(34443)),
             "--inspector-port" => {
                 inspector = Some(it.next().ok_or("--inspector-port needs a value")?.parse()?)
@@ -365,10 +375,17 @@ fn main() -> AppResult {
         Vault::new(params.clone())?.address(bitcoin::Network::Regtest)
     );
 
-    let client = regtest_rpc_client(&wallet);
+    // The same commands run on either chain; only the manager's backend differs.
+    let manager = if local {
+        ContractManager::on(
+            std::rc::Rc::new(LocalChain::new()),
+            bitcoin::Network::Regtest,
+        )
+    } else {
+        ContractManager::new(regtest_rpc_client(&wallet), bitcoin::Network::Regtest)
+    };
     // The owner's key signs every trigger: register it once.
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest)
-        .with_signer(HotSigner::new(unvault_xpriv));
+    let mut manager = manager.with_signer(HotSigner::new(unvault_xpriv));
     maybe_enable_inspector(&mut manager, inspector)?;
     let mut repl = Repl {
         manager,

@@ -36,8 +36,14 @@ jobs:
       - name: Test
         run: cargo test --all-targets --all-features
 
-      - name: Run the offline example
-        run: cargo run --all-features --example getting_started
+      # The demo binaries are otherwise only compiled; these run without a node.
+      - name: Run the offline examples
+        run: |
+          cargo run --all-features --example getting_started
+          cargo run --all-features --example counter
+          for script in examples/vault/scripts/*.txt; do
+            cargo run --all-features --example vault -- --local --script "$script"
+          done
 
   # The #[ignore]d end-to-end tests, against a MATT-enabled regtest node.
   regtest:

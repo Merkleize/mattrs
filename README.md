@@ -272,6 +272,7 @@ scripts live in `examples/vault/scripts/`:
 ```sh
 cargo run --example vault                                    # interactive
 cargo run --example vault -- --script examples/vault/scripts/revault.txt
+cargo run --example vault -- --local                         # in-memory chain, no node
 ```
 
 **Aggregate exits** (`examples/aggregate_exits/`) is an incomplete regtest
