@@ -54,9 +54,5 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      # The wallet-funding test is skipped: the image's node (Bitcoin
-      # Inquisition v29.1.0) stops answering RPC during
-      # `signrawtransactionwithwallet` on a transaction with covenant inputs.
-      # The test passes on v29.4.0; drop the skip once the image is updated.
       - name: End-to-end tests on regtest
-        run: scripts/regtest-tests.sh --skip external_wallet_funds_signs_and_observes_batch
+        run: scripts/regtest-tests.sh
