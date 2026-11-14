@@ -260,16 +260,24 @@ fn find_spending_tx_once(
 ///   falls back to cookie authentication with `BITCOIN_RPC_COOKIE` (default
 ///   `~/.bitcoin/regtest/.cookie`) — a stock regtest `bitcoind` works with no
 ///   configuration at all.
+///
+/// # Panics
+///
+/// Panics if the client cannot be created — in practice, when the cookie file
+/// is missing because no node is running (or it keeps its data elsewhere).
 pub fn regtest_rpc_client(wallet_name: &str) -> Client {
     let rpc_url =
         std::env::var("BITCOIN_RPC_URL").unwrap_or_else(|_| "http://localhost:18443".to_string());
     let rpc_url_full = format!("{}/wallet/{}", rpc_url, wallet_name);
 
-    let auth = match (
+    let (auth, auth_hint) = match (
         std::env::var("BITCOIN_RPC_USER"),
         std::env::var("BITCOIN_RPC_PASSWORD"),
     ) {
-        (Ok(user), Ok(password)) => bitcoincore_rpc::Auth::UserPass(user, password),
+        (Ok(user), Ok(password)) => (
+            bitcoincore_rpc::Auth::UserPass(user, password),
+            "BITCOIN_RPC_USER / BITCOIN_RPC_PASSWORD".to_string(),
+        ),
         _ => {
             let cookie = std::env::var("BITCOIN_RPC_COOKIE")
                 .map(std::path::PathBuf::from)
@@ -277,11 +285,18 @@ pub fn regtest_rpc_client(wallet_name: &str) -> Client {
                     let home = std::env::var("HOME").expect("HOME not set");
                     std::path::PathBuf::from(home).join(".bitcoin/regtest/.cookie")
                 });
-            bitcoincore_rpc::Auth::CookieFile(cookie)
+            let hint = format!(
+                "the cookie file {}; is the regtest node running? Otherwise set \
+                 BITCOIN_RPC_COOKIE, or BITCOIN_RPC_USER and BITCOIN_RPC_PASSWORD",
+                cookie.display()
+            );
+            (bitcoincore_rpc::Auth::CookieFile(cookie), hint)
         }
     };
 
-    Client::new(&rpc_url_full, auth).expect("Failed to create RPC client")
+    Client::new(&rpc_url_full, auth).unwrap_or_else(|e| {
+        panic!("cannot create an RPC client for {rpc_url_full} with {auth_hint}: {e}")
+    })
 }
 
 /// Whether an RPC error is Core's "No such mempool or blockchain transaction"
