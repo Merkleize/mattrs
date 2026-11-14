@@ -42,7 +42,8 @@
 //! `use mattrs::prelude::*;` brings in the names nearly every contract and
 //! protocol file needs.
 //!
-//! Start with `examples/getting_started.rs` (runs offline); `examples/vault/contracts.rs`
+//! Start with `examples/getting_started.rs`, then `examples/counter.rs` (state,
+//! `next` and a protocol role); both run offline. `examples/vault/contracts.rs`
 //! is a complete two-stage vault, and `examples/rps/` a complete two-party
 //! protocol on roles.
 

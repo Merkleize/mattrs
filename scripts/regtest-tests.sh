@@ -70,6 +70,7 @@ cargo test --all-features --tests -- --ignored --test-threads=1 "$@"
 # With no test filter, also run the scripted demo binaries end to end: they are
 # otherwise only compiled, never executed.
 if [[ $# -eq 0 ]]; then
+    cargo run --quiet --all-features --example counter -- --regtest
     cargo run --quiet --all-features --example aggregate_exits
     cargo run --quiet --all-features --example wallet_funding
 fi

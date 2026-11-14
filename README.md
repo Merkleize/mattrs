@@ -34,6 +34,14 @@ chain, without a node:
 cargo run --example getting_started
 ```
 
+The next step is `examples/counter.rs`: a contract with state, a `next`
+function, and a protocol role playing it, also without a node (or against one,
+with `--regtest`):
+
+```sh
+cargo run --example counter
+```
+
 > **Note on `bitcoin-script/`**: `mattrs::script!` is built on a *patched* copy of
 > [BitVM/rust-bitcoin-script](https://github.com/BitVM/rust-bitcoin-script) v0.2.0,
 > vendored in this repository (you do not depend on it directly).
