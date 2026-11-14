@@ -320,8 +320,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
     let unvaulting: UnvaultingHandle = vault
         .trigger(ctv_hash, 0)
         .sign(HotSigner::new(unvault_privkey))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
 
     // The child Unvaulting instance is funded and carries the ctv_hash as its state.
     assert_eq!(unvaulting.status(), InstanceStatus::Funded);
@@ -487,8 +486,8 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     // Each input decodes to its own clause, at its own input index.
     assert_eq!(o1.clause_name().as_deref(), Some("trigger_and_revault"));
     assert_eq!(o2.clause_name().as_deref(), Some("trigger"));
-    assert_eq!(o1.spending_vin(), Some(0));
-    assert_eq!(o2.spending_vin(), Some(1));
+    assert_eq!(o1.spend_record().unwrap().vin(), 0);
+    assert_eq!(o2.spend_record().unwrap().vin(), 1);
     assert_eq!(o1.spending_tx().unwrap().compute_txid(), tx.compute_txid());
 
     // Input 0 yields the unvaulting (index 0) and the revault (index 1); input

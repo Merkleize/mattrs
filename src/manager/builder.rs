@@ -103,28 +103,26 @@ impl SpendBuilder {
         manager.spend_batch(std::slice::from_ref(&self))
     }
 
-    /// Like [`exec`](Self::exec) but asserts exactly one child instance is produced.
-    pub fn exec_one(self, manager: &mut ContractManager) -> Result<InstanceHandle, ManagerError> {
-        let mut outputs = self.exec_with_child_count(manager, 1)?.into_vec();
-        if outputs.len() != 1 {
-            return Err(ManagerError::UnexpectedOutputCount {
-                expected: 1,
-                got: outputs.len(),
-            });
-        }
-        Ok(outputs.pop().expect("length checked"))
+    /// Like [`exec`](Self::exec) for a spend producing exactly one child
+    /// instance, returned as its typed handle:
+    ///
+    /// ```ignore
+    /// let unvaulting: UnvaultingHandle = vault.trigger(ctv_hash, 0).exec_one(&mut manager)?;
+    /// ```
+    ///
+    /// The child count is checked before anything is broadcast. Ask for an
+    /// [`InstanceHandle`] to get the child untyped.
+    pub fn exec_one<H>(self, manager: &mut ContractManager) -> Result<H, ManagerError>
+    where
+        H: TryFrom<InstanceHandle>,
+        ManagerError: From<H::Error>,
+    {
+        self.exec_with_child_count(manager, 1)?.one()
     }
 
     /// Like [`exec`](Self::exec) but asserts no tracked children are produced.
     /// Output constraints (including CTV commitments) are still checked.
     pub fn exec_none(self, manager: &mut ContractManager) -> Result<(), ManagerError> {
-        let outputs = self.exec_with_child_count(manager, 0)?;
-        if !outputs.is_empty() {
-            return Err(ManagerError::UnexpectedOutputCount {
-                expected: 0,
-                got: outputs.len(),
-            });
-        }
-        Ok(())
+        self.exec_with_child_count(manager, 0).map(|_| ())
     }
 }

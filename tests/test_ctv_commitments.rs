@@ -97,13 +97,13 @@ fn observation_checks_every_committed_transaction_field_before_marking_spent() {
             Err(ManagerError::CtvTemplateMismatch { .. })
         ));
         assert_eq!(handle.status(), InstanceStatus::Funded);
-        assert!(handle.spending_args().is_none());
+        assert!(handle.spend_record().is_none());
         assert!(handle.outputs().is_empty());
     }
     assert!(manager.observe_spend(&handle, &tx).unwrap().is_empty());
     assert_eq!(handle.status(), InstanceStatus::Spent);
     assert_eq!(
-        handle.spending_args().unwrap()[0],
+        handle.spend_record().unwrap().args()[0],
         tx.input[0].witness.to_vec()[0]
     );
 }

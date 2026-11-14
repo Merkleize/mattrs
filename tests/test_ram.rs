@@ -266,8 +266,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     let new_value = [0xaa; 32];
     let child: RamHandle = ram
         .write(proof, new_value, tree.root())
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
     report_spend(&mut report, "RAM", "write (update cell 2)", &ram);
 
     // Withdraw from the updated RAM, proving the freshly written value.

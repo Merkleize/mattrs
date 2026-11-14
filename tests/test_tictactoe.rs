@@ -432,8 +432,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
         h = h
             .make_move(cell)
             .sign(HotSigner::new(xpriv))
-            .exec_one(&mut manager)?
-            .try_into()?;
+            .exec_one(&mut manager)?;
     }
     report_spend(&mut report, "TicTacToe", "the first four moves", &entry);
 
@@ -453,8 +452,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
     let won: TicTacToeHandle = h
         .make_move(2)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
     let state = won.state();
     assert_eq!(state.board, board("XXX OO. ..."));
     won.claim_win(MARK_ALICE).exec_none(&mut manager)?;
@@ -484,8 +482,7 @@ fn test_tictactoe_forfait_on_regtest() -> Result<(), Box<dyn std::error::Error>>
     let h: TicTacToeHandle = game
         .make_move(4)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
 
     // Once the CSV delay has passed, the forfait claim validates and pays
     // Alice the whole pot.

@@ -88,8 +88,7 @@ impl ContractManager {
     /// This is how a party follows a covenant driven by someone else: the
     /// returned children carry their contracts and logical state, ready for
     /// further spends or waits. The clause and its witness arguments are recorded
-    /// on the instance ([`InstanceHandle::clause_name`] /
-    /// [`InstanceHandle::spending_args`]).
+    /// on the instance ([`InstanceHandle::spend_record`]).
     pub fn wait_for_spend(&mut self, handle: &InstanceHandle) -> Result<Children, ManagerError> {
         self.wait_for_spend_within(handle, Some(DEFAULT_POLL_WINDOW))
     }

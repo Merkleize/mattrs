@@ -41,8 +41,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     let unvaulting_a: UnvaultingHandle = vault_a
         .trigger(ctv_hash, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut actor)?
-        .try_into()?;
+        .exec_one(&mut actor)?;
 
     // Confirm the trigger and satisfy the CSV delay, then withdraw via CTV.
     actor.mine_blocks(10)?;
@@ -71,7 +70,7 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     let children = observer.wait_for_spend(&vault_b)?;
     assert_eq!(children.len(), 1);
     assert_eq!(vault_b.clause_name().as_deref(), Some("trigger"));
-    let args = VaultTriggerArgs::decode_from_witness(&vault_b.spending_args().unwrap())?;
+    let args = VaultTriggerArgs::decode_from_witness(vault_b.spend_record().unwrap().args())?;
     assert_eq!(args.ctv_hash, ctv_hash);
     assert!(!args.sig.is_empty());
 
@@ -150,8 +149,8 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(observed.len(), 1);
     assert_eq!(tracked_1.clause_name().as_deref(), Some("trigger"));
     assert_eq!(tracked_2.clause_name().as_deref(), Some("trigger"));
-    assert_eq!(tracked_1.spending_vin(), Some(0));
-    assert_eq!(tracked_2.spending_vin(), Some(1));
+    assert_eq!(tracked_1.spend_record().unwrap().vin(), 0);
+    assert_eq!(tracked_2.spend_record().unwrap().vin(), 1);
 
     // The merged child matches the actor's, holding both stakes.
     let unvaulting: UnvaultingHandle = observed[0].clone().try_into().unwrap();

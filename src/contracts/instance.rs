@@ -16,7 +16,7 @@ pub enum InstanceStatus {
 
 /// How an instance was spent: recorded once, when the manager executes or
 /// observes the spending transaction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpendRecord {
     tx: Arc<Transaction>,
     vin: usize,
@@ -42,6 +42,11 @@ impl SpendRecord {
     /// The spending transaction.
     pub fn tx(&self) -> &Arc<Transaction> {
         &self.tx
+    }
+
+    /// The spending transaction's id.
+    pub fn txid(&self) -> Txid {
+        self.tx.compute_txid()
     }
 
     /// The input of [`tx`](Self::tx) that consumed the instance.
@@ -186,34 +191,6 @@ impl ContractInstance {
     /// The spend that consumed this instance (`None` while funded).
     pub fn spend(&self) -> Option<&SpendRecord> {
         self.spend.as_ref()
-    }
-
-    /// The transaction that spent this instance (None until spent).
-    pub fn spending_tx(&self) -> Option<&Arc<Transaction>> {
-        self.spend.as_ref().map(SpendRecord::tx)
-    }
-
-    /// Transaction ID that spent this instance (None until spent).
-    pub fn spent_in_tx(&self) -> Option<Txid> {
-        self.spend.as_ref().map(|spend| spend.tx.compute_txid())
-    }
-
-    /// The input index of the spending transaction that consumed this instance
-    /// (None until spent).
-    pub fn spending_vin(&self) -> Option<usize> {
-        self.spend.as_ref().map(SpendRecord::vin)
-    }
-
-    /// Name of the clause used to spend this instance (None until spent).
-    pub fn clause_name(&self) -> Option<&str> {
-        self.spend.as_ref().map(SpendRecord::clause_name)
-    }
-
-    /// The clause's witness arguments used by the spend, in witness order (None
-    /// until spent). Decode them with the clause's typed `*Args` struct
-    /// ([`ClauseArgs::decode_from_witness`](super::ClauseArgs::decode_from_witness)).
-    pub fn spending_args(&self) -> Option<&[Vec<u8>]> {
-        self.spend.as_ref().map(SpendRecord::args)
     }
 
     /// Child instances created when this instance was spent.

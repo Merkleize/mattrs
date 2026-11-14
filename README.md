@@ -170,10 +170,7 @@ let vault = Vault::new(params)?.fund(&mut manager, amount)?;  // VaultHandle
 // (augmented contracts take the initial state too: `.fund(&mut manager, amount, state)`)
 
 // trigger: signed, exactly one child, returned typed
-let unvaulting: UnvaultingHandle = vault
-    .trigger(ctv_hash, 0)
-    .exec_one(&mut manager)?
-    .try_into()?;
+let unvaulting: UnvaultingHandle = vault.trigger(ctv_hash, 0).exec_one(&mut manager)?;
 
 // withdraw: terminal CTV spend with explicit outputs
 unvaulting
@@ -516,8 +513,9 @@ cargo run -p mattrs-inspector       # or: nc localhost 34443
   CSV `older()` fragment to its script *and* seeds the spend's `nSequence`, so
   both use the same validated delay (1 through 65,535 blocks). Sequence
   overrides are checked against the declared delay before signing.
-- **Typed handles** — spends return `Children` (`.at::<H>(vout)?` / `.one()`),
-  and a handle's `params()` / `state()` read the typed values directly.
+- **Typed handles** — `exec_one` returns the single child typed, other spends
+  return `Children` (`.at::<H>(vout)?` / `.one()`); a handle's `params()` /
+  `state()` read the typed values directly, and `spent()` its recorded spend.
 - **Expanded state** — an instance can carry logical state richer than its on-chain
   commitment (e.g. RAM's cells vs their Merkle root), recovered by `next_outputs`.
 - **Chain observation** — follow a covenant driven by someone else:

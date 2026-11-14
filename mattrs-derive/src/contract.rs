@@ -886,84 +886,62 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         });
     }
 
-    // `fund` and `address` differ: augmented contracts need the state.
-    let fund_fn = if augmented {
-        quote! {
-            /// Fund a new on-chain instance of this contract carrying `state`,
-            /// returning its typed handle.
-            pub fn fund(
-                &self,
-                manager: &mut ::mattrs::manager::ContractManager,
-                amount: ::bitcoin::Amount,
-                state: #state_ty,
-            ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
-                let handle = manager.fund_instance(self.as_erased(), state, amount)?;
-                ::core::result::Result::Ok(#handle_ident(handle))
-            }
-
-            /// Track an instance of this contract carrying `state` that
-            /// already exists on-chain at `outpoint` (e.g. one a counterparty
-            /// funded), returning its typed handle.
-            pub fn track(
-                &self,
-                manager: &mut ::mattrs::manager::ContractManager,
-                outpoint: ::bitcoin::OutPoint,
-                state: #state_ty,
-            ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
-                let handle = manager.track_instance(self.as_erased(), state, outpoint)?;
-                ::core::result::Result::Ok(#handle_ident(handle))
-            }
-
-            /// A clause output sending output `index` to this contract with
-            /// `state`, preserving the input's amount (chain `.deduct_amount()`
-            /// or `.ignore_amount()` to change that).
-            pub fn output(
-                &self,
-                index: impl ::core::convert::Into<::mattrs::contracts::CcvIndex>,
-                state: #state_ty,
-            ) -> ::mattrs::contracts::ClauseOutput {
-                ::mattrs::contracts::ClauseOutput::at(index)
-                    .to(self.as_erased())
-                    .with_state(&state)
-                    .build()
-            }
-        }
+    // A stateful contract's `fund`, `track` and `output` take the state; a
+    // stateless one's have no such parameter and use `()`.
+    let (state_param, state_arg, with_state, carrying) = if augmented {
+        (
+            quote! { state: #state_ty, },
+            quote! { state },
+            quote! { .with_state(&state) },
+            " carrying `state`",
+        )
     } else {
-        quote! {
-            /// Fund a new on-chain instance of this contract, returning its
-            /// typed handle.
-            pub fn fund(
-                &self,
-                manager: &mut ::mattrs::manager::ContractManager,
-                amount: ::bitcoin::Amount,
-            ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
-                let handle = manager.fund_instance(self.as_erased(), (), amount)?;
-                ::core::result::Result::Ok(#handle_ident(handle))
-            }
+        (quote! {}, quote! { () }, quote! {}, "")
+    };
+    let fund_doc = format!(
+        "Fund a new on-chain instance of this contract{carrying}, returning its typed handle."
+    );
+    let track_doc = format!(
+        "Track an instance of this contract{carrying} that already exists on-chain at \
+         `outpoint` (e.g. one a counterparty funded), returning its typed handle."
+    );
+    let output_doc = format!(
+        "A clause output sending output `index` to this contract{carrying}, preserving the \
+         input's amount (chain `.deduct_amount()` or `.ignore_amount()` to change that)."
+    );
+    let fund_fn = quote! {
+        #[doc = #fund_doc]
+        pub fn fund(
+            &self,
+            manager: &mut ::mattrs::manager::ContractManager,
+            amount: ::bitcoin::Amount,
+            #state_param
+        ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
+            let handle = manager.fund_instance(self.as_erased(), #state_arg, amount)?;
+            ::core::result::Result::Ok(#handle_ident(handle))
+        }
 
-            /// Track an instance of this contract that already exists on-chain
-            /// at `outpoint` (e.g. one a counterparty funded), returning its
-            /// typed handle.
-            pub fn track(
-                &self,
-                manager: &mut ::mattrs::manager::ContractManager,
-                outpoint: ::bitcoin::OutPoint,
-            ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
-                let handle = manager.track_instance(self.as_erased(), (), outpoint)?;
-                ::core::result::Result::Ok(#handle_ident(handle))
-            }
+        #[doc = #track_doc]
+        pub fn track(
+            &self,
+            manager: &mut ::mattrs::manager::ContractManager,
+            outpoint: ::bitcoin::OutPoint,
+            #state_param
+        ) -> ::core::result::Result<#handle_ident, ::mattrs::manager::ManagerError> {
+            let handle = manager.track_instance(self.as_erased(), #state_arg, outpoint)?;
+            ::core::result::Result::Ok(#handle_ident(handle))
+        }
 
-            /// A clause output sending output `index` to this contract,
-            /// preserving the input's amount (chain `.deduct_amount()` or
-            /// `.ignore_amount()` to change that).
-            pub fn output(
-                &self,
-                index: impl ::core::convert::Into<::mattrs::contracts::CcvIndex>,
-            ) -> ::mattrs::contracts::ClauseOutput {
-                ::mattrs::contracts::ClauseOutput::at(index)
-                    .to(self.as_erased())
-                    .build()
-            }
+        #[doc = #output_doc]
+        pub fn output(
+            &self,
+            index: impl ::core::convert::Into<::mattrs::contracts::CcvIndex>,
+            #state_param
+        ) -> ::mattrs::contracts::ClauseOutput {
+            ::mattrs::contracts::ClauseOutput::at(index)
+                .to(self.as_erased())
+                #with_state
+                .build()
         }
     };
 
@@ -983,6 +961,7 @@ fn codegen(def: ContractDef) -> TokenStream2 {
         quote! {}
     };
 
+    // A state's commitment can fail to tweak the key; no state, no tweak.
     let address_fn = if augmented {
         quote! {
             /// The contract's address for the given state commitment.
@@ -1197,11 +1176,12 @@ fn codegen(def: ContractDef) -> TokenStream2 {
             /// typed arguments (`None` while unspent).
             pub fn spent(&self) -> ::core::option::Option<#spend_enum_ident> {
                 let clause = self.spent_clause()?;
-                let args = self.0.spending_args()?;
+                let record = self.0.spend_record()?;
+                let args = record.args();
                 ::core::option::Option::Some(match clause {
                     #(#clause_enum_ident::#clause_variants => #spend_enum_ident::#clause_variants(
                         <#spend_arg_tys as ::mattrs::contracts::ClauseArgs>::decode_from_witness(
-                            &args,
+                            args,
                         )
                         .ok()?,
                     ),)*

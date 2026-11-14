@@ -168,7 +168,7 @@ fn signed_spend_seeded(
 fn child_count_errors_do_not_request_signatures() {
     let (_, builder, calls) = signed_spend_fixture(false);
     assert!(matches!(
-        builder.exec_one(&mut offline_manager()),
+        builder.exec_one::<InstanceHandle>(&mut offline_manager()),
         Err(ManagerError::UnexpectedOutputCount {
             expected: 1,
             got: 0
@@ -213,7 +213,7 @@ fn template_hash_is_checked_before_signing_and_executes_without_children() {
     assert_eq!(h.status(), InstanceStatus::Spent);
     assert!(h.outputs().is_empty());
     assert_eq!(
-        h.spending_args().unwrap()[0],
+        h.spend_record().unwrap().args()[0],
         tx.input[0].witness.to_vec()[0]
     );
 }
@@ -225,19 +225,20 @@ fn checked_execution_signs_once_and_records_the_broadcast_witness() {
         let (rpc, server) = broadcast_rpc();
         let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
         if child {
-            builder.exec_one(&mut manager).unwrap();
+            builder.exec_one::<InstanceHandle>(&mut manager).unwrap();
         } else {
             builder.exec_none(&mut manager).unwrap();
         }
         let tx = server.join().unwrap();
         assert_eq!(calls.get(), 1);
-        let recorded = h.spending_args().unwrap();
+        let record = h.spend_record().unwrap();
+        let recorded = record.args();
         assert_eq!(recorded[0], tx.input[0].witness.to_vec()[0]);
         assert_eq!(recorded[0].len(), 64);
 
         let (observer, _, _) = signed_spend_fixture(child);
         offline_manager().observe_spend(&observer, &tx).unwrap();
-        assert_eq!(observer.spending_args(), h.spending_args());
+        assert_eq!(observer.spend_record(), h.spend_record());
     }
 }
 
@@ -272,7 +273,7 @@ fn payment_checks_run_before_signing_and_execution_tracks_no_children() {
             .unwrap()
             .is_empty()
     );
-    assert_eq!(observer.spending_args(), h.spending_args());
+    assert_eq!(observer.spend_record(), h.spend_record());
 }
 
 #[test]

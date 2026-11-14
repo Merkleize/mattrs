@@ -42,7 +42,7 @@ pub(super) fn decode_observation(
 ) -> Result<ObservedInput, ManagerError> {
     let txid = spending_tx.compute_txid();
 
-    let already_spent = match handle.instance.borrow().spent_in_tx() {
+    let already_spent = match handle.spend_record().map(|spend| spend.txid()) {
         Some(recorded) if recorded != txid => {
             return Err(ManagerError::InvalidObservation(
                 "Instance already spent by a different transaction".to_string(),

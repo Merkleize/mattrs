@@ -90,7 +90,7 @@ fn untouched(manager: &ContractManager, handles: &[&InstanceHandle]) {
     for h in handles {
         assert_eq!(h.status(), InstanceStatus::Funded);
         assert!(h.outputs().is_empty());
-        assert!(h.spending_args().is_none());
+        assert!(h.spend_record().is_none());
     }
 }
 
@@ -340,7 +340,7 @@ fn a_late_child_registry_conflict_leaves_every_parent_unchanged() {
     for h in [&a, &b] {
         assert_eq!(h.status(), InstanceStatus::Funded);
         assert!(h.outputs().is_empty());
-        assert!(h.spending_args().is_none());
+        assert!(h.spend_record().is_none());
     }
 }
 

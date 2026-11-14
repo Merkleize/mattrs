@@ -1,7 +1,7 @@
 //! Stable public handles and typed child access; no RPC or transaction planning.
-use super::{ManagerError, SpendBuilder, WrongContractType};
-use crate::contracts::{ContractInstance, ContractState, InstanceStatus};
-use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxOut, Txid};
+use super::{ManagerError, SpendBuilder};
+use crate::contracts::{ContractInstance, ContractState, InstanceStatus, SpendRecord};
+use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxOut};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
@@ -85,40 +85,33 @@ impl InstanceHandle {
             .cloned()
     }
 
-    /// The name of the clause that spent this instance (None until spent).
-    pub fn clause_name(&self) -> Option<String> {
-        self.instance.borrow().clause_name().map(str::to_string)
-    }
-
     /// The transaction that funded this instance.
     pub fn funding_tx(&self) -> Arc<Transaction> {
         self.instance.borrow().funding_tx().clone()
     }
 
+    /// How this instance was spent (`None` until spent): the transaction, the
+    /// input that consumed it, the clause, and the clause's witness arguments.
+    /// A typed handle's `spent()` decodes the same record into the clause's
+    /// typed arguments.
+    pub fn spend_record(&self) -> Option<SpendRecord> {
+        self.instance.borrow().spend().cloned()
+    }
+
     /// The transaction that spent this instance (None until spent).
     pub fn spending_tx(&self) -> Option<Arc<Transaction>> {
-        self.instance.borrow().spending_tx().cloned()
-    }
-
-    /// Transaction ID that spent this instance (None until spent).
-    pub fn spent_in_tx(&self) -> Option<Txid> {
-        self.instance.borrow().spent_in_tx()
-    }
-
-    /// The input index of the spending transaction that consumed this instance
-    /// (None until spent).
-    pub fn spending_vin(&self) -> Option<usize> {
-        self.instance.borrow().spending_vin()
-    }
-
-    /// The witness arguments of the spend, in witness order (None until spent).
-    /// Decode them with the clause's typed `*Args` struct
-    /// ([`ClauseArgs::decode_from_witness`](crate::contracts::ClauseArgs::decode_from_witness)).
-    pub fn spending_args(&self) -> Option<Vec<Vec<u8>>> {
         self.instance
             .borrow()
-            .spending_args()
-            .map(|args| args.to_vec())
+            .spend()
+            .map(|spend| spend.tx().clone())
+    }
+
+    /// The name of the clause that spent this instance (None until spent).
+    pub fn clause_name(&self) -> Option<String> {
+        self.instance
+            .borrow()
+            .spend()
+            .map(|spend| spend.clause_name().to_string())
     }
 
     /// This instance's expanded logical state as `S`, if its type matches.
@@ -175,8 +168,9 @@ impl InstanceHandle {
 
 /// The child instances a spend produced (or an observation materialized), in
 /// merged-output order. Derefs to a slice of [`InstanceHandle`]s for
-/// positional access; [`typed`](Children::at) / [`one`](Children::one)
-/// convert children into their `contract!`-generated typed handles.
+/// positional access; [`at`](Children::at) / [`one`](Children::one) convert
+/// children into their `contract!`-generated typed handles (or hand back the
+/// untyped [`InstanceHandle`], when that is the type asked for).
 #[derive(Debug, Clone)]
 pub struct Children(Vec<InstanceHandle>);
 
@@ -191,7 +185,8 @@ impl Children {
     /// tracked, so positions and output indices differ.
     pub fn at<H>(&self, vout: u32) -> Result<H, ManagerError>
     where
-        H: TryFrom<InstanceHandle, Error = WrongContractType>,
+        H: TryFrom<InstanceHandle>,
+        ManagerError: From<H::Error>,
     {
         let handle = self
             .0
@@ -205,7 +200,8 @@ impl Children {
     /// The single child, typed; errors unless exactly one child was produced.
     pub fn one<H>(self) -> Result<H, ManagerError>
     where
-        H: TryFrom<InstanceHandle, Error = WrongContractType>,
+        H: TryFrom<InstanceHandle>,
+        ManagerError: From<H::Error>,
     {
         match <[InstanceHandle; 1]>::try_from(self.0) {
             Ok([handle]) => Ok(H::try_from(handle)?),

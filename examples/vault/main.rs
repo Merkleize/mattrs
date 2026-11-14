@@ -141,14 +141,16 @@ impl Repl {
 
     fn printall(&self) {
         for (i, handle) in self.items.iter().enumerate() {
-            match (handle.clause_name(), handle.spent_in_tx()) {
-                (Some(clause), Some(txid)) => {
+            match handle.spend_record() {
+                Some(spend) => {
                     println!(
-                        "{i} {} spent via `{clause}` in {txid}",
-                        self.kind_str(handle)
+                        "{i} {} spent via `{}` in {}",
+                        self.kind_str(handle),
+                        spend.clause_name(),
+                        spend.txid()
                     )
                 }
-                _ => println!("{i} {} {:?}", self.kind_str(handle), handle.status()),
+                None => println!("{i} {} {:?}", self.kind_str(handle), handle.status()),
             }
         }
     }

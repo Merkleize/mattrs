@@ -195,8 +195,7 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
     let unvaulting: MiniUnvaultingHandle = vault
         .trigger(wpk, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
     report_spend(&mut report, "MiniVault", "trigger", &vault);
 
     let state = unvaulting.state();
@@ -232,8 +231,7 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
     let unvaulting: MiniUnvaultingHandle = vault
         .trigger(wpk, 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
     report_spend(&mut report, "MiniVault", "trigger", &vault);
 
     // Withdrawing before the delay must be rejected as non-BIP68-final.

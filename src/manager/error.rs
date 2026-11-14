@@ -105,7 +105,7 @@ pub enum ManagerError {
     /// and no signature was pre-filled.
     MissingSigner(XOnlyPublicKey),
     /// A spend produced a different number of child instances than the caller
-    /// asserted via `exec_one` / `exec_none`.
+    /// asserted via `exec_one` / `exec_none` / [`Children::one`](super::Children::one).
     UnexpectedOutputCount { expected: usize, got: usize },
     /// A child instance was not of the requested contract type
     /// ([`Children::at`](super::Children::at) / [`Children::one`](super::Children::one)).
@@ -292,6 +292,14 @@ impl std::error::Error for ManagerError {
             ManagerError::WrongContract(e) => Some(e),
             _ => None,
         }
+    }
+}
+
+/// Converting a handle to itself cannot fail; this lets the typed-child
+/// accessors also return the untyped handle.
+impl From<std::convert::Infallible> for ManagerError {
+    fn from(never: std::convert::Infallible) -> Self {
+        match never {}
     }
 }
 

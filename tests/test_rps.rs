@@ -167,8 +167,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let s1: RpsGameS1Handle = s0
         .bob_move(1)
         .sign(HotSigner::new(bob_xpriv()))
-        .exec_one(&mut manager)?
-        .try_into()?;
+        .exec_one(&mut manager)?;
     let state = s1.state();
     assert_eq!(state.commitment, move_commitment(1));
     report_spend(&mut report, "RPS", "bob_move (Bob plays paper)", &s0);

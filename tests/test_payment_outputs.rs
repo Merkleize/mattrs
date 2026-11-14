@@ -81,7 +81,7 @@ fn explicit_recovery_outputs_cannot_change_destination_or_reduce_value() {
         observed.output = invalid;
         assert!(manager.observe_spend(&h, &observed).is_err());
         assert_eq!(h.status(), InstanceStatus::Funded);
-        assert!(h.spending_args().is_none());
+        assert!(h.spend_record().is_none());
     }
     let mut missing = tx.clone();
     missing.output.clear();
