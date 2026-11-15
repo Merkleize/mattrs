@@ -28,6 +28,11 @@ impl From<bitcoincore_rpc::Error> for ChainError {
 ///
 /// The scan never passes a block shallower than the confirmations asked for,
 /// so a reorganization no deeper than that is followed; a deeper one is not.
+///
+/// The node needs `txindex=1` to look up confirmed transactions that are
+/// not its own wallet's — which is what following an instance somebody else
+/// funded takes. Without it, only instances funded from the node's wallet
+/// can be followed; another's funding transaction is reported as unknown.
 pub struct RpcChain {
     client: Client,
     scan: RefCell<ScanState>,
@@ -139,7 +144,13 @@ impl ChainView for RpcChain {
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError> {
         match self.client.get_raw_transaction(&txid, None) {
             Ok(tx) => Ok(Some(tx)),
-            Err(e) if is_tx_not_found(&e) => Ok(None),
+            // Not in the mempool, and no `txindex` to find it in a block: the
+            // wallet still knows its own transactions.
+            Err(e) if is_tx_not_found(&e) => Ok(self
+                .client
+                .get_transaction(&txid, None)
+                .ok()
+                .and_then(|tx| tx.transaction().ok())),
             Err(e) => Err(e.into()),
         }
     }
@@ -196,7 +207,21 @@ impl ChainView for RpcChain {
 /// Requires the node to know the transaction (wallet, mempool, or `txindex`);
 /// an unknown `txid` is an error ([`is_tx_not_found`] tells it apart).
 fn tx_confirmation_height(rpc: &Client, txid: &Txid) -> Result<Option<u64>, ChainError> {
-    let info = rpc.get_raw_transaction_info(txid, None)?;
+    let info = match rpc.get_raw_transaction_info(txid, None) {
+        Ok(info) => info,
+        // Without `txindex`, the node cannot look up a mined transaction —
+        // but its wallet knows its own (a funding it just paid, say).
+        Err(e) if is_tx_not_found(&e) => {
+            return match rpc.get_transaction(txid, None) {
+                Ok(tx) => Ok(tx
+                    .info
+                    .blockheight
+                    .and_then(|height| active_height(height.into(), tx.info.confirmations))),
+                Err(_) => Err(e.into()),
+            };
+        }
+        Err(e) => return Err(e.into()),
+    };
     Ok(match info.blockhash {
         Some(hash) => {
             let header = rpc.get_block_header_info(&hash)?;
@@ -221,7 +246,14 @@ fn spend_scan_start(
     outpoint: OutPoint,
     min_confirmations: u32,
 ) -> Result<u64, ChainError> {
-    let funded_at = tx_confirmation_height(rpc, &outpoint.txid)?;
+    let funded_at = tx_confirmation_height(rpc, &outpoint.txid).map_err(|e| match e {
+        ChainError::Rpc(e) if is_tx_not_found(&e) => ChainError::Other(format!(
+            "the node does not know transaction {}, so its outputs cannot be followed: looking \
+             up a confirmed transaction that is not the node wallet's needs txindex=1",
+            outpoint.txid
+        )),
+        e => e,
+    })?;
     Ok(scan_start(
         funded_at,
         rpc.get_block_count()?,
