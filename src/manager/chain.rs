@@ -142,20 +142,28 @@ impl ContractManager {
     /// with the manager's confirmations. An unanswered look is remembered, so
     /// that what the chain backend keeps for it can be released if the look
     /// is never repeated (see [`stop_watching`](Self::stop_watching) and
-    /// [`set_confirmations`](Self::set_confirmations)).
+    /// [`set_confirmations`](Self::set_confirmations)). A failed look is
+    /// released at once.
     pub(crate) fn find_spending_tx(
         &self,
         outpoint: OutPoint,
     ) -> Result<Option<Transaction>, ManagerError> {
-        let found = self
-            .chain()?
-            .find_spending_tx(outpoint, self.confirmations)?;
-        match found {
-            // The backend is done with a lookup that found its spend.
-            Some(_) => self.watched.borrow_mut().remove(&outpoint),
-            None => self.watched.borrow_mut().insert(outpoint),
-        };
-        Ok(found)
+        let chain = self.chain()?;
+        // Registered before the backend is asked: it may keep state for the
+        // lookup even when the call then fails.
+        self.watched.borrow_mut().insert(outpoint);
+        match chain.find_spending_tx(outpoint, self.confirmations) {
+            Ok(Some(tx)) => {
+                // The backend is done with a lookup that found its spend.
+                self.watched.borrow_mut().remove(&outpoint);
+                Ok(Some(tx))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => {
+                self.stop_watching(outpoint);
+                Err(e.into())
+            }
+        }
     }
 
     /// Give up looking for a spend of `outpoint`: let the chain backend drop

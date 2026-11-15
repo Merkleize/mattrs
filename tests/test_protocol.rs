@@ -208,6 +208,8 @@ fn timeout_does_not_fire_over_a_spend_awaiting_confirmations() {
 struct RecordingChain {
     inner: LocalChain,
     released: std::cell::RefCell<Vec<(bitcoin::OutPoint, u32)>>,
+    /// Make every spend lookup fail.
+    failing: std::cell::Cell<bool>,
 }
 
 impl mattrs::chain::ChainView for RecordingChain {
@@ -219,6 +221,9 @@ impl mattrs::chain::ChainView for RecordingChain {
         outpoint: bitcoin::OutPoint,
         min_confirmations: u32,
     ) -> Result<Option<bitcoin::Transaction>, mattrs::chain::ChainError> {
+        if self.failing.get() {
+            return Err(mattrs::chain::ChainError::Other("node unreachable".into()));
+        }
         self.inner.find_spending_tx(outpoint, min_confirmations)
     }
     fn stop_watching(&self, outpoint: bitcoin::OutPoint, min_confirmations: u32) {
@@ -285,6 +290,33 @@ fn changing_the_depth_releases_the_lookups_at_the_old_one() {
     assert!(matches!(runner.step().unwrap(), Progress::Waiting));
     runner.manager_mut().set_confirmations(1);
     assert_eq!(chain.released.borrow().last(), Some(&(outpoint, 6)));
+}
+
+/// A lookup that fails is over: the backend may have started keeping state
+/// for it before failing, so it is released, even when it was the first.
+#[test]
+fn a_failed_lookup_is_released() {
+    let chain = Rc::new(RecordingChain::default());
+    let c_a = alice_move_commitment(0, &[7u8; 32]);
+    let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
+    let mut manager =
+        mattrs::manager::ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let entry: InstanceHandle = RpsGameS0::new(params(c_a))
+        .unwrap()
+        .fund(&mut manager, pot)
+        .unwrap()
+        .into();
+    let outpoint = entry.outpoint();
+
+    chain.failing.set(true);
+    let role: Role<(), ()> = Role::new().watch::<RpsGameS0>();
+    let mut runner = Runner::new(manager, role, (), entry.clone());
+    assert!(matches!(runner.step(), Err(ProtocolError::Manager(_))));
+    assert_eq!(*chain.released.borrow(), [(outpoint, 1)]);
+
+    // The same through the blocking wait, which gives up on the error.
+    assert!(runner.manager_mut().wait_for_spend(&entry).is_err());
+    assert_eq!(*chain.released.borrow(), [(outpoint, 1), (outpoint, 1)]);
 }
 
 #[test]
