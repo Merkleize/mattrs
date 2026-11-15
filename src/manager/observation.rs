@@ -159,6 +159,24 @@ impl ContractManager {
         Ok(staged.commit(self))
     }
 
+    /// Observe several inputs of one transaction together, without asking
+    /// for every input: [`observe_spend`](Self::observe_spend), for more than
+    /// one handle. Each input's own constraints are checked, not the
+    /// transaction-wide accounting; staging them in one go links a joining
+    /// input to the child another of them defines, whatever their order.
+    pub(super) fn observe_inputs(
+        &mut self,
+        handles: &[&InstanceHandle],
+        spending_tx: &Transaction,
+    ) -> Result<Children, ManagerError> {
+        let observed = handles
+            .iter()
+            .map(|handle| decode_observation(handle, spending_tx))
+            .collect::<Result<Vec<_>, _>>()?;
+        let staged = self.stage_batch_update(observed, spending_tx)?;
+        Ok(staged.commit(self))
+    }
+
     /// Validate and observe a complete batch of contract inputs, without RPC.
     ///
     /// `handles` must cover every transaction input exactly once, in any order.

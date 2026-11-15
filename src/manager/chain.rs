@@ -223,4 +223,33 @@ impl ContractManager {
         }
         found?.ok_or(ManagerError::SpendNotFound(outpoint))
     }
+
+    /// Poll (within `window`; `None` = forever) until the chain reports a
+    /// transaction, with the manager's confirmations, spending any of
+    /// `handles` (or one of them is already recorded as spent).
+    pub(super) fn wait_for_any_spending_tx(
+        &self,
+        handles: &[InstanceHandle],
+        window: Option<Duration>,
+    ) -> Result<Transaction, ManagerError> {
+        let first = handles.first().ok_or_else(|| {
+            ManagerError::InvalidObservation("cannot wait for a spend of no instance".into())
+        })?;
+        let found = poll_until(window, || {
+            for handle in handles {
+                if let Some(tx) = handle.spending_tx() {
+                    return Ok(Some(Transaction::clone(&tx)));
+                }
+                if let Some(tx) = self.find_spending_tx(handle.outpoint())? {
+                    return Ok(Some(tx));
+                }
+            }
+            Ok::<_, ManagerError>(None)
+        });
+        // Whatever the answer, the lookups for the other inputs are over.
+        for handle in handles {
+            self.stop_watching(handle.outpoint());
+        }
+        found?.ok_or(ManagerError::SpendNotFound(first.outpoint()))
+    }
 }

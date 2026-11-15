@@ -379,36 +379,38 @@ impl ContractManager {
         }
     }
 
-    /// Wait (within `window`; `None` = forever) until the instances `pending`
-    /// spends are spent by a transaction with the manager's confirmations,
-    /// and record that transaction.
+    /// Wait (within `window`; `None` = forever) until one of the instances
+    /// `pending` spends is spent by a transaction with the manager's
+    /// confirmations, and record that transaction.
     fn settle(
         &mut self,
         pending: &PendingSpend,
         window: Option<std::time::Duration>,
     ) -> Result<Children, ManagerError> {
-        let first = pending
-            .inputs
-            .first()
-            .expect("a spend has at least one input");
-        let settled = match first.spending_tx() {
-            Some(tx) => Transaction::clone(&tx),
-            None => self.wait_for_spending_tx(first.outpoint(), window)?,
-        };
+        // Any input, not just the first: a rival spending only some of them
+        // is enough to rule our transaction out.
+        let settled = self.wait_for_any_spending_tx(&pending.inputs, window)?;
         let txid = settled.compute_txid();
         if txid == pending.txid() {
             return self.observe_batch(&pending.inputs.iter().collect::<Vec<_>>(), &settled);
         }
         // Another transaction got there first. It is what happened, so it is
-        // what gets recorded, for every input of ours that it spends.
-        for input in &pending.inputs {
-            let outpoint = input.outpoint();
-            if settled.input.iter().any(|i| i.previous_output == outpoint) {
-                self.observe_spend(input, &settled)?;
-            }
-        }
+        // what gets recorded, for every input of ours that it spends — all
+        // together, so that the links between them do not depend on order.
+        let spent: Vec<&InstanceHandle> = pending
+            .inputs
+            .iter()
+            .filter(|input| {
+                let outpoint = input.outpoint();
+                settled.input.iter().any(|i| i.previous_output == outpoint)
+            })
+            .collect();
+        self.observe_inputs(&spent, &settled)?;
         Err(ManagerError::SpentByAnother {
-            outpoint: first.outpoint(),
+            outpoint: spent
+                .first()
+                .expect("the settled transaction spends one of the inputs")
+                .outpoint(),
             txid,
         })
     }
@@ -449,10 +451,12 @@ impl PendingSpend {
     /// as long as the chain takes (see
     /// [`settle_within`](Self::settle_within)).
     ///
-    /// If a *different* transaction ends up spending the first instance, that
-    /// transaction is recorded instead (for each of these instances it
-    /// spends) and the error is [`ManagerError::SpentByAnother`]: the handles
-    /// then show what actually happened.
+    /// If a *different* transaction ends up spending any of the instances,
+    /// ours can no longer confirm: that transaction is recorded instead (for
+    /// each of these instances it spends) and the error is
+    /// [`ManagerError::SpentByAnother`], naming the first of them. The
+    /// handles then show what actually happened; an instance the other
+    /// transaction left alone is still unspent.
     pub fn settle(&self, manager: &mut ContractManager) -> Result<Children, ManagerError> {
         manager.settle(self, None)
     }

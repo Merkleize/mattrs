@@ -132,3 +132,67 @@ fn execution_and_observation_record_the_same_joined_batch() {
         );
     }
 }
+
+/// A rival transaction spending only *some* inputs of a pending batch rules
+/// the batch out: settling finds it through whichever input it spends, not
+/// only the first, records it, and leaves the other inputs unspent.
+#[test]
+fn a_rival_spending_one_input_settles_the_whole_pending_batch() {
+    let mut manager = chain_manager();
+    let chain = manager.chain().unwrap().clone();
+    let (defining, joining) = join_fixture();
+    // Ours spends both, the joining input first; nothing sends it.
+    let pending = manager
+        .broadcast_batch_with(&[spend(&joining), spend(&defining)], |_| {
+            Ok::<_, ManagerError>(())
+        })
+        .unwrap();
+
+    // The rival spends the second input alone, and confirms.
+    let rival = spend(&defining).build_tx().unwrap();
+    chain.broadcast(&rival).unwrap();
+    chain.mine_blocks(1).unwrap();
+
+    let err = pending
+        .settle_within(&mut manager, Duration::ZERO)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ManagerError::SpentByAnother { outpoint, txid }
+            if outpoint == defining.outpoint() && txid == rival.compute_txid()
+    ));
+    assert_eq!(defining.status(), InstanceStatus::Spent);
+    assert_eq!(defining.outputs().len(), 1);
+    assert_eq!(joining.status(), InstanceStatus::Funded);
+}
+
+/// A rival batch confirmed in place of ours is recorded for all the inputs
+/// it shares with ours at once: a joining input listed before its defining
+/// input still ends up linked to the child.
+#[test]
+fn a_rival_batch_is_recorded_with_its_join_links() {
+    let mut manager = chain_manager();
+    let chain = manager.chain().unwrap().clone();
+    let (defining, joining) = join_fixture();
+    let pending = manager
+        .broadcast_batch_with(&[spend(&joining), spend(&defining)], |_| {
+            Ok::<_, ManagerError>(())
+        })
+        .unwrap();
+
+    // The same spend under another txid.
+    let mut rival = pending.transaction().clone();
+    rival.lock_time = bitcoin::absolute::LockTime::from_consensus(7);
+    chain.broadcast(&rival).unwrap();
+    chain.mine_blocks(1).unwrap();
+
+    assert!(matches!(
+        pending.settle(&mut manager),
+        Err(ManagerError::SpentByAnother { outpoint, txid })
+            if outpoint == joining.outpoint() && txid == rival.compute_txid()
+    ));
+    let child = defining.outputs().into_vec();
+    assert_eq!(child.len(), 1);
+    assert_eq!(joining.outputs().into_vec(), child);
+    assert_eq!(manager.instances.len(), 1);
+}
