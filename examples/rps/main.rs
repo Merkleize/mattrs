@@ -152,7 +152,9 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppR
 
     // Fund the game with both stakes and tell Bob where it lives.
     let client = mattrs::manager::regtest_rpc_client(wallet)?;
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    // Each side follows the other's confirmed spends, and nobody mines on
+    // regtest: mine a block after each of our own.
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     maybe_enable_inspector(&mut manager, inspector)?;
     let s0 =
         RpsGameS0::new(params)?.fund(&mut manager, Amount::from_sat((2 * DEFAULT_STAKE) as u64))?;
@@ -224,7 +226,9 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
         vout: u32_field(&msg, "vout")?,
     };
     let client = mattrs::manager::regtest_rpc_client(wallet)?;
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    // Each side follows the other's confirmed spends, and nobody mines on
+    // regtest: mine a block after each of our own.
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     maybe_enable_inspector(&mut manager, inspector)?;
     let entry = RpsGameS0::new(params)?.track(&mut manager, outpoint)?;
     println!("Tracking the game at {outpoint}");

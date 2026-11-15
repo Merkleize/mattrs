@@ -154,7 +154,12 @@ fn action_cannot_spend_a_different_token() {
     assert!(matches!(&err, ProtocolError::Internal(msg) if msg.contains("different instance")));
     assert_eq!(runner.state(), RunnerState::Failed);
     assert_eq!(runner.failed_at(), Some(&entry));
-    assert!(chain.find_spending_tx(entry.outpoint()).unwrap().is_none());
+    assert!(
+        chain
+            .find_spending_tx(entry.outpoint(), 0)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

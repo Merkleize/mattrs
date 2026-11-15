@@ -20,12 +20,13 @@ impl From<bitcoincore_rpc::Error> for ChainError {
     }
 }
 
-/// A [`ChainView`] over a real Bitcoin node's RPC interface (the same watching
-/// strategy as [`ContractManager::wait_for_spend`]: the mempool via
-/// `gettxspendingprevout`, plus a per-outpoint block scan from the funding
-/// transaction's height onward).
+/// A [`ChainView`] over a real Bitcoin node's RPC interface. A spend is found
+/// by a per-outpoint block scan, from the funding transaction's height up to
+/// the last block with the confirmations asked for (and, when unconfirmed
+/// spends are asked for, in the mempool via `gettxspendingprevout`).
 ///
-/// [`ContractManager::wait_for_spend`]: crate::manager::ContractManager::wait_for_spend
+/// The scan never passes a block shallower than the confirmations asked for,
+/// so a reorganization no deeper than that is followed; a deeper one is not.
 pub struct RpcChain {
     client: Client,
     scan: RefCell<ScanState>,
@@ -74,14 +75,19 @@ impl ChainView for RpcChain {
         Ok(())
     }
 
-    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+    fn find_spending_tx(
+        &self,
+        outpoint: OutPoint,
+        min_confirmations: u32,
+    ) -> Result<Option<Transaction>, ChainError> {
         let mut scan = self.scan.borrow_mut();
         let ScanState { cursors, blocks } = &mut *scan;
         let cursor = match cursors.entry(outpoint) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => e.insert(spend_scan_start(&self.client, outpoint)?),
         };
-        let found = find_spending_tx_once(&self.client, outpoint, cursor, blocks)?;
+        let found =
+            find_spending_tx_once(&self.client, outpoint, min_confirmations, cursor, blocks)?;
         scan.settle(outpoint, found.is_some());
         Ok(found)
     }
@@ -205,37 +211,50 @@ impl BlockCache {
     }
 }
 
-/// A single, non-blocking look for a transaction spending `outpoint`: the
-/// mempool first (`gettxspendingprevout`), then the blocks from `*next_height`
-/// to the tip (the cursor advances past the blocks already scanned; seed it
-/// with [`spend_scan_start`], and share one `blocks` cache between the scans
-/// of concurrent outpoints).
+/// The last block height a spend may sit at to have `min_confirmations`
+/// confirmations under a tip at height `tip` (`None` when no block is deep
+/// enough yet). Zero confirmations scan up to the tip, like one.
+fn deepest_scan_height(tip: u64, min_confirmations: u32) -> Option<u64> {
+    tip.checked_sub(u64::from(min_confirmations.saturating_sub(1)))
+}
+
+/// A single, non-blocking look for a transaction spending `outpoint` with at
+/// least `min_confirmations` confirmations: the blocks from `*next_height` to
+/// the last one that deep (the cursor advances past the blocks already
+/// scanned; seed it with [`spend_scan_start`], and share one `blocks` cache
+/// between the scans of concurrent outpoints). With zero confirmations, the
+/// mempool is looked at first (`gettxspendingprevout`).
 fn find_spending_tx_once(
     rpc: &Client,
     outpoint: OutPoint,
+    min_confirmations: u32,
     next_height: &mut u64,
     blocks: &mut BlockCache,
 ) -> Result<Option<Transaction>, ChainError> {
-    // 1. The mempool.
-    let query = serde_json::json!([{
-        "txid": outpoint.txid.to_string(),
-        "vout": outpoint.vout,
-    }]);
-    let res: serde_json::Value = rpc.call("gettxspendingprevout", &[query])?;
-    if let Some(txid_str) = res
-        .get(0)
-        .and_then(|entry| entry.get("spendingtxid"))
-        .and_then(|v| v.as_str())
-    {
-        let txid: Txid = txid_str
-            .parse()
-            .map_err(|e| ChainError::Other(format!("bad spendingtxid: {}", e)))?;
-        return Ok(Some(rpc.get_raw_transaction(&txid, None)?));
+    // 1. The mempool, when unconfirmed spends count.
+    if min_confirmations == 0 {
+        let query = serde_json::json!([{
+            "txid": outpoint.txid.to_string(),
+            "vout": outpoint.vout,
+        }]);
+        let res: serde_json::Value = rpc.call("gettxspendingprevout", &[query])?;
+        if let Some(txid_str) = res
+            .get(0)
+            .and_then(|entry| entry.get("spendingtxid"))
+            .and_then(|v| v.as_str())
+        {
+            let txid: Txid = txid_str
+                .parse()
+                .map_err(|e| ChainError::Other(format!("bad spendingtxid: {}", e)))?;
+            return Ok(Some(rpc.get_raw_transaction(&txid, None)?));
+        }
     }
 
-    // 2. Blocks mined since the last look.
-    let tip = rpc.get_block_count()?;
-    while *next_height <= tip {
+    // 2. Blocks that became deep enough since the last look.
+    let Some(last) = deepest_scan_height(rpc.get_block_count()?, min_confirmations) else {
+        return Ok(None);
+    };
+    while *next_height <= last {
         let block = blocks.get(rpc, *next_height)?;
         if let Some(tx) = block
             .txdata
@@ -329,6 +348,16 @@ mod tests {
             txid: Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([seed; 32])),
             vout: 0,
         }
+    }
+
+    #[test]
+    fn the_scan_stops_at_the_last_block_with_enough_confirmations() {
+        // The tip block has one confirmation.
+        assert_eq!(deepest_scan_height(100, 0), Some(100));
+        assert_eq!(deepest_scan_height(100, 1), Some(100));
+        assert_eq!(deepest_scan_height(100, 6), Some(95));
+        assert_eq!(deepest_scan_height(5, 6), Some(0));
+        assert_eq!(deepest_scan_height(4, 6), None);
     }
 
     #[test]

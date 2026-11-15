@@ -49,7 +49,8 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     // Alice funds the game with the pot...
     let mut alice_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
-            .with_signer(HotSigner::new(alice_xpriv()));
+            .with_signer(HotSigner::new(alice_xpriv()))
+            .with_auto_mining();
     let s0 = G256S0::new(params.clone())?.fund(&mut alice_manager, Amount::from_sat(AMOUNT))?;
     let alice_entry = s0.handle().clone();
     let outpoint = alice_entry.outpoint();
@@ -57,7 +58,8 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     // ...and Bob, given the outpoint out-of-band, verifies and tracks it.
     let mut bob_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
-            .with_signer(HotSigner::new(bob_xpriv()));
+            .with_signer(HotSigner::new(bob_xpriv()))
+            .with_auto_mining();
     let bob_entry: InstanceHandle = G256S0::new(params)?
         .track(&mut bob_manager, outpoint)?
         .into();
@@ -76,8 +78,8 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     let mut alice = Runner::new(alice_manager, alice_game_role(), alice_data, alice_entry);
     let mut bob = Runner::new(bob_manager, bob_game_role(), bob_data, bob_entry.clone());
 
-    // Interleave the two parties until both resolve (the happy path lives in
-    // the mempool; nothing needs mining).
+    // Interleave the two parties until both resolve. Each follows the other's
+    // confirmed spends, so each manager mines a block after its own.
     let (a_out, b_out) = drive_both(&mut alice, &mut bob, 600, Duration::from_millis(20))?;
 
     // Both parties independently conclude: Bob won the on-chain re-run of

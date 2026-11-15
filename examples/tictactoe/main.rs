@@ -206,7 +206,9 @@ fn run_alice(
 
     // Fund the game with both stakes and tell Bob where it lives.
     let client = mattrs::manager::regtest_rpc_client(wallet)?;
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    // Each side follows the other's confirmed spends, and nobody mines on
+    // regtest: mine a block after each of our own.
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     maybe_enable_inspector(&mut manager, inspector)?;
     let game = TicTacToe::new(params)?.fund(
         &mut manager,
@@ -272,7 +274,9 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
         vout: u32_field(&msg, "vout")?,
     };
     let client = mattrs::manager::regtest_rpc_client(wallet)?;
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    // Each side follows the other's confirmed spends, and nobody mines on
+    // regtest: mine a block after each of our own.
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     maybe_enable_inspector(&mut manager, inspector)?;
     let entry = TicTacToe::new(params)?.track(&mut manager, outpoint, TttState::initial())?;
     println!("Tracking the game at {outpoint}");

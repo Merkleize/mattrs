@@ -293,8 +293,8 @@ let challenge = Bisect1::new(params, context)?;
   commitment (e.g. RAM's cells vs their Merkle root), recovered by `next_outputs`.
 - **Chain observation** — follow a covenant driven by someone else:
   `track_instance(..)` registers an externally funded instance, and
-  `wait_for_spend(..)` (mempool + block scan; or the RPC-free
-  `observe_spend(..)`) decodes the spending witness back into the clause and its
+  `wait_for_spend(..)` (a block scan for a spend with the manager's
+  `confirmations`, one by default; or the RPC-free `observe_spend(..)`) decodes the spending witness back into the clause and its
   typed arguments and materializes the child instances
   (see `tests/test_observe.rs`).
 

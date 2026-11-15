@@ -47,11 +47,12 @@ pub fn bob_pk() -> XOnlyPublicKey {
 }
 
 /// A manager on `chain`, for tests driving protocols on a `LocalChain` shared
-/// between the parties.
+/// between the parties. It mines a block after each of its spends: the other
+/// party only sees a spend once it is confirmed, and nobody else mines here.
 pub fn manager_on(
     chain: std::rc::Rc<mattrs::chain::LocalChain>,
 ) -> mattrs::manager::ContractManager {
-    mattrs::manager::ContractManager::on(chain, bitcoin::Network::Regtest)
+    mattrs::manager::ContractManager::on(chain, bitcoin::Network::Regtest).with_auto_mining()
 }
 
 /// Interleave two parties' runners — one step each per round — until both

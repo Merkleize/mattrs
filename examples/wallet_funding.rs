@@ -136,6 +136,8 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     }
     signed.validate_final(&final_tx)?;
     let txid = wallet.send_raw_transaction(&final_tx)?;
+    // The observer below only follows a confirmed spend.
+    manager.mine_blocks(1)?;
     let result = signed.observe_final(&mut manager, &final_tx)?;
     assert_eq!(result.children.len(), 1);
     assert_eq!(

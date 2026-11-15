@@ -56,10 +56,12 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
         .withdraw()
         .outputs(withdraw_outputs)
         .exec_none(&mut actor)?;
+    // An observer only follows confirmed spends.
+    actor.mine_blocks(1)?;
 
     // ---- The observer follows it, after the fact. ----
-    // The trigger spend is buried in a block by now (block-scan path); the
-    // withdraw is still in the mempool (gettxspendingprevout path).
+    // Both spends are in blocks by now: the trigger ten blocks deep, the
+    // withdraw at the tip.
     let observer_client = regtest_client("testwallet");
     let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
 

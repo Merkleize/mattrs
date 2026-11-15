@@ -222,6 +222,13 @@ every backend, so a contract's tests can run its real spend path on a
 shared `Rc` are several parties on the same chain. A `Runner` uses its
 manager's chain.
 
+A spend found on the chain (`wait_for_spend`, or a `Runner` following a
+counterparty) is recorded once it is confirmed, and never revisited.
+`with_confirmations(d)` waits for `d` confirmations instead of one, which is
+the whole answer to reorganizations: nothing follows one deeper than `d`. On
+regtest and test chains, where nobody else mines, `with_auto_mining()` mines a
+block after each transaction the manager broadcasts.
+
 | Feature | Default | Adds |
 |---|---|---|
 | `rpc` | yes | `RpcChain`, `ContractManager::new`, `regtest_rpc_client` (pulls in `bitcoincore-rpc`) |
@@ -260,7 +267,8 @@ or `BITCOIN_RPC_*` env vars).
 two *separate processes*, negotiated over a TCP socket and played entirely
 on-chain: Alice funds the game behind a hiding move commitment, Bob reveals his
 move with a typed spend, and each side follows the other's turn with chain
-observation. In two terminals:
+observation. A spend is followed once it is confirmed, so each side mines a
+regtest block after its own. In two terminals:
 
 ```sh
 cargo run --example rps -- --alice --rock

@@ -81,8 +81,10 @@ impl ContractManager {
             ContractInstance::funded(contract, Box::new(state), outpoint, Arc::new(funding_tx))?;
         Ok(self.register_instance(Rc::new(RefCell::new(instance))))
     }
-    /// Wait until `handle`'s instance is spent on-chain (watching the mempool and
-    /// new blocks), then decode the spend and materialize the child instances via
+    /// Wait until `handle`'s instance is spent on-chain, by a transaction with
+    /// the manager's [`confirmations`](Self::confirmations) (one by default: a
+    /// spend still in the mempool is not seen), then decode the spend and
+    /// materialize the child instances via
     /// [`observe_spend`](Self::observe_spend).
     ///
     /// This is how a party follows a covenant driven by someone else: the
@@ -137,14 +139,16 @@ impl ContractManager {
     }
 
     /// Poll (within `window`; `None` = forever) until the chain reports a
-    /// transaction spending `outpoint` (mempool or block).
+    /// transaction spending `outpoint` with the manager's confirmations.
     pub(super) fn wait_for_spending_tx(
         &self,
         outpoint: OutPoint,
         window: Option<Duration>,
     ) -> Result<Transaction, ManagerError> {
         let chain = self.chain()?;
-        let found = poll_until(window, || chain.find_spending_tx(outpoint));
+        let found = poll_until(window, || {
+            chain.find_spending_tx(outpoint, self.confirmations)
+        });
         if !matches!(found, Ok(Some(_))) {
             // Giving up: let the backend drop what it kept for this search.
             chain.stop_watching(outpoint);
