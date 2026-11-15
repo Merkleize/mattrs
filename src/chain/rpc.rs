@@ -34,27 +34,39 @@ pub struct RpcChain {
 
 #[derive(Default)]
 struct ScanState {
-    /// Per-outpoint cursor of the next block height to scan for a spend.
-    cursors: HashMap<OutPoint, u64>,
+    /// The next block height to scan for a spend, per outpoint and per
+    /// confirmation depth asked for. Every block below a cursor had that many
+    /// confirmations when it was scanned; a cursor is therefore only good for
+    /// its own depth, and a lookup at another depth keeps its own.
+    cursors: HashMap<(OutPoint, u32), u64>,
     /// Blocks fetched by one outpoint's scan and not yet passed by all the
     /// others, so concurrent tokens download each new block once.
     blocks: BlockCache,
 }
 
 impl ScanState {
-    /// Bookkeeping after one look for a spend of `outpoint`. A scan that is
-    /// `done` (its spend was found, or its caller stopped looking) drops its
-    /// cursor: a cursor left behind would pin the eviction floor at its
-    /// height and retain every block fetched afterwards. Blocks below every
-    /// remaining cursor are evicted.
-    fn settle(&mut self, outpoint: OutPoint, done: bool) {
-        if done {
-            self.cursors.remove(&outpoint);
-        }
+    /// Evict the blocks below every cursor (all of them, with no cursor
+    /// left): no scan will read them again. Run after every look.
+    fn evict(&mut self) {
         match self.cursors.values().copied().min() {
             Some(min) => self.blocks.retain_from(min),
             None => self.blocks.clear(),
         }
+    }
+
+    /// The scan for a spend of `outpoint` at this depth found it: drop its
+    /// cursor. A cursor left behind would pin the eviction floor at its
+    /// height and retain every block fetched afterwards.
+    fn found(&mut self, outpoint: OutPoint, min_confirmations: u32) {
+        self.cursors.remove(&(outpoint, min_confirmations));
+        self.evict();
+    }
+
+    /// Nobody is looking for a spend of `outpoint` any more: drop its
+    /// cursors, at every depth.
+    fn forget(&mut self, outpoint: OutPoint) {
+        self.cursors.retain(|(watched, _), _| *watched != outpoint);
+        self.evict();
     }
 }
 
@@ -82,30 +94,42 @@ impl ChainView for RpcChain {
     ) -> Result<Option<Transaction>, ChainError> {
         let mut scan = self.scan.borrow_mut();
         let ScanState { cursors, blocks } = &mut *scan;
-        let cursor = match cursors.entry(outpoint) {
+        let cursor = match cursors.entry((outpoint, min_confirmations)) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(spend_scan_start(&self.client, outpoint)?),
+            Entry::Vacant(e) => {
+                e.insert(spend_scan_start(&self.client, outpoint, min_confirmations)?)
+            }
         };
         let found =
             find_spending_tx_once(&self.client, outpoint, min_confirmations, cursor, blocks)?;
-        scan.settle(outpoint, found.is_some());
+        match found {
+            Some(_) => scan.found(outpoint, min_confirmations),
+            None => scan.evict(),
+        }
         Ok(found)
     }
 
-    /// The mempool, then every block the confirmed scan has not passed yet,
-    /// up to the tip. The scan's cursor is read, not moved: blocks still too
-    /// shallow to count stay ahead of it.
+    /// The mempool, then every block the confirmed scans have not passed
+    /// yet, up to the tip. The scans' cursors are read, not moved: blocks
+    /// still too shallow to count stay ahead of them.
     fn find_unsettled_spend(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
         let mut scan = self.scan.borrow_mut();
-        let mut cursor = match scan.cursors.get(&outpoint) {
-            Some(cursor) => *cursor,
-            None => spend_scan_start(&self.client, outpoint)?,
+        let watched = scan
+            .cursors
+            .iter()
+            .filter(|((watched, _), _)| *watched == outpoint)
+            .map(|(_, cursor)| *cursor)
+            .min();
+        let mut cursor = match watched {
+            Some(cursor) => cursor,
+            // A one-off look at the chain as it is now.
+            None => spend_scan_start(&self.client, outpoint, 1)?,
         };
         find_spending_tx_once(&self.client, outpoint, 0, &mut cursor, &mut scan.blocks)
     }
 
     fn stop_watching(&self, outpoint: OutPoint) {
-        self.scan.borrow_mut().settle(outpoint, true);
+        self.scan.borrow_mut().forget(outpoint);
     }
 
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError> {
@@ -174,14 +198,36 @@ fn tx_confirmation_height(rpc: &Client, txid: &Txid) -> Result<Option<u64>, Chai
     })
 }
 
-/// The block height where a scan for spends of `outpoint` should start: where
-/// the funding transaction confirmed (or the next block, if it is still
-/// unconfirmed).
-fn spend_scan_start(rpc: &Client, outpoint: OutPoint) -> Result<u64, ChainError> {
-    Ok(match tx_confirmation_height(rpc, &outpoint.txid)? {
-        Some(height) => height,
-        None => rpc.get_block_count()? + 1,
-    })
+/// The block height where a scan for spends of `outpoint`, with
+/// `min_confirmations`, should start (see [`scan_start`]).
+fn spend_scan_start(
+    rpc: &Client,
+    outpoint: OutPoint,
+    min_confirmations: u32,
+) -> Result<u64, ChainError> {
+    let funded_at = tx_confirmation_height(rpc, &outpoint.txid)?;
+    Ok(scan_start(
+        funded_at,
+        rpc.get_block_count()?,
+        min_confirmations,
+    ))
+}
+
+/// Where a scan for the spend of an output starts, given the height its
+/// funding transaction confirmed at (if it has), the tip, and the depth at
+/// which a block is taken as final.
+///
+/// A spend cannot sit below its funding, but the funding's height is only a
+/// lower bound once that block is final. Until then, a reorganization can
+/// move the funding (and a spend with it) down to any block that is not
+/// final yet, so the scan starts at the first of those.
+fn scan_start(funded_at: Option<u64>, tip: u64, min_confirmations: u32) -> u64 {
+    // Blocks up to `tip - (depth - 1)` are final.
+    let first_unsettled = (tip + 2).saturating_sub(u64::from(min_confirmations.max(1)));
+    match funded_at {
+        Some(height) => height.min(first_unsettled),
+        None => first_unsettled,
+    }
 }
 
 /// A cache of fetched blocks, shared between the spend scans of several
@@ -246,7 +292,7 @@ fn deepest_scan_height(tip: u64, min_confirmations: u32) -> Option<u64> {
 /// A single, non-blocking look for a transaction spending `outpoint` with at
 /// least `min_confirmations` confirmations: the blocks from `*next_height` to
 /// the last one that deep (the cursor advances past the blocks already
-/// scanned; seed it with [`spend_scan_start`], and share one `blocks` cache
+/// scanned; seed it with [`spend_scan_start`] for the same depth, and share one `blocks` cache
 /// between the scans of concurrent outpoints). With zero confirmations, the
 /// mempool is looked at first (`gettxspendingprevout`).
 fn find_spending_tx_once(
@@ -399,15 +445,35 @@ mod tests {
     }
 
     #[test]
-    fn an_abandoned_wait_releases_its_cursor_and_blocks() {
+    fn a_scan_starts_below_a_funding_that_is_not_final_yet() {
+        // Funded in a final block: nothing below it can hold the spend.
+        assert_eq!(scan_start(Some(90), 100, 1), 90);
+        assert_eq!(scan_start(Some(90), 100, 6), 90);
+        // One confirmation: the tip is final, an unconfirmed funding is next.
+        assert_eq!(scan_start(Some(100), 100, 1), 100);
+        assert_eq!(scan_start(None, 100, 1), 101);
+        // Six confirmations: blocks 96..=100 can still be replaced, and the
+        // funding (with its spend) can land in any of them.
+        assert_eq!(scan_start(Some(100), 100, 6), 96);
+        assert_eq!(scan_start(None, 100, 6), 96);
+        assert_eq!(scan_start(Some(95), 100, 6), 95);
+        // Zero confirmations scan like one; a short chain starts at genesis.
+        assert_eq!(scan_start(None, 100, 0), 101);
+        assert_eq!(scan_start(None, 3, 6), 0);
+    }
+
+    #[test]
+    fn an_abandoned_wait_releases_its_cursors_and_blocks() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let chain = RpcChain::new(
             Client::new("http://127.0.0.1:1", bitcoincore_rpc::Auth::None).expect("no I/O yet"),
         );
         {
             let mut scan = chain.scan.borrow_mut();
-            scan.cursors.insert(outpoint(1), 10);
-            scan.cursors.insert(outpoint(2), 12);
+            // The lagging outpoint is watched at two depths.
+            scan.cursors.insert((outpoint(1), 1), 11);
+            scan.cursors.insert((outpoint(1), 6), 10);
+            scan.cursors.insert((outpoint(2), 1), 12);
             for height in 10..=14 {
                 scan.blocks.insert(height, block.clone());
             }
@@ -416,7 +482,8 @@ mod tests {
         // The caller waiting on the lagging outpoint gives up.
         chain.stop_watching(outpoint(1));
         let scan = chain.scan.borrow();
-        assert!(!scan.cursors.contains_key(&outpoint(1)));
+        assert_eq!(scan.cursors.len(), 1);
+        assert!(scan.cursors.contains_key(&(outpoint(2), 1)));
         assert_eq!(scan.blocks.len(), 3);
     }
 
@@ -424,25 +491,37 @@ mod tests {
     fn a_found_spend_releases_its_cursor_and_blocks() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let mut scan = ScanState::default();
-        scan.cursors.insert(outpoint(1), 10);
-        scan.cursors.insert(outpoint(2), 12);
+        scan.cursors.insert((outpoint(1), 1), 10);
+        scan.cursors.insert((outpoint(2), 1), 12);
         for height in 10..=14 {
             scan.blocks.insert(height, block.clone());
         }
 
         // Still waiting on both: everything from the lowest cursor is kept.
-        scan.settle(outpoint(2), false);
+        scan.evict();
         assert_eq!(scan.blocks.len(), 5);
 
         // The lagging outpoint's spend is found: its cursor must not keep
         // pinning the blocks only it still needed.
-        scan.settle(outpoint(1), true);
-        assert!(!scan.cursors.contains_key(&outpoint(1)));
+        scan.found(outpoint(1), 1);
+        assert!(!scan.cursors.contains_key(&(outpoint(1), 1)));
         assert_eq!(scan.blocks.len(), 3);
 
         // Nothing left to watch: nothing left to cache.
-        scan.settle(outpoint(2), true);
+        scan.found(outpoint(2), 1);
         assert!(scan.cursors.is_empty());
         assert_eq!(scan.blocks.len(), 0);
+    }
+
+    #[test]
+    fn a_scan_at_one_depth_does_not_move_the_scan_at_another() {
+        let mut scan = ScanState::default();
+        scan.cursors.insert((outpoint(1), 1), 101);
+        scan.cursors.insert((outpoint(1), 6), 96);
+
+        // The shallow scan finding the spend leaves the deep one in place,
+        // still short of the blocks that are not final for it.
+        scan.found(outpoint(1), 1);
+        assert_eq!(scan.cursors.get(&(outpoint(1), 6)), Some(&96));
     }
 }
