@@ -73,4 +73,7 @@ if [[ $# -eq 0 ]]; then
     cargo run --quiet --all-features --example counter -- --regtest
     cargo run --quiet --all-features --example aggregate_exits
     cargo run --quiet --all-features --example wallet_funding
+    for script in examples/vault/scripts/*.txt; do
+        cargo run --quiet --all-features --example vault -- --script "$script"
+    done
 fi
