@@ -191,15 +191,27 @@ impl ChainView for RpcChain {
     }
 }
 
-/// The height `txid` confirmed at (`None` while it sits in the mempool).
+/// The height `txid` confirmed at on the active chain (`None` while it sits
+/// in the mempool, or in a block that was reorganized away).
 /// Requires the node to know the transaction (wallet, mempool, or `txindex`);
 /// an unknown `txid` is an error ([`is_tx_not_found`] tells it apart).
 fn tx_confirmation_height(rpc: &Client, txid: &Txid) -> Result<Option<u64>, ChainError> {
     let info = rpc.get_raw_transaction_info(txid, None)?;
     Ok(match info.blockhash {
-        Some(hash) => Some(rpc.get_block_header_info(&hash)?.height as u64),
+        Some(hash) => {
+            let header = rpc.get_block_header_info(&hash)?;
+            active_height(header.height as u64, header.confirmations)
+        }
         None => None,
     })
+}
+
+/// The height of a block the node reports with `confirmations`, if it is on
+/// the active chain. The node keeps blocks that were reorganized away, and
+/// the transactions in them, and reports those with no (or negative)
+/// confirmations: their height says nothing about the chain.
+fn active_height(height: u64, confirmations: i32) -> Option<u64> {
+    (confirmations >= 1).then_some(height)
 }
 
 /// The block height where a scan for spends of `outpoint`, with
@@ -446,6 +458,15 @@ mod tests {
         // After a reorganization, the active chain has another block there.
         assert!(!blocks.holds(100, &replaced.block_hash()));
         assert!(!blocks.holds(101, &block.block_hash()));
+    }
+
+    #[test]
+    fn a_block_off_the_active_chain_confirms_nothing() {
+        assert_eq!(active_height(100, 1), Some(100));
+        assert_eq!(active_height(100, 6), Some(100));
+        // A stale block is reported with -1 confirmations.
+        assert_eq!(active_height(100, -1), None);
+        assert_eq!(active_height(100, 0), None);
     }
 
     #[test]
