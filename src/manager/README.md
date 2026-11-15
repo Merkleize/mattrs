@@ -26,21 +26,26 @@ these boundaries describe framework behavior, not a sandbox for callbacks.
 ## Execution and observation share recording
 
 ```text
-ordinary execution: prepare → sign → validate/stage → broadcast → commit
-batch observation:                  validate/stage ────────────→ commit
+ordinary execution: prepare → sign → validate/stage (dropped) → broadcast
+                   → wait for a settled spend → validate/stage → commit
+batch observation:                              validate/stage → commit
 wallet workflow:   prepare → external funding → validate/sign → external signing
                    → application broadcast → final validation/stage → commit
 ```
 
 `StagedBatch` privately owns candidate children and parent-link updates. Staging
 checks the final signed witness, output constraints, and existing child registry
-before any mutation. Ordinary execution stages before submitting the transaction:
-a registry conflict prevents broadcast, and a failed broadcast drops the staged
-changes. `commit` consumes the staged batch and returns children without a
-fallible validation step. It also publishes the final inspector snapshot.
+before any mutation. Ordinary execution stages once before submitting the
+transaction, purely as a check: a registry conflict prevents broadcast, and the
+staged changes are dropped either way. Broadcasting records nothing. When a
+transaction spending the same inputs has the manager's confirmations, it is
+staged and committed like any observed spend, whether or not it is the one
+that was broadcast (`ManagerError::SpentByAnother` when it is not). `commit`
+consumes the staged batch and returns children without a fallible validation
+step. It also publishes the final inspector snapshot.
 
-Keep staging and commit adjacent (with only broadcast between them); do not expose
-staged updates to callers or run user callbacks between staging and commit.
+Keep staging and commit adjacent; do not expose staged updates to callers or
+run user callbacks between staging and commit.
 Network acceptance and local state cannot be a distributed atomic transaction:
 an RPC error can be ambiguous after node acceptance. The manager leaves local
 state unchanged on RPC errors; callers can reconcile through chain observation.

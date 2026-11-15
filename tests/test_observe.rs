@@ -26,7 +26,8 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
 
     // ---- The actor drives the whole vault lifecycle. ----
     let actor_client = regtest_client("testwallet");
-    let mut actor = ContractManager::new(actor_client, bitcoin::Network::Regtest);
+    let mut actor =
+        ContractManager::new(actor_client, bitcoin::Network::Regtest).with_auto_mining();
 
     let amount = 49_999_900u64;
     let vault_a = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
@@ -63,7 +64,8 @@ fn test_observer_follows_vault_lifecycle() -> Result<(), Box<dyn std::error::Err
     // Both spends are in blocks by now: the trigger ten blocks deep, the
     // withdraw at the tip.
     let observer_client = regtest_client("testwallet");
-    let mut observer = ContractManager::new(observer_client, bitcoin::Network::Regtest);
+    let mut observer =
+        ContractManager::new(observer_client, bitcoin::Network::Regtest).with_auto_mining();
 
     let vault_b: InstanceHandle = Vault::new(params.clone())?
         .track(&mut observer, funding_outpoint)?
@@ -103,7 +105,8 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
         unvault_pk: alice_pk(),
     };
 
-    let mut actor = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let mut actor = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+        .with_auto_mining();
     let amount = 20_000_000u64;
     let vault_1 = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
     let vault_2 = Vault::new(params.clone())?.fund(&mut actor, Amount::from_sat(amount))?;
@@ -117,7 +120,8 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
     // The observer must track the instances before they are spent, so the
     // funding outpoints are still around to verify.
     let mut observer =
-        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+        ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+            .with_auto_mining();
     let vault_contract = Vault::new(params.clone())?;
     let tracked_1: InstanceHandle = vault_contract
         .track(&mut observer, vault_1.outpoint())?
@@ -174,7 +178,9 @@ fn test_rpc_chain_sees_a_shallow_spend_without_settling_it()
 
     const DEPTH: u32 = 3;
 
-    let mut actor = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    // The actor funds the vault (and mines the funding), then stops mining.
+    let mut actor = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+        .with_auto_mining();
     let vault = Vault::new(VaultParams {
         alternate_pk: None,
         spend_delay: 10,
@@ -183,18 +189,18 @@ fn test_rpc_chain_sees_a_shallow_spend_without_settling_it()
     })?
     .fund(&mut actor, Amount::from_sat(1_000_000))?;
     let outpoint = vault.outpoint();
-    actor.mine_blocks(1)?;
+    actor.set_auto_mining(false);
 
     // A watcher's view of the chain, with its own scan state.
     let chain = RpcChain::new(regtest_client("testwallet"));
     assert!(chain.find_spending_tx(outpoint, DEPTH)?.is_none());
     assert!(chain.find_unsettled_spend(outpoint)?.is_none());
 
-    let unvaulting: UnvaultingHandle = vault
+    let pending = vault
         .trigger([7; 32], 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec_one(&mut actor)?;
-    let spend = unvaulting.outpoint().txid;
+        .broadcast(&actor)?;
+    let spend = pending.txid();
 
     // In the mempool: out, but not confirmed.
     let seen = chain

@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::chain::POLL_INTERVAL;
-use crate::manager::{ContractManager, InstanceHandle, ManagerError};
+use crate::manager::{ContractManager, InstanceHandle, ManagerError, PendingSpend};
 
 use super::{Action, ChainView, ContractKey, ProtocolError, Role, StepCtx, TimeoutAction};
 
@@ -49,6 +49,9 @@ enum Phase<O> {
     /// Watching for the counterparty's spend (and, possibly, for a timeout
     /// deadline).
     Waiting(Option<Timeout<O>>),
+    /// Our spend is out; watching for whichever spend of the instance
+    /// settles. `Some` outcome: resolve with it if that spend is ours.
+    Sent(PendingSpend, Option<O>),
 }
 
 /// A pending timeout of a waited-on token.
@@ -71,15 +74,39 @@ enum TokenStep<O> {
 
 /// Drives one party's [`Role`] from an entry instance to the protocol's
 /// outcomes: dispatches the role's handlers as tokens move, builds and
-/// broadcasts the spends they return, and follows the counterparty's spends
+/// broadcasts the spends they return, and follows the spends that settle
 /// by watching the chain.
 ///
-/// A counterparty's spend is followed once it has the manager's
-/// [`confirmations`](ContractManager::confirmations) (one by default), so
-/// somebody has to mine: on regtest and test chains, see
-/// [`ContractManager::with_auto_mining`]. A spend the runner sends itself
-/// moves its token at once. A timeout fallback is held back while a spend of
-/// the waited-on instance is known but not confirmed that deeply yet.
+/// # Spends are followed once settled
+///
+/// A token moves only along a spend that has the manager's
+/// [`confirmations`](ContractManager::confirmations) (one by default) —
+/// the runner's own spends included. Sending is an attempt: after a
+/// [`Send`](Action::Send), the token stays where it is until *some* spend
+/// of its instance settles, and then follows that one, whoever made it. So:
+///
+/// - Somebody has to mine. On regtest and test chains, see
+///   [`ContractManager::with_auto_mining`].
+/// - Losing a race is not an error. If the counterparty's spend settles
+///   instead of ours (a move that beat our timeout fallback, say), the token
+///   follows it and the role's handlers see the state it leads to. A
+///   [`SendFinal`](Action::SendFinal) resolves with its outcome only if our
+///   spend is the one that settled; otherwise the settled spend is followed
+///   like any observed one, so a role racing a counterparty needs handlers
+///   for what the counterparty's spend creates (or a settlement handler if
+///   it creates nothing).
+/// - A spend of ours that is neither settled nor visible any more (evicted
+///   from the mempool, or reorganized out) is broadcast again.
+/// - A timeout fallback is held back while a spend of the waited-on instance
+///   is visible but not settled.
+///
+/// What the runner cannot do is make its spend win: it never bumps a fee,
+/// so a conflicting transaction sitting unconfirmed in the mempool holds a
+/// token where it is. Nor does it notice a reorganization deeper than the
+/// manager's confirmations (see the [manager's
+/// limitations](crate::manager#known-limitations)).
+///
+/// # Tokens
 ///
 /// The runner starts with a single token (the entry instance). A spend forking
 /// into several handled children splits the token, and each child is followed
@@ -298,6 +325,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                 self.execute_action(action, current, parent)
             }
             Phase::Waiting(timeout) => self.poll_waiting(current, parent, timeout),
+            Phase::Sent(pending, outcome) => self.poll_sent(current, parent, pending, outcome),
         }
     }
 
@@ -314,23 +342,9 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         parent: Option<InstanceHandle>,
     ) -> Result<TokenStep<O>, ProtocolError> {
         match action {
-            Action::Send(builder) => {
-                if !builder.spends(&current) {
-                    return Err(ProtocolError::internal(
-                        "role returned a spend builder for a different instance",
-                    ));
-                }
-                let children = self.manager.spend_batch(std::slice::from_ref(&builder))?;
-                self.follow_spend(children, current, parent)
-            }
+            Action::Send(builder) => self.send(builder, None, current, parent),
             Action::SendFinal(builder, outcome) => {
-                if !builder.spends(&current) {
-                    return Err(ProtocolError::internal(
-                        "role returned a final spend builder for a different instance",
-                    ));
-                }
-                self.manager.spend_batch(std::slice::from_ref(&builder))?;
-                Ok(TokenStep::Resolved(Some(outcome)))
+                self.send(builder, Some(outcome), current, parent)
             }
             // Poll right away: the spend may already be there (e.g. an
             // observer catching up on an old game).
@@ -345,6 +359,87 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             ),
             Action::Finish(outcome) => Ok(TokenStep::Resolved(Some(outcome))),
         }
+    }
+
+    /// Broadcast the role's spend of `current`, and start watching for the
+    /// spend of it that settles.
+    fn send(
+        &mut self,
+        builder: crate::manager::SpendBuilder,
+        outcome: Option<O>,
+        current: InstanceHandle,
+        parent: Option<InstanceHandle>,
+    ) -> Result<TokenStep<O>, ProtocolError> {
+        if !builder.spends(&current) {
+            return Err(ProtocolError::internal(
+                "role returned a spend builder for a different instance",
+            ));
+        }
+        // A spend that cannot be built or signed is the role's mistake.
+        let pending = self.manager.sign_batch(std::slice::from_ref(&builder))?;
+        self.broadcast(&pending, &current)?;
+        Ok(TokenStep::Keep(
+            TokenState {
+                current,
+                parent,
+                phase: Phase::Sent(pending, outcome),
+            },
+            true,
+        ))
+    }
+
+    /// Broadcast our spend of `current`. A refusal is not an error while
+    /// another spend of the instance is around: that one is the reason, and
+    /// whichever settles is followed.
+    fn broadcast(
+        &self,
+        pending: &PendingSpend,
+        current: &InstanceHandle,
+    ) -> Result<(), ProtocolError> {
+        let Err(refused) = self.manager.send(pending) else {
+            return Ok(());
+        };
+        let outpoint = current.outpoint();
+        let chain = self.chain()?;
+        match chain.find_unsettled_spend(outpoint)? {
+            Some(_) => Ok(()),
+            None => Err(refused.into()),
+        }
+    }
+
+    /// One poll of an instance we sent a spend of: follow the spend that
+    /// settled, ours or not; failing that, make sure ours is still out.
+    fn poll_sent(
+        &mut self,
+        current: InstanceHandle,
+        parent: Option<InstanceHandle>,
+        pending: PendingSpend,
+        outcome: Option<O>,
+    ) -> Result<TokenStep<O>, ProtocolError> {
+        let outpoint = current.outpoint();
+        if let Some(tx) = self.manager.find_spending_tx(outpoint)? {
+            let children = self.manager.observe_spend(&current, &tx)?;
+            return match outcome {
+                // Our final spend settled: this is the outcome it earns.
+                Some(outcome) if pending.is(&tx) => Ok(TokenStep::Resolved(Some(outcome))),
+                // Our spend to follow, or somebody else's: either way, the
+                // token moves along what settled.
+                _ => self.follow_spend(children, current, parent),
+            };
+        }
+        // Nothing settled. If no spend is visible at all, ours was dropped
+        // (or the one that displaced it was): send it again.
+        if self.chain()?.find_unsettled_spend(outpoint)?.is_none() {
+            self.broadcast(&pending, &current)?;
+        }
+        Ok(TokenStep::Keep(
+            TokenState {
+                current,
+                parent,
+                phase: Phase::Sent(pending, outcome),
+            },
+            false,
+        ))
     }
 
     /// One poll of a waited-on instance: the counterparty's spend first, then

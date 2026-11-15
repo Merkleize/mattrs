@@ -67,7 +67,8 @@ impl Stage {
         let params = params();
         let pool = pool();
 
-        let mut manager = ContractManager::new(regtest_rpc_client(wallet)?, Network::Regtest);
+        let mut manager =
+            ContractManager::new(regtest_rpc_client(wallet)?, Network::Regtest).with_auto_mining();
         let unwind = Unwind::new(params.clone())?.fund(
             &mut manager,
             Amount::from_sat(POOL_TOTAL),

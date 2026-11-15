@@ -247,7 +247,7 @@ fn test_ram_write_and_withdraw_on_regtest() -> Result<(), Box<dyn std::error::Er
     use support::testkit::{regtest_client, report_spend};
 
     let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     let mut report = Report::new();
 
     let leaves: Vec<[u8; 32]> = (0..4u8).map(|i| [i; 32]).collect();

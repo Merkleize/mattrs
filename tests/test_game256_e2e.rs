@@ -49,6 +49,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     // Alice funds the game with the pot...
     let mut alice_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+            .with_auto_mining()
             .with_signer(HotSigner::new(alice_xpriv()))
             .with_auto_mining();
     let s0 = G256S0::new(params.clone())?.fund(&mut alice_manager, Amount::from_sat(AMOUNT))?;
@@ -58,6 +59,7 @@ fn test_game256_fraud_challenge_on_regtest() -> Result<(), Box<dyn std::error::E
     // ...and Bob, given the outpoint out-of-band, verifies and tracks it.
     let mut bob_manager =
         ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+            .with_auto_mining()
             .with_signer(HotSigner::new(bob_xpriv()))
             .with_auto_mining();
     let bob_entry: InstanceHandle = G256S0::new(params)?

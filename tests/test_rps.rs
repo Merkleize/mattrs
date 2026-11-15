@@ -157,7 +157,7 @@ fn test_rps_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
 
     let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     let mut report = Report::new();
 
     // Fund the game with both players' stakes.

@@ -1,5 +1,5 @@
 //! Fluent spend intent and execution entry points.
-use super::{Children, ContractManager, InstanceHandle, ManagerError};
+use super::{Children, ContractManager, InstanceHandle, ManagerError, PendingSpend};
 use crate::{contracts::ContractInstance, signer::Signer};
 use bitcoin::{Amount, Sequence, Transaction, TxOut, XOnlyPublicKey};
 use std::{
@@ -84,9 +84,34 @@ impl SpendBuilder {
         super::build_batch_tx(std::slice::from_ref(self))
     }
 
-    /// Build, sign, broadcast, and return handles to all child instances.
+    /// Build, sign and broadcast the spend, wait until it is settled (it has
+    /// the manager's [`confirmations`](ContractManager::confirmations)), and
+    /// return handles to all child instances. There is no time limit; see
+    /// [`exec_within`](Self::exec_within), or
+    /// [`broadcast`](Self::broadcast) to send without waiting.
+    ///
+    /// If another transaction spends the instance first, that one is
+    /// recorded and the error is [`ManagerError::SpentByAnother`].
     pub fn exec(self, manager: &mut ContractManager) -> Result<Children, ManagerError> {
         manager.spend_batch(std::slice::from_ref(&self))
+    }
+
+    /// [`exec`](Self::exec), giving up with [`ManagerError::SpendNotFound`]
+    /// if the spend is not settled within `window`. The transaction stays
+    /// broadcast: [`wait_for_spend`](ContractManager::wait_for_spend) picks
+    /// it up later.
+    pub fn exec_within(
+        self,
+        manager: &mut ContractManager,
+        window: std::time::Duration,
+    ) -> Result<Children, ManagerError> {
+        self.broadcast(manager)?.settle_within(manager, window)
+    }
+
+    /// Build, sign and broadcast the spend without waiting for it or
+    /// recording anything; [`PendingSpend::settle`] does both later.
+    pub fn broadcast(self, manager: &ContractManager) -> Result<PendingSpend, ManagerError> {
+        manager.broadcast_batch(std::slice::from_ref(&self))
     }
 
     /// Like [`exec`](Self::exec) for a spend producing exactly one child
@@ -111,15 +136,11 @@ impl SpendBuilder {
         if got != 1 {
             return Err(ManagerError::UnexpectedOutputCount { expected: 1, got });
         }
-        let (child, _) = manager.execute_prepared_checked(
-            builders,
-            prepared,
-            // The staged child is the instance the commit registers, so its
-            // typed handle is the one to return.
-            |staged| Children::new(staged).one::<H>(),
-            ContractManager::send_to_node,
-        )?;
-        Ok(child)
+        let pending = manager.sign_prepared(builders, prepared, |staged| {
+            Children::new(staged).one::<H>().map(|_| ())
+        })?;
+        manager.send(&pending)?;
+        pending.settle(manager)?.one::<H>()
     }
 
     /// Like [`exec`](Self::exec) but asserts no tracked children are produced.
@@ -131,7 +152,9 @@ impl SpendBuilder {
         if got != 0 {
             return Err(ManagerError::UnexpectedOutputCount { expected: 0, got });
         }
-        manager.execute_prepared(builders, prepared, ContractManager::send_to_node)?;
+        let pending = manager.sign_prepared(builders, prepared, |_| Ok(()))?;
+        manager.send(&pending)?;
+        pending.settle(manager)?;
         Ok(())
     }
 }

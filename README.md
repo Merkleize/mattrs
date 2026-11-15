@@ -222,12 +222,20 @@ every backend, so a contract's tests can run its real spend path on a
 shared `Rc` are several parties on the same chain. A `Runner` uses its
 manager's chain.
 
-A spend found on the chain (`wait_for_spend`, or a `Runner` following a
-counterparty) is recorded once it is confirmed, and never revisited.
-`with_confirmations(d)` waits for `d` confirmations instead of one, which is
-the whole answer to reorganizations: nothing follows one deeper than `d`. On
-regtest and test chains, where nobody else mines, `with_auto_mining()` mines a
-block after each transaction the manager broadcasts.
+A manager on a chain records settled facts only. An instance is registered
+once its funding transaction is confirmed, and it is spent, with its children
+created, once a transaction spending it is confirmed, whoever sent it. So
+`fund` and `exec` return when their transaction is confirmed, and a `Runner`
+moves a token along the spend that confirmed, which may not be the one it
+sent. `broadcast` sends a spend without waiting, and the `PendingSpend` it
+returns is recorded later with `settle`.
+
+`with_confirmations(d)` asks for `d` confirmations instead of one. Nothing
+recorded is revisited, so that depth is the whole answer to reorganizations:
+one deeper than `d` goes unnoticed (see the limitations in the
+`mattrs::manager` docs). On regtest and test chains, where nobody else mines,
+`with_auto_mining()` mines after each transaction the manager broadcasts;
+without it, or a miner, `fund` and `exec` wait forever.
 
 | Feature | Default | Adds |
 |---|---|---|

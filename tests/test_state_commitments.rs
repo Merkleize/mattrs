@@ -242,7 +242,8 @@ fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error:
     let mut manager = ContractManager::new(
         mattrs::manager::regtest_rpc_client("testwallet")?,
         Network::Regtest,
-    );
+    )
+    .with_auto_mining();
     for len in [0, 1, 31, 32, 33] {
         let bytes = vec![0x42; len];
         let handle = manager.fund_instance(

@@ -742,7 +742,7 @@ fn regtest_setup(
     wallet: &str,
 ) -> Result<(ContractManager, mattrs::report::Report), Box<dyn std::error::Error>> {
     let client = support::testkit::regtest_client(wallet);
-    let manager = ContractManager::new(client, Network::Regtest);
+    let manager = ContractManager::new(client, Network::Regtest).with_auto_mining();
     Ok((manager, mattrs::report::Report::new()))
 }
 

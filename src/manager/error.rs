@@ -44,8 +44,21 @@ pub enum ManagerError {
     /// An observed spending transaction could not be decoded back into a clause
     /// (key-path spend, unknown tapscript, or a witness/spec mismatch).
     UnrecognizedSpend(String),
-    /// No transaction spending this outpoint was found within the polling window.
+    /// No settled transaction spending this outpoint was found within the
+    /// polling window.
     SpendNotFound(OutPoint),
+    /// The instance at `outpoint` was spent by a transaction other than the
+    /// one this manager broadcast for it. That transaction, `txid`, is the
+    /// one recorded. The txid can be our transaction's own, when the two
+    /// differ only in their witnesses (another clause, or other arguments).
+    SpentByAnother { outpoint: OutPoint, txid: Txid },
+    /// The transaction funding the instance at `outpoint` does not have the
+    /// manager's confirmations yet (`confirmations` out of `required`).
+    FundingNotSettled {
+        outpoint: OutPoint,
+        confirmations: u32,
+        required: u32,
+    },
     /// The transaction did not appear on the node within the polling window.
     TransactionNotFound(Txid),
     /// The outpoint given to [`ContractManager::track_instance`](super::ContractManager::track_instance) does not pay
@@ -178,6 +191,19 @@ impl std::fmt::Display for ManagerError {
                     outpoint
                 )
             }
+            ManagerError::SpentByAnother { outpoint, txid } => write!(
+                f,
+                "{outpoint} was spent by another transaction, {txid}, which was recorded instead"
+            ),
+            ManagerError::FundingNotSettled {
+                outpoint,
+                confirmations,
+                required,
+            } => write!(
+                f,
+                "the transaction funding {outpoint} has {confirmations} of the {required} \
+                 confirmations it needs"
+            ),
             ManagerError::TransactionNotFound(txid) => {
                 write!(f, "Transaction {} not found while polling", txid)
             }

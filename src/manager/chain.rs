@@ -13,6 +13,11 @@ impl ContractManager {
     /// Create and fund a new contract instance holding `state` (pass `()` for
     /// a stateless contract). Params are taken from the (self-describing)
     /// contract.
+    ///
+    /// Returns once the funding transaction is settled (it has the manager's
+    /// [`confirmations`](Self::confirmations)), however long that takes: on
+    /// a chain nobody mines, turn on
+    /// [auto-mining](Self::with_auto_mining).
     pub fn fund_instance(
         &mut self,
         contract: std::sync::Arc<dyn ErasedContract>,
@@ -23,8 +28,14 @@ impl ContractManager {
         crate::contracts::check_state_type(contract.as_ref(), &state)?;
         let script_pubkey = contract.script_pubkey(&state.commitment())?;
 
-        let tx = self.chain()?.fund_output(&script_pubkey, amount)?;
+        let chain = self.chain()?.clone();
+        let tx = chain.fund_output(&script_pubkey, amount)?;
         let txid = tx.compute_txid();
+        self.mine_if_auto();
+        poll_until(None, || {
+            let settled = self.tx_confirmations(txid)? >= self.confirmations;
+            Ok::<_, ManagerError>(settled.then_some(()))
+        })?;
 
         // Find the output index
         let vout = tx
@@ -42,6 +53,16 @@ impl ContractManager {
         Ok(self.register_instance(Rc::new(RefCell::new(instance))))
     }
 
+    /// How many confirmations `txid` has on the chain (0 while unconfirmed
+    /// or unknown).
+    fn tx_confirmations(&self, txid: bitcoin::Txid) -> Result<u32, ManagerError> {
+        let chain = self.chain()?;
+        Ok(match chain.confirmation_height(txid)? {
+            Some(height) => (chain.height()? + 1).saturating_sub(height),
+            None => 0,
+        })
+    }
+
     /// Mine blocks (regtest and test chains).
     pub fn mine_blocks(&self, n: u64) -> Result<(), ManagerError> {
         let n = u32::try_from(n)
@@ -53,6 +74,11 @@ impl ContractManager {
     /// counterparty): fetch its funding transaction, verify that `outpoint` pays
     /// the contract's address for `state` (`()` for a stateless contract), and
     /// register the funded instance.
+    ///
+    /// The funding transaction must be settled (have the manager's
+    /// [`confirmations`](Self::confirmations)): until then its sender can
+    /// still replace it, and the error is
+    /// [`ManagerError::FundingNotSettled`]. Try again later.
     ///
     /// This is the observer-side entry point of a multi-party protocol: the
     /// funder shares the outpoint, both sides construct the same contract, and
@@ -75,6 +101,14 @@ impl ContractManager {
             .ok_or(ManagerError::OutputNotFound)?;
         if paid.script_pubkey != expected_spk {
             return Err(ManagerError::WrongFundingScript(outpoint));
+        }
+        let confirmations = self.tx_confirmations(outpoint.txid)?;
+        if confirmations < self.confirmations {
+            return Err(ManagerError::FundingNotSettled {
+                outpoint,
+                confirmations,
+                required: self.confirmations,
+            });
         }
 
         let instance =
@@ -188,5 +222,34 @@ impl ContractManager {
             self.stop_watching(outpoint);
         }
         found?.ok_or(ManagerError::SpendNotFound(outpoint))
+    }
+
+    /// Poll (within `window`; `None` = forever) until the chain reports a
+    /// transaction, with the manager's confirmations, spending any of
+    /// `handles` (or one of them is already recorded as spent).
+    pub(super) fn wait_for_any_spending_tx(
+        &self,
+        handles: &[InstanceHandle],
+        window: Option<Duration>,
+    ) -> Result<Transaction, ManagerError> {
+        let first = handles.first().ok_or_else(|| {
+            ManagerError::InvalidObservation("cannot wait for a spend of no instance".into())
+        })?;
+        let found = poll_until(window, || {
+            for handle in handles {
+                if let Some(tx) = handle.spending_tx() {
+                    return Ok(Some(Transaction::clone(&tx)));
+                }
+                if let Some(tx) = self.find_spending_tx(handle.outpoint())? {
+                    return Ok(Some(tx));
+                }
+            }
+            Ok::<_, ManagerError>(None)
+        });
+        // Whatever the answer, the lookups for the other inputs are over.
+        for handle in handles {
+            self.stop_watching(handle.outpoint());
+        }
+        found?.ok_or(ManagerError::SpendNotFound(first.outpoint()))
     }
 }

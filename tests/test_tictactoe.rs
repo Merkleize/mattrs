@@ -413,7 +413,7 @@ fn test_tictactoe_full_game_on_regtest() -> Result<(), Box<dyn std::error::Error
     use support::testkit::{regtest_client, report_spend};
 
     let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     let mut report = Report::new();
 
     let game =
@@ -473,7 +473,7 @@ fn test_tictactoe_forfait_on_regtest() -> Result<(), Box<dyn std::error::Error>>
     use support::testkit::regtest_client;
 
     let client = regtest_client("testwallet");
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
 
     let game =
         TicTacToe::new(params())?.fund(&mut manager, Amount::from_sat(POT), TttState::initial())?;
