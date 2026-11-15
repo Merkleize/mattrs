@@ -176,18 +176,31 @@ fn spend_scan_start(rpc: &Client, outpoint: OutPoint) -> Result<u64, ChainError>
 /// outpoints so each new block is downloaded once even when many cursors walk
 /// the same range. Evict with [`retain_from`](BlockCache::retain_from) once
 /// every cursor has passed a height.
+///
+/// A block is cached under its height together with its hash, and reused only
+/// while the active chain still has that hash there: scans waiting for
+/// different depths share the cache, so a block one of them fetched at the
+/// tip can be reorganized away before a deeper one reads it.
 #[derive(Default)]
-struct BlockCache(HashMap<u64, bitcoin::Block>);
+struct BlockCache(HashMap<u64, (bitcoin::BlockHash, bitcoin::Block)>);
 
 impl BlockCache {
+    /// The block at `height` on the node's active chain. Its hash is asked
+    /// for every time; the block itself is downloaded only when the cached
+    /// one is not that block.
     fn get(&mut self, rpc: &Client, height: u64) -> Result<&bitcoin::Block, ChainError> {
-        match self.0.entry(height) {
-            std::collections::hash_map::Entry::Occupied(e) => Ok(e.into_mut()),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let hash = rpc.get_block_hash(height)?;
-                Ok(e.insert(rpc.get_block(&hash)?))
-            }
+        let hash = rpc.get_block_hash(height)?;
+        if !self.holds(height, &hash) {
+            self.0.insert(height, (hash, rpc.get_block(&hash)?));
         }
+        Ok(&self.0[&height].1)
+    }
+
+    /// Whether the block cached at `height` is the one with `hash`.
+    fn holds(&self, height: u64, hash: &bitcoin::BlockHash) -> bool {
+        self.0
+            .get(&height)
+            .is_some_and(|(cached, _)| cached == hash)
     }
 
     /// Drop every cached block below `height`.
@@ -202,7 +215,7 @@ impl BlockCache {
 
     #[cfg(test)]
     fn insert(&mut self, height: u64, block: bitcoin::Block) {
-        self.0.insert(height, block);
+        self.0.insert(height, (block.block_hash(), block));
     }
 
     #[cfg(test)]
@@ -358,6 +371,19 @@ mod tests {
         assert_eq!(deepest_scan_height(100, 6), Some(95));
         assert_eq!(deepest_scan_height(5, 6), Some(0));
         assert_eq!(deepest_scan_height(4, 6), None);
+    }
+
+    #[test]
+    fn a_cached_block_is_not_reused_for_another_block_at_its_height() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let replaced = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Testnet);
+        let mut blocks = BlockCache::default();
+        blocks.insert(100, block.clone());
+
+        assert!(blocks.holds(100, &block.block_hash()));
+        // After a reorganization, the active chain has another block there.
+        assert!(!blocks.holds(100, &replaced.block_hash()));
+        assert!(!blocks.holds(101, &block.block_hash()));
     }
 
     #[test]
