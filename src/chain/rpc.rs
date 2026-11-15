@@ -146,11 +146,15 @@ impl ChainView for RpcChain {
             Ok(tx) => Ok(Some(tx)),
             // Not in the mempool, and no `txindex` to find it in a block: the
             // wallet still knows its own transactions.
-            Err(e) if is_tx_not_found(&e) => Ok(self
-                .client
-                .get_transaction(&txid, None)
-                .ok()
-                .and_then(|tx| tx.transaction().ok())),
+            Err(e) if is_tx_not_found(&e) => wallet_transaction(&self.client, &txid)?
+                .map(|tx| {
+                    tx.transaction().map_err(|e| {
+                        ChainError::Other(format!(
+                            "the wallet's copy of transaction {txid} does not decode: {e}"
+                        ))
+                    })
+                })
+                .transpose(),
             Err(e) => Err(e.into()),
         }
     }
@@ -212,12 +216,13 @@ fn tx_confirmation_height(rpc: &Client, txid: &Txid) -> Result<Option<u64>, Chai
         // Without `txindex`, the node cannot look up a mined transaction —
         // but its wallet knows its own (a funding it just paid, say).
         Err(e) if is_tx_not_found(&e) => {
-            return match rpc.get_transaction(txid, None) {
-                Ok(tx) => Ok(tx
+            return match wallet_transaction(rpc, txid)? {
+                Some(tx) => Ok(tx
                     .info
                     .blockheight
                     .and_then(|height| active_height(height.into(), tx.info.confirmations))),
-                Err(_) => Err(e.into()),
+                // Nobody knows it: the node's answer stands.
+                None => Err(e.into()),
             };
         }
         Err(e) => return Err(e.into()),
@@ -229,6 +234,28 @@ fn tx_confirmation_height(rpc: &Client, txid: &Txid) -> Result<Option<u64>, Chai
         }
         None => None,
     })
+}
+
+/// `txid` as the node's wallet knows it: `None` when it is not one of the
+/// wallet's transactions, or the client has no wallet to ask. Any other
+/// failure (the node unreachable, say) is an error, not an absence.
+fn wallet_transaction(
+    rpc: &Client,
+    txid: &Txid,
+) -> Result<Option<bitcoincore_rpc::json::GetTransactionResult>, ChainError> {
+    match rpc.get_transaction(txid, None) {
+        Ok(tx) => Ok(Some(tx)),
+        Err(e) if rpc_error_code(&e).is_some_and(is_no_wallet_transaction) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Whether a `gettransaction` error code means the wallet has no such
+/// transaction to report: it is not the wallet's (-5), or there is no wallet
+/// to ask — none loaded (-18), none selected among several (-19), or a node
+/// built without one (-32601, method not found).
+fn is_no_wallet_transaction(code: i32) -> bool {
+    matches!(code, -5 | -18 | -19 | -32601)
 }
 
 /// The height of a block the node reports with `confirmations`, if it is on
@@ -451,11 +478,18 @@ pub fn regtest_rpc_client(wallet_name: &str) -> Result<Client, ChainError> {
 /// (code -5), i.e. the transaction is not (yet) known to the node — as opposed
 /// to a real failure (node unreachable, bad credentials, ...).
 fn is_tx_not_found(e: &bitcoincore_rpc::Error) -> bool {
-    matches!(
-        e,
-        bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::error::Error::Rpc(rpc_err))
-            if rpc_err.code == -5
-    )
+    rpc_error_code(e) == Some(-5)
+}
+
+/// The error code of the node's answer, when the node answered with an
+/// error (as opposed to not answering at all).
+fn rpc_error_code(e: &bitcoincore_rpc::Error) -> Option<i32> {
+    match e {
+        bitcoincore_rpc::Error::JsonRpc(bitcoincore_rpc::jsonrpc::error::Error::Rpc(rpc_err)) => {
+            Some(rpc_err.code)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -490,6 +524,102 @@ mod tests {
         // After a reorganization, the active chain has another block there.
         assert!(!blocks.holds(100, &replaced.block_hash()));
         assert!(!blocks.holds(101, &block.block_hash()));
+    }
+
+    #[test]
+    fn only_an_absent_wallet_transaction_is_an_absence() {
+        // Not the wallet's; no wallet loaded; none selected; no wallet RPCs.
+        for code in [-5, -18, -19, -32601] {
+            assert!(is_no_wallet_transaction(code), "{code}");
+        }
+        // The node failing (still warming up, an internal error, a bad
+        // request) is a failure, not "no such transaction".
+        for code in [-28, -32603, -1, -8] {
+            assert!(!is_no_wallet_transaction(code), "{code}");
+        }
+        // And an error that is not an answer from the node has no code.
+        let transport = bitcoincore_rpc::Error::ReturnedError("connection reset".into());
+        assert_eq!(rpc_error_code(&transport), None);
+        assert!(!is_tx_not_found(&transport));
+    }
+
+    /// A node answering one scripted JSON-RPC error per request, in order:
+    /// `(expected method, error code)`.
+    fn node_answering(script: Vec<(&'static str, i32)>) -> (RpcChain, std::thread::JoinHandle<()>) {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (method, code) in script {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = std::io::BufReader::new(&mut stream);
+                let mut len = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; len];
+                reader.read_exact(&mut body).unwrap();
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["method"], method);
+                let response = serde_json::json!({
+                    "result": null,
+                    "error": { "code": code, "message": "scripted" },
+                    "id": request["id"],
+                })
+                .to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                )
+                .unwrap();
+            }
+        });
+        let client = Client::new(&url, bitcoincore_rpc::Auth::None).unwrap();
+        (RpcChain::new(client), server)
+    }
+
+    /// A transaction neither the node nor its wallet knows is unknown; a
+    /// wallet lookup that *fails* is a failure, and is reported as one
+    /// rather than read as "no confirmations yet".
+    #[test]
+    fn a_failed_wallet_lookup_is_not_an_unknown_transaction() {
+        let txid = outpoint(1).txid;
+
+        let (chain, server) =
+            node_answering(vec![("getrawtransaction", -5), ("gettransaction", -5)]);
+        assert_eq!(chain.confirmation_height(txid).unwrap(), None);
+        server.join().unwrap();
+
+        let (chain, server) =
+            node_answering(vec![("getrawtransaction", -5), ("gettransaction", -28)]);
+        assert!(matches!(
+            chain.confirmation_height(txid),
+            Err(ChainError::Rpc(e)) if rpc_error_code(&e) == Some(-28)
+        ));
+        server.join().unwrap();
+
+        // The same for fetching the transaction itself.
+        let (chain, server) =
+            node_answering(vec![("getrawtransaction", -5), ("gettransaction", -18)]);
+        assert_eq!(chain.transaction(txid).unwrap(), None);
+        server.join().unwrap();
+
+        let (chain, server) =
+            node_answering(vec![("getrawtransaction", -5), ("gettransaction", -28)]);
+        assert!(matches!(
+            chain.transaction(txid),
+            Err(ChainError::Rpc(e)) if rpc_error_code(&e) == Some(-28)
+        ));
+        server.join().unwrap();
     }
 
     #[test]
