@@ -125,7 +125,11 @@ impl ChainView for RpcChain {
             // A one-off look at the chain as it is now.
             None => spend_scan_start(&self.client, outpoint, 1)?,
         };
-        find_spending_tx_once(&self.client, outpoint, 0, &mut cursor, &mut scan.blocks)
+        let found = find_spending_tx_once(&self.client, outpoint, 0, &mut cursor, &mut scan.blocks);
+        // This look keeps no cursor, so nothing else would release the
+        // blocks it fetched.
+        scan.evict();
+        found
     }
 
     fn stop_watching(&self, outpoint: OutPoint) {
