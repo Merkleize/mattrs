@@ -191,8 +191,13 @@ impl StackScript {
         self.pick(items[0]);
         // The running concatenation is not `items[0]` any more: under that
         // name, a later pick of the same item would copy the concatenation
-        // instead of the item.
-        self.rename_top("<cat>");
+        // instead of the item. Its temporary name must not be one a pick
+        // could ask for, so it is one that neither the stack nor `items` use.
+        let mut cat = String::from("<cat>");
+        while self.stack.contains(&cat) || items.contains(&cat.as_str()) {
+            cat.push('\'');
+        }
+        self.rename_top(&cat);
         for item in &items[1..] {
             self.pick(item);
             self.parts.push(script! { OP_CAT });
@@ -398,6 +403,23 @@ mod tests {
             script! {
                 OP_OVER OP_OVER OP_CAT
                 2 OP_PICK OP_CAT
+                OP_SHA256
+                OP_2DROP OP_DROP OP_TRUE
+            }
+        );
+    }
+
+    #[test]
+    fn sha_cat_does_not_shadow_an_item_named_like_its_temporary() {
+        // sha256(a || <cat>): `<cat>` is the witness element on top, not the
+        // copy of `a` that starts the concatenation.
+        let mut s = StackScript::with_witness(&["a", "<cat>"]);
+        s.sha_cat(&["a", "<cat>"], "h");
+        assert_eq!(s.stack, ["a", "<cat>", "h"]);
+        assert_eq!(
+            s.into_script(),
+            script! {
+                OP_OVER OP_OVER OP_CAT
                 OP_SHA256
                 OP_2DROP OP_DROP OP_TRUE
             }
