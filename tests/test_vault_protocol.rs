@@ -315,6 +315,8 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
     // Handling Vault but not Unvaulting: the spend's child is a loud error...
     let (manager, entry) = funded_vault(&Rc::new(LocalChain::new()));
     let mut runner = Runner::new(manager, trigger_only(), OwnerData::new(plan()), entry);
+    // (The first step sends the trigger; the next one follows it, confirmed.)
+    assert!(matches!(runner.step().unwrap(), Progress::Advanced));
     let err = runner
         .step()
         .expect_err("the Unvaulting child is unhandled");
@@ -332,6 +334,7 @@ fn unhandled_fork_children_are_loud_unless_ignored() {
         OwnerData::new(plan()),
         entry,
     );
+    assert!(matches!(runner.step().unwrap(), Progress::Advanced));
     match runner.step().expect("steps") {
         Progress::Done(outcomes) => assert!(outcomes.is_empty(), "every branch was ignored"),
         _ => panic!("expected the protocol to resolve"),
@@ -345,7 +348,8 @@ fn test_vault_fork_on_regtest() -> Result<(), Box<dyn std::error::Error>> {
     let revault = Amount::from_sat(30_000);
     let rest = Amount::from_sat(AMOUNT) - revault;
 
-    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+        .with_auto_mining();
     let vault = Vault::new(params())?.fund(&mut manager, Amount::from_sat(AMOUNT))?;
     let entry = vault.handle().clone();
 

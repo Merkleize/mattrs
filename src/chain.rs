@@ -87,8 +87,8 @@ pub trait ChainView {
 
     /// A single, non-blocking look for a transaction spending `outpoint`
     /// that has at least `min_confirmations` confirmations (1 = in the tip
-    /// block or deeper). With `min_confirmations == 0`, a spend still in the
-    /// mempool counts too.
+    /// block or deeper). A spend still in the mempool is never returned: a
+    /// depth of 0 is treated as 1.
     ///
     /// A spend buried under `min_confirmations` blocks is taken as final:
     /// nothing here follows a reorganization deeper than that, so choose the
@@ -102,16 +102,11 @@ pub trait ChainView {
     /// A single, non-blocking look for *any* transaction spending `outpoint`,
     /// however shallow: in the mempool, or in a block at any depth. This is
     /// for telling "not spent" apart from "spent, but not confirmed deeply
-    /// enough yet", and must leave later
+    /// enough yet"; what it returns may still be replaced or never confirm,
+    /// so it is not something to record. It must leave later
     /// [`find_spending_tx`](Self::find_spending_tx) calls unaffected: a
     /// backend that remembers how far it has looked does not count this look.
-    ///
-    /// The default asks [`find_spending_tx`](Self::find_spending_tx) for
-    /// zero confirmations, which is right for a backend keeping no such
-    /// state.
-    fn find_unsettled_spend(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
-        self.find_spending_tx(outpoint, 0)
-    }
+    fn find_unsettled_spend(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError>;
 
     /// Nobody is looking for a spend of `outpoint` with `min_confirmations`
     /// any more (the caller gave up waiting, or now waits for another depth):
@@ -209,6 +204,23 @@ impl LocalChain {
     }
 }
 
+impl LocalChain {
+    /// Drop an unconfirmed transaction from the mempool, as a node does when
+    /// it evicts or replaces one: its inputs are spendable again, and a later
+    /// [`broadcast`](ChainView::broadcast) of it starts over. Returns whether
+    /// `txid` was in the mempool.
+    pub fn evict(&self, txid: Txid) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(position) = inner.mempool.iter().position(|pending| *pending == txid) else {
+            return false;
+        };
+        inner.mempool.remove(position);
+        inner.txs.remove(&txid);
+        inner.spends.retain(|_, spender| *spender != txid);
+        true
+    }
+}
+
 impl ChainView for LocalChain {
     fn broadcast(&self, tx: &Transaction) -> Result<(), ChainError> {
         let mut inner = self.inner.borrow_mut();
@@ -246,7 +258,15 @@ impl ChainView for LocalChain {
             Some(height) => (inner.height + 1).saturating_sub(*height),
             None => 0,
         };
-        Ok((confirmations >= min_confirmations).then(|| inner.txs[txid].clone()))
+        Ok((confirmations >= min_confirmations.max(1)).then(|| inner.txs[txid].clone()))
+    }
+
+    fn find_unsettled_spend(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+        let inner = self.inner.borrow();
+        Ok(inner
+            .spends
+            .get(&outpoint)
+            .map(|txid| inner.txs[txid].clone()))
     }
 
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError> {
@@ -327,17 +347,38 @@ mod tests {
     fn broadcast_and_find_spend() {
         let chain = LocalChain::new();
         let op = outpoint(1);
-        assert!(chain.find_spending_tx(op, 0).unwrap().is_none());
+        assert!(chain.find_unsettled_spend(op).unwrap().is_none());
 
         let tx = tx_spending(op, 0);
         chain.broadcast(&tx).unwrap();
-        // Visible from the mempool, before any block, only when asked for.
-        assert_eq!(chain.find_spending_tx(op, 0).unwrap(), Some(tx.clone()));
+        // In the mempool it is visible, but never a confirmed spend: no
+        // depth, zero included, asks for one of those.
+        assert_eq!(chain.find_unsettled_spend(op).unwrap(), Some(tx.clone()));
         assert!(chain.find_spending_tx(op, 1).unwrap().is_none());
+        assert!(chain.find_spending_tx(op, 0).unwrap().is_none());
         // Re-broadcasting the same tx is fine; a conflicting spend is not.
         chain.broadcast(&tx).unwrap();
         let conflict = tx_spending(op, 7);
         assert!(chain.broadcast(&conflict).is_err());
+    }
+
+    #[test]
+    fn an_evicted_transaction_frees_its_inputs() {
+        let chain = LocalChain::new();
+        let op = outpoint(4);
+        let tx = tx_spending(op, 0);
+        chain.broadcast(&tx).unwrap();
+        assert!(chain.evict(tx.compute_txid()));
+        assert!(chain.find_unsettled_spend(op).unwrap().is_none());
+        assert!(!chain.evict(tx.compute_txid()));
+
+        // A conflicting spend is accepted now, and a confirmed transaction
+        // is not something to evict.
+        let other = tx_spending(op, 7);
+        chain.broadcast(&other).unwrap();
+        chain.mine(1);
+        assert!(!chain.evict(other.compute_txid()));
+        assert_eq!(chain.find_spending_tx(op, 1).unwrap(), Some(other));
     }
 
     #[test]
@@ -352,7 +393,8 @@ mod tests {
         assert_eq!(chain.height().unwrap(), 3);
         assert_eq!(chain.confirmation_height(txid).unwrap(), Some(1));
         // Spends stay visible after confirmation.
-        assert!(chain.find_spending_tx(outpoint(2), 0).unwrap().is_some());
+        assert!(chain.find_spending_tx(outpoint(2), 1).unwrap().is_some());
+        assert!(chain.find_unsettled_spend(outpoint(2)).unwrap().is_some());
     }
 
     #[test]

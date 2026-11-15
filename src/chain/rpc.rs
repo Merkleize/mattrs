@@ -22,8 +22,9 @@ impl From<bitcoincore_rpc::Error> for ChainError {
 
 /// A [`ChainView`] over a real Bitcoin node's RPC interface. A spend is found
 /// by a per-outpoint block scan, from the funding transaction's height up to
-/// the last block with the confirmations asked for (and, when unconfirmed
-/// spends are asked for, in the mempool via `gettxspendingprevout`).
+/// the last block with the confirmations asked for. Only
+/// [`find_unsettled_spend`](ChainView::find_unsettled_spend) also looks at
+/// shallower blocks and at the mempool (`gettxspendingprevout`).
 ///
 /// The scan never passes a block shallower than the confirmations asked for,
 /// so a reorganization no deeper than that is followed; a deeper one is not.
@@ -119,7 +120,12 @@ impl ChainView for RpcChain {
             // A one-off look at the chain as it is now.
             None => spend_scan_start(&self.client, outpoint, 1)?,
         };
-        let found = find_spending_tx_once(&self.client, outpoint, 0, &mut cursor, &mut scan.blocks);
+        let found = match find_mempool_spend(&self.client, outpoint) {
+            Ok(None) => {
+                find_spending_tx_once(&self.client, outpoint, 1, &mut cursor, &mut scan.blocks)
+            }
+            in_mempool => in_mempool,
+        };
         // This look keeps no cursor, so nothing else would release the
         // blocks it fetched.
         scan.evict();
@@ -287,12 +293,32 @@ fn deepest_scan_height(tip: u64, min_confirmations: u32) -> Option<u64> {
     tip.checked_sub(u64::from(min_confirmations.saturating_sub(1)))
 }
 
+/// The transaction spending `outpoint` in the node's mempool, if any
+/// (`gettxspendingprevout`).
+fn find_mempool_spend(rpc: &Client, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+    let query = serde_json::json!([{
+        "txid": outpoint.txid.to_string(),
+        "vout": outpoint.vout,
+    }]);
+    let res: serde_json::Value = rpc.call("gettxspendingprevout", &[query])?;
+    let Some(txid_str) = res
+        .get(0)
+        .and_then(|entry| entry.get("spendingtxid"))
+        .and_then(|v| v.as_str())
+    else {
+        return Ok(None);
+    };
+    let txid: Txid = txid_str
+        .parse()
+        .map_err(|e| ChainError::Other(format!("bad spendingtxid: {}", e)))?;
+    Ok(Some(rpc.get_raw_transaction(&txid, None)?))
+}
+
 /// A single, non-blocking look for a transaction spending `outpoint` with at
 /// least `min_confirmations` confirmations: the blocks from `*next_height` to
 /// the last one that deep (the cursor advances past the blocks already
-/// scanned; seed it with [`spend_scan_start`] for the same depth, and share one `blocks` cache
-/// between the scans of concurrent outpoints). With zero confirmations, the
-/// mempool is looked at first (`gettxspendingprevout`).
+/// scanned; seed it with [`spend_scan_start`] for the same depth, and share
+/// one `blocks` cache between the scans of concurrent outpoints).
 fn find_spending_tx_once(
     rpc: &Client,
     outpoint: OutPoint,
@@ -300,26 +326,6 @@ fn find_spending_tx_once(
     next_height: &mut u64,
     blocks: &mut BlockCache,
 ) -> Result<Option<Transaction>, ChainError> {
-    // 1. The mempool, when unconfirmed spends count.
-    if min_confirmations == 0 {
-        let query = serde_json::json!([{
-            "txid": outpoint.txid.to_string(),
-            "vout": outpoint.vout,
-        }]);
-        let res: serde_json::Value = rpc.call("gettxspendingprevout", &[query])?;
-        if let Some(txid_str) = res
-            .get(0)
-            .and_then(|entry| entry.get("spendingtxid"))
-            .and_then(|v| v.as_str())
-        {
-            let txid: Txid = txid_str
-                .parse()
-                .map_err(|e| ChainError::Other(format!("bad spendingtxid: {}", e)))?;
-            return Ok(Some(rpc.get_raw_transaction(&txid, None)?));
-        }
-    }
-
-    // 2. Blocks that became deep enough since the last look.
     let Some(last) = deepest_scan_height(rpc.get_block_count()?, min_confirmations) else {
         return Ok(None);
     };

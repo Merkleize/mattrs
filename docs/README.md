@@ -65,8 +65,8 @@ Each party is declared as a **role**: a table mapping contract types to handlers
 
 | Action | Meaning |
 |--------|---------|
-| `Send(spend)` | My turn: broadcast this spend and follow its child |
-| `SendFinal(spend, outcome)` | My terminal spend; the protocol resolves |
+| `Send(spend)` | My turn: broadcast this spend, and follow the spend of the UTXO that confirms |
+| `SendFinal(spend, outcome)` | My terminal spend; the protocol resolves once it confirms |
 | `Wait` | Counterparty's turn: watch the UTXO for its spend |
 | `wait_or(fallback)` | Watch, but act (e.g. send `forfait`) once the UTXO sits unspent for the delay the fallback's clause declares with `timelock`; `wait_or_after(blocks, fallback)` gives the delay explicitly |
 | `Finish(outcome)` | Resolved with no transaction from us |
@@ -75,7 +75,7 @@ A separate `on_settled` handler classifies *terminal* spends made by the counter
 
 A handler's error says whose fault it is: `ProtocolError::violation(..)` when the counterparty left the protocol (a reveal that breaks a commitment), `ProtocolError::internal(..)` when the role itself is wrong (a settlement clause that cannot be terminal), and `ProtocolError::other(..)` for anything else, such as I/O.
 
-A **runner** drives a role from an entry instance to its outcome: it dispatches handlers, builds and broadcasts the spends they return, follows the counterparty by observing the chain, and fires timeout fallbacks. All chain I/O goes through one seam (`ChainView`), so the same roles run unchanged against a real node (`RpcChain`) or the deterministic in-memory chain used by offline tests (`LocalChain`), where timeout paths are exercised by mining explicitly.
+A **runner** drives a role from an entry instance to its outcome: it dispatches handlers, builds and broadcasts the spends they return, follows the spends that confirm by observing the chain, and fires timeout fallbacks. Sending is an attempt: a token moves only along a confirmed spend, so if the counterparty's spend confirms instead of ours, the runner follows that one. All chain I/O goes through one seam (`ChainView`), so the same roles run unchanged against a real node (`RpcChain`) or the deterministic in-memory chain used by offline tests (`LocalChain`), where timeout paths are exercised by mining explicitly.
 
 **Protocols compose.** A whole protocol — its contracts, roles, and outcome type — is a reusable component: `Role::embed` mounts a sub-protocol's role inside a larger protocol's, mapping its outcomes into the outer outcome type. The embedder never handles the sub-protocol's internal states. The bisection fraud proof ([`mattrs::fraud::roles`](../src/fraud/roles.rs)) ships this way: the game256 protocol ([`tests/support/game256_roles.rs`](../tests/support/game256_roles.rs)) hands off on-chain with `Bisect1::state_output_script` / `entry_output` and mounts `fraud::roles::{alice,bob}_role` — the whole dispute below `start_challenge` runs without the game code naming a single bisection state.
 

@@ -289,7 +289,7 @@ fn test_vault_trigger_and_withdraw() -> Result<(), Box<dyn std::error::Error>> {
 
     let amount = 49999900;
 
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
 
     // Create and fund a Vault instance, getting a typed VaultHandle back.
     let vault = Vault::new(params)?.fund(&mut manager, Amount::from_sat(amount))?;
@@ -386,7 +386,8 @@ fn test_observe_spend_decodes_clause_and_children() {
 
     // The actor builds (but does not broadcast) a trigger spend.
     let chain = std::rc::Rc::new(mattrs::chain::LocalChain::new());
-    let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let mut actor =
+        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_auto_mining();
     let actor_handle = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
     let tx = actor_handle
         .trigger(ctv_hash, 0)
@@ -395,7 +396,7 @@ fn test_observe_spend_decodes_clause_and_children() {
         .unwrap();
 
     // The observer tracks the same outpoint in its own manager.
-    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest).with_auto_mining();
     let observed = vault
         .track(&mut observer, actor_handle.outpoint())
         .unwrap()
@@ -457,7 +458,8 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     let revault_amount = Amount::from_sat(30_000);
 
     let chain = std::rc::Rc::new(mattrs::chain::LocalChain::new());
-    let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let mut actor =
+        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_auto_mining();
     let h1 = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
     let h2 = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
 
@@ -470,7 +472,7 @@ fn test_observe_batch_spend_decodes_all_inputs() {
     .unwrap();
 
     // The observer tracks the same two outpoints in its own manager.
-    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest).with_auto_mining();
     let mut track = |h: &VaultHandle| {
         vault
             .track(&mut observer, h.outpoint())
@@ -531,28 +533,43 @@ fn test_external_broadcast_is_staged_first_and_orders_children_like_observation(
 
     // A refused broadcast leaves the instance untouched.
     let chain = std::rc::Rc::new(mattrs::chain::LocalChain::new());
-    let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let mut actor =
+        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_auto_mining();
     let handle = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
-    let refused = actor.spend_batch_with(&[spend(&handle)], |_| {
+    let refused = actor.broadcast_batch_with(&[spend(&handle)], |_| {
         Err(ManagerError::other("the relay refused it"))
     });
     assert!(matches!(refused, Err(ManagerError::Other(_))));
     assert_eq!(handle.status(), InstanceStatus::Funded);
     assert!(handle.outputs().is_empty());
 
-    // An accepted one is recorded, with the transaction the broadcaster saw.
+    // An accepted one is still only an attempt: nothing is recorded...
     let mut sent = None;
-    let children = actor
-        .spend_batch_with(&[spend(&handle)], |tx| {
+    let pending = actor
+        .broadcast_batch_with(&[spend(&handle)], |tx| {
             sent = Some(tx.clone());
             Ok::<_, ManagerError>(())
         })
         .unwrap();
-    assert_eq!(handle.status(), InstanceStatus::Spent);
     let sent = sent.expect("the broadcaster ran");
+    assert_eq!(pending.transaction(), &sent);
+    assert_eq!(handle.status(), InstanceStatus::Funded);
+    assert!(matches!(
+        pending.settle_within(&mut actor, std::time::Duration::ZERO),
+        Err(ManagerError::SpendNotFound(_))
+    ));
+
+    // ...until the transaction the broadcaster saw is confirmed.
+    {
+        use mattrs::chain::ChainView;
+        chain.broadcast(&sent).unwrap();
+        chain.mine(1);
+    }
+    let children = pending.settle(&mut actor).unwrap();
+    assert_eq!(handle.status(), InstanceStatus::Spent);
 
     // An observer of that transaction sees the same children, in the same order.
-    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let mut observer = ContractManager::on(chain, bitcoin::Network::Regtest).with_auto_mining();
     let observed = vault
         .track(&mut observer, handle.outpoint())
         .unwrap()
@@ -601,8 +618,9 @@ fn test_offline_manager_reports_node_operations() {
     ));
 }
 
-/// An observer waiting for several confirmations follows a spend only once
-/// it is that deep, and an auto-mining manager confirms its own spends.
+/// A manager waiting for several confirmations registers a funding, and
+/// follows a spend, only once they are that deep; an auto-mining manager
+/// confirms what it sends.
 #[test]
 fn test_a_spend_is_followed_at_the_configured_depth() {
     use mattrs::chain::{ChainView, LocalChain};
@@ -626,18 +644,30 @@ fn test_a_spend_is_followed_at_the_configured_depth() {
         unvault_pk: alice_pk(),
     })
     .unwrap();
+    // The actor mined its funding into a block: enough for the actor, one
+    // confirmation out of the observer's three.
     let funded = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
+    assert_eq!(
+        chain.confirmation_height(funded.outpoint().txid).unwrap(),
+        Some(1)
+    );
+    assert!(matches!(
+        Vault::track(&vault, &mut observer, funded.outpoint()),
+        Err(ManagerError::FundingNotSettled {
+            confirmations: 1,
+            required: 3,
+            ..
+        })
+    ));
+    chain.mine(2);
     let watched = Vault::track(&vault, &mut observer, funded.outpoint()).unwrap();
 
+    // Likewise for the spend.
     let children = funded
         .trigger([9; 32], 0)
         .sign(HotSigner::new(alice_xpriv()))
         .exec(&mut actor)
         .unwrap();
-    // The actor mined its spend into a block: one confirmation.
-    let spend = children[0].outpoint().txid;
-    assert_eq!(chain.confirmation_height(spend).unwrap(), Some(1));
-
     for _ in 0..2 {
         assert!(matches!(
             observer.wait_for_spend_within(&watched, Some(Duration::ZERO)),
@@ -649,6 +679,14 @@ fn test_a_spend_is_followed_at_the_configured_depth() {
     assert_eq!(seen[0].outpoint(), children[0].outpoint());
 }
 
+/// Zero confirmations are not a depth: an unconfirmed transaction is never
+/// settled.
+#[test]
+#[should_panic(expected = "at least one confirmation")]
+fn test_zero_confirmations_are_refused() {
+    let _ = mattrs::testutil::local_manager().with_confirmations(0);
+}
+
 /// The whole funded → spent lifecycle on the in-memory chain: one party funds
 /// and spends with the ordinary `fund` / `exec` API, another tracks the same
 /// outpoint and follows the spend, and both end with the same child.
@@ -657,11 +695,14 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
     use mattrs::chain::{ChainView, LocalChain};
     use mattrs::signer::HotSigner;
     use std::rc::Rc;
+    use std::time::Duration;
     use support::testkit::alice_xpriv;
 
     let chain = Rc::new(LocalChain::new());
-    let mut actor = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
-    let mut observer = ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let mut actor =
+        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_auto_mining();
+    let mut observer =
+        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_auto_mining();
 
     let vault = Vault::new(VaultParams {
         alternate_pk: None,
@@ -670,48 +711,75 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
         unvault_pk: alice_pk(),
     })
     .unwrap();
+    // Funding returns once the funding transaction is confirmed.
     let funded = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
+    let again = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
     let outpoint = funded.outpoint();
-    actor.mine_blocks(1).unwrap();
     assert_eq!(chain.confirmation_height(outpoint.txid).unwrap(), Some(1));
-
     let watched = Vault::track(&vault, &mut observer, outpoint).unwrap();
 
-    let children = funded
+    // From here on, blocks are mined by hand.
+    actor.set_auto_mining(false);
+    let pending = funded
         .trigger([9; 32], 0)
         .sign(HotSigner::new(alice_xpriv()))
-        .exec(&mut actor)
+        .broadcast(&actor)
         .unwrap();
-    assert_eq!(children.len(), 1);
 
-    // The observer does not act on a spend that is only in the mempool...
+    // A spend that is only in the mempool is recorded by nobody: not by an
+    // observer, and not by the manager that sent it.
     assert!(matches!(
-        observer.wait_for_spend_within(&watched, Some(std::time::Duration::ZERO)),
-        Err(mattrs::manager::ManagerError::SpendNotFound(_))
+        observer.wait_for_spend_within(&watched, Some(Duration::ZERO)),
+        Err(ManagerError::SpendNotFound(_))
     ));
-    assert_eq!(watched.status(), mattrs::contracts::InstanceStatus::Funded);
+    assert!(matches!(
+        pending.settle_within(&mut actor, Duration::ZERO),
+        Err(ManagerError::SpendNotFound(_))
+    ));
+    assert_eq!(watched.status(), InstanceStatus::Funded);
+    assert_eq!(funded.status(), InstanceStatus::Funded);
+    assert!(funded.outputs().is_empty());
 
-    // ...only on a confirmed one,
-    actor.mine_blocks(1).unwrap();
+    // Once it is confirmed, both record it, and agree.
+    chain.mine(1);
+    let children = pending.settle(&mut actor).unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(funded.status(), InstanceStatus::Spent);
     let seen = observer.wait_for_spend(&watched).unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].outpoint(), children[0].outpoint());
 
     // The chain refuses a second spend of the same output, and the manager
     // records nothing for it.
-    let again = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
-    let first = again
-        .trigger([1; 32], 0)
-        .sign(HotSigner::new(alice_xpriv()));
-    let tx = first.build_tx().unwrap();
-    let mut conflicting = tx.clone();
+    let spend = || {
+        again
+            .trigger([1; 32], 0)
+            .sign(HotSigner::new(alice_xpriv()))
+    };
+    // (A spend handed to a broadcaster that drops it: signed, never sent.)
+    let ours = actor
+        .broadcast_batch_with(&[spend()], |_| Ok::<_, ManagerError>(()))
+        .unwrap();
+    let mut conflicting = ours.transaction().clone();
     conflicting.lock_time = bitcoin::absolute::LockTime::from_consensus(7);
     chain.broadcast(&conflicting).unwrap();
     assert!(matches!(
-        first.exec(&mut actor),
+        spend().exec(&mut actor),
         Err(ManagerError::Chain(mattrs::chain::ChainError::Rejected(_)))
     ));
     assert_eq!(again.status(), InstanceStatus::Funded);
+
+    // When the other spend is the one confirmed, settling ours records the
+    // other, and says so.
+    chain.mine(1);
+    let other = conflicting.compute_txid();
+    assert!(matches!(
+        ours.settle(&mut actor),
+        Err(ManagerError::SpentByAnother { txid, .. }) if txid == other
+    ));
+    assert_eq!(again.status(), InstanceStatus::Spent);
+    assert_eq!(again.spending_tx().unwrap().compute_txid(), other);
+    assert_eq!(again.outputs().len(), 1);
 }
 
 /// A standing signer on the manager signs every spend it executes; a signer
@@ -742,7 +810,7 @@ fn test_standing_signers_fill_signatures() {
     })
     .unwrap();
     let chain = Rc::new(LocalChain::new());
-    let mut manager = ContractManager::on(chain, bitcoin::Network::Regtest);
+    let mut manager = ContractManager::on(chain, bitcoin::Network::Regtest).with_auto_mining();
     let fund =
         |manager: &mut ContractManager| vault.fund(manager, Amount::from_sat(100_000)).unwrap();
 

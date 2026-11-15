@@ -5,8 +5,8 @@
 //!
 //! Spending goes through the fluent [`SpendBuilder`]: a clause is invoked with its
 //! typed arguments (already encoded to a witness stack), signers are registered by
-//! public key, and `exec`/`exec_one`/`exec_none` build, sign, broadcast and
-//! materialize the resulting child instances.
+//! public key, and `exec`/`exec_one`/`exec_none` build, sign and broadcast the
+//! spend, wait for it to settle, and materialize the resulting child instances.
 //!
 //! Covenants driven by *someone else* are followed with chain observation:
 //! [`ContractManager::track_instance`] registers an externally funded instance,
@@ -14,15 +14,45 @@
 //! [`ContractManager::observe_spend`]) detects its spend, decodes the witness
 //! back into the clause and its arguments, and materializes the child instances
 //! — so both parties of a protocol hold the same view of the contract's state.
-//! A spend found on the chain is recorded once it has the manager's
-//! [`confirmations`](ContractManager::confirmations) (one by default) and is
-//! never revisited: reorganizations deeper than that are not handled.
+//!
+//! # What the manager records
+//!
+//! A manager on a chain records settled facts only. A transaction is
+//! *settled* once it has the manager's
+//! [`confirmations`](ContractManager::confirmations) (one by default). An
+//! instance is registered when its funding transaction is settled; it becomes
+//! spent, and its children exist, when a transaction spending it is settled.
+//! That holds for the manager's own spends too: broadcasting is an attempt
+//! ([`ContractManager::broadcast_batch`] returns a [`PendingSpend`] and
+//! records nothing), and what gets recorded is whichever spend the chain
+//! confirms ([`PendingSpend::settle`]). The children of a spend therefore
+//! cannot be spent before the spend is settled: every step of a protocol
+//! costs that many blocks.
+//!
+//! # Known limitations
+//!
+//! - **Deep reorganizations.** What is recorded is never revisited. A
+//!   reorganization deeper than the manager's confirmations leaves it
+//!   describing a chain that no longer exists, and nothing detects that.
+//!   Recording the block each fact settled in, and checking that it is still
+//!   on the active chain, would at least turn this into an error; rolling
+//!   the instance graph back would handle it.
+//! - **Fees and replacement.** Spends carry whatever fee their clause leaves
+//!   and are never bumped. A conflicting transaction sitting in the mempool
+//!   blocks ours for as long as it stays there; the manager (and a
+//!   [`Runner`](crate::protocol::Runner)) waits correctly for whichever
+//!   confirms, but cannot make ours win.
+//! - **Explicit observation.** [`ContractManager::observe_spend`] and
+//!   [`ContractManager::observe_batch`] record the transaction they are
+//!   handed, with no chain lookup: the caller vouches that it is settled.
+//!   They are how an [`offline`](ContractManager::offline) manager learns
+//!   anything at all.
 //!
 //! The public facade composes RPC-free preparation/signing, shared constraint
-//! validation, and staged lifecycle updates. Ordinary execution validates and
-//! stages the signed transaction before broadcasting; only successful broadcast
-//! commits those updates. Observation uses the same staging/commit path without
-//! broadcasting. See `src/manager/README.md` for the internal component boundaries.
+//! validation, and staged lifecycle updates. A spend is validated before it is
+//! broadcast, and recorded through the same staging/commit path as an
+//! observation once it settles. See `src/manager/README.md` for the internal
+//! component boundaries.
 
 use crate::chain::ChainView;
 use crate::contracts::ContractInstance;
@@ -54,7 +84,8 @@ pub use wallet::{BatchObservation, ExternalInput, SignedWalletSpend, WalletSpend
 /// that spends several instances at once, merging their clause outputs by
 /// index. It needs no manager or node: everything comes from the builders,
 /// including the signers (a manager's standing signers are not consulted).
-/// [`ContractManager::spend_batch`] also broadcasts and records the spend.
+/// [`ContractManager::spend_batch`] also broadcasts it and records it once
+/// it settles.
 pub fn build_batch_tx(builders: &[SpendBuilder]) -> Result<Transaction, ManagerError> {
     signing::sign_prepared(
         builders,
@@ -122,7 +153,8 @@ impl ContractManager {
     /// one works as usual: building and signing spends, recording spends
     /// observed elsewhere ([`observe_spend`](Self::observe_spend),
     /// [`observe_batch`](Self::observe_batch)), and executing spends through
-    /// an external broadcaster ([`spend_batch_with`](Self::spend_batch_with)).
+    /// an external broadcaster
+    /// ([`broadcast_batch_with`](Self::broadcast_batch_with)).
     /// Operations that must reach a chain return [`ManagerError::NoNode`].
     pub fn offline(network: bitcoin::Network) -> Self {
         Self {
@@ -157,33 +189,45 @@ impl ContractManager {
         self
     }
 
-    /// How many confirmations a spend found on the chain needs before this
-    /// manager records it ([`wait_for_spend`](Self::wait_for_spend) and its
-    /// variants, and a protocol [`Runner`](crate::protocol::Runner) following
-    /// a counterparty). The default is 1: a spend counts once it is in a
-    /// block.
+    /// How many confirmations a transaction needs before this manager takes
+    /// it as settled and records what it did. The default is 1: a
+    /// transaction counts once it is in a block.
     pub fn confirmations(&self) -> u32 {
         self.confirmations
     }
 
-    /// Set the [`confirmations`](Self::confirmations) a spend found on the
-    /// chain needs before it is recorded.
+    /// Set the [`confirmations`](Self::confirmations) a transaction needs to
+    /// be settled.
     ///
-    /// A recorded spend is never revisited, so this is the manager's whole
-    /// answer to chain reorganizations: wait for a depth at which you take a
-    /// block as final. With 0, a spend is recorded as soon as it reaches the
-    /// node's mempool, where it can still be replaced or never confirm; that
-    /// is only suitable for tests and demos.
+    /// Everything a manager on a chain records is settled: an instance is
+    /// registered once its funding transaction is that deep
+    /// ([`fund_instance`](Self::fund_instance),
+    /// [`track_instance`](Self::track_instance)), and it is spent, with its
+    /// children created, once a transaction spending it is that deep —
+    /// whoever broadcast it, this manager included. A transaction that is
+    /// only in the mempool, or in a shallower block, changes nothing.
     ///
-    /// Two things are not covered by this setting. A spend this manager
-    /// broadcasts itself is recorded at once, and an explicit
-    /// [`observe_spend`](Self::observe_spend) /
-    /// [`observe_batch`](Self::observe_batch) records the transaction it is
-    /// handed, whatever its confirmation status.
+    /// What is recorded is never revisited, so the depth is the manager's
+    /// whole answer to chain reorganizations: one deeper than this leaves
+    /// the manager describing a chain that no longer exists, and nothing
+    /// detects it. Pick a depth at which you take a block as final.
+    ///
+    /// The exception is an explicit [`observe_spend`](Self::observe_spend) /
+    /// [`observe_batch`](Self::observe_batch), which records the transaction
+    /// it is handed: there the caller vouches for it.
     ///
     /// Changing the depth while waiting for a spend is fine: the wait goes on
     /// at the new depth.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `confirmations` is zero: an unconfirmed transaction is
+    /// never settled.
     pub fn set_confirmations(&mut self, confirmations: u32) -> &mut Self {
+        assert!(
+            confirmations >= 1,
+            "an unconfirmed transaction is never settled: at least one confirmation is needed"
+        );
         if confirmations != self.confirmations {
             // The lookups in progress were at the old depth: nobody will
             // continue them, so the backend should not keep their state.
@@ -205,14 +249,17 @@ impl ContractManager {
         self
     }
 
-    /// Mine [`confirmations`](Self::confirmations) blocks (at least one)
-    /// after every transaction this manager broadcasts through its chain
-    /// backend, so the parties watching the chain see the spend without
-    /// anyone else mining. For regtest and test chains only: the backend must
-    /// support [`ChainView::mine_blocks`]. Off by default.
+    /// Mine [`confirmations`](Self::confirmations) blocks after every
+    /// transaction this manager broadcasts through its chain backend
+    /// (spends and fundings), so that it settles without anyone else mining.
+    /// For regtest and test chains only: the backend must support
+    /// [`ChainView::mine_blocks`]. Off by default — and without it, or a
+    /// miner, [`fund_instance`](Self::fund_instance) and
+    /// [`spend_batch`](Self::spend_batch) wait forever.
     ///
-    /// A spend sent through [`spend_batch_with`](Self::spend_batch_with)'s
-    /// own broadcaster is not followed by a block.
+    /// A spend sent through
+    /// [`broadcast_batch_with`](Self::broadcast_batch_with)'s own broadcaster
+    /// is not followed by a block.
     pub fn set_auto_mining(&mut self, auto_mine: bool) -> &mut Self {
         self.auto_mine = auto_mine;
         self
@@ -236,8 +283,11 @@ impl ContractManager {
         self.chain.as_ref().ok_or(ManagerError::NoNode)
     }
 
-    /// Spend several instances in one transaction (build, sign, broadcast), and
-    /// return handles to the child instances created — one per merged output index.
+    /// Spend several instances in one transaction and return handles to the
+    /// child instances created — one per merged output index. Shorthand for
+    /// [`broadcast_batch`](Self::broadcast_batch) followed by
+    /// [`PendingSpend::settle`]: it returns once the spend has the manager's
+    /// [`confirmations`](Self::confirmations), however long that takes.
     ///
     /// Mirrors pymatt's multi-input `get_spend_tx`: within each input the
     /// deduct outputs must precede its preserve outputs, and a preserve output at
@@ -245,74 +295,177 @@ impl ContractManager {
     /// vaults triggering to the same next contract merge into one output). CTV
     /// template clauses are single-input only and are rejected here.
     pub fn spend_batch(&mut self, builders: &[SpendBuilder]) -> Result<Children, ManagerError> {
-        let prepared = transaction::prepare(builders)?;
-        self.execute_prepared(builders, prepared, Self::send_to_node)
+        self.broadcast_batch(builders)?.settle(self)
     }
 
-    /// Broadcast through this manager's own chain backend.
-    fn send_to_node(&self, tx: &Transaction) -> Result<(), ManagerError> {
-        let chain = self.chain()?;
-        chain.broadcast(tx)?;
-        if self.auto_mine {
-            // The transaction is out: a failure to mine must not be reported
-            // as a failed spend, which would leave it unrecorded.
-            let _ = chain.mine_blocks(self.confirmations.max(1));
-        }
-        Ok(())
-    }
-
-    /// Like [`spend_batch`](Self::spend_batch), but hands the signed
-    /// transaction to `broadcast` instead of this manager's own chain backend
-    /// — for callers that reach the chain another way (e.g. a relay).
+    /// Build, sign and broadcast one transaction spending several instances,
+    /// without recording anything: a broadcast transaction is an attempt, and
+    /// the instances are spent only once *some* transaction spending them is
+    /// confirmed. [`PendingSpend::settle`] waits for that and records it.
     ///
-    /// The order is the same as for `spend_batch`: the spend is fully
-    /// validated and staged *before* `broadcast` runs, and recorded only if it
-    /// returns `Ok`. A transaction this manager could not record is therefore
-    /// never sent, and a failed broadcast leaves the manager untouched.
-    pub fn spend_batch_with<E: From<ManagerError>>(
-        &mut self,
+    /// The spend is fully validated before it is sent: a transaction this
+    /// manager could not record is never broadcast.
+    pub fn broadcast_batch(&self, builders: &[SpendBuilder]) -> Result<PendingSpend, ManagerError> {
+        let pending = self.sign_batch(builders)?;
+        self.send(&pending)?;
+        Ok(pending)
+    }
+
+    /// Like [`broadcast_batch`](Self::broadcast_batch), but hands the signed
+    /// transaction to `broadcast` instead of this manager's own chain backend
+    /// — for callers that reach the chain another way (e.g. a relay). The
+    /// spend is validated *before* `broadcast` runs, and nothing is recorded:
+    /// settle the returned spend on a manager with a chain, or record the
+    /// confirmed transaction with [`observe_batch`](Self::observe_batch).
+    pub fn broadcast_batch_with<E: From<ManagerError>>(
+        &self,
         builders: &[SpendBuilder],
         broadcast: impl FnOnce(&Transaction) -> Result<(), E>,
-    ) -> Result<Children, E> {
+    ) -> Result<PendingSpend, E> {
+        let pending = self.sign_batch(builders)?;
+        broadcast(pending.transaction())?;
+        Ok(pending)
+    }
+
+    /// Build, sign and validate a spend, without sending it.
+    pub(crate) fn sign_batch(
+        &self,
+        builders: &[SpendBuilder],
+    ) -> Result<PendingSpend, ManagerError> {
         let prepared = transaction::prepare(builders)?;
-        self.execute_prepared(builders, prepared, |_, tx| broadcast(tx))
+        self.sign_prepared(builders, prepared, |_| Ok(()))
     }
 
-    fn execute_prepared<E: From<ManagerError>>(
-        &mut self,
+    /// Sign a prepared spend and validate it as an observation would, with a
+    /// last `check` of the children it would create: what fails here is never
+    /// sent. The children are discarded: the real ones are created when the
+    /// spend settles.
+    fn sign_prepared(
+        &self,
         builders: &[SpendBuilder],
         prepared: PreparedBatch,
-        broadcast: impl FnOnce(&Self, &Transaction) -> Result<(), E>,
-    ) -> Result<Children, E> {
-        let ((), children) =
-            self.execute_prepared_checked(builders, prepared, |_| Ok(()), broadcast)?;
-        Ok(children)
-    }
-
-    /// [`execute_prepared`](Self::execute_prepared), with a last `check` of
-    /// the staged children before the transaction is broadcast: what it
-    /// rejects is never sent, and what it returns is handed back with the
-    /// committed children. The staged handles are the ones later committed.
-    fn execute_prepared_checked<T, E: From<ManagerError>>(
-        &mut self,
-        builders: &[SpendBuilder],
-        prepared: PreparedBatch,
-        check: impl FnOnce(Vec<InstanceHandle>) -> Result<T, ManagerError>,
-        broadcast: impl FnOnce(&Self, &Transaction) -> Result<(), E>,
-    ) -> Result<(T, Children), E> {
+        check: impl FnOnce(Vec<InstanceHandle>) -> Result<(), ManagerError>,
+    ) -> Result<PendingSpend, ManagerError> {
         let tx = signing::sign_prepared(builders, prepared, &self.signers)?;
-        let handles: Vec<_> = builders
+        let inputs: Vec<_> = builders
             .iter()
             .map(|builder| InstanceHandle {
                 instance: builder.instance.clone(),
             })
             .collect();
-        let staged = self.stage_batch(&handles.iter().collect::<Vec<_>>(), &[], &tx)?;
+        let staged = self.stage_batch(&inputs.iter().collect::<Vec<_>>(), &[], &tx)?;
+        check(staged.children())?;
+        Ok(PendingSpend { tx, inputs })
+    }
 
-        let checked = check(staged.children())?;
+    /// Broadcast a signed spend through this manager's chain backend (and
+    /// mine it, when auto-mining). Sending the same spend again is how it is
+    /// re-broadcast.
+    pub(crate) fn send(&self, pending: &PendingSpend) -> Result<(), ManagerError> {
+        self.chain()?.broadcast(&pending.tx)?;
+        self.mine_if_auto();
+        Ok(())
+    }
 
-        broadcast(self, &tx)?;
-        Ok((checked, staged.commit(self)))
+    /// With auto-mining on, bury what was just broadcast under the manager's
+    /// confirmations.
+    fn mine_if_auto(&self) {
+        if self.auto_mine
+            && let Some(chain) = &self.chain
+        {
+            // The transaction is out: a failure to mine is not a failure to
+            // send it.
+            let _ = chain.mine_blocks(self.confirmations);
+        }
+    }
+
+    /// Wait (within `window`; `None` = forever) until the instances `pending`
+    /// spends are spent by a transaction with the manager's confirmations,
+    /// and record that transaction.
+    fn settle(
+        &mut self,
+        pending: &PendingSpend,
+        window: Option<std::time::Duration>,
+    ) -> Result<Children, ManagerError> {
+        let first = pending
+            .inputs
+            .first()
+            .expect("a spend has at least one input");
+        let settled = match first.spending_tx() {
+            Some(tx) => Transaction::clone(&tx),
+            None => self.wait_for_spending_tx(first.outpoint(), window)?,
+        };
+        let txid = settled.compute_txid();
+        if txid == pending.txid() {
+            return self.observe_batch(&pending.inputs.iter().collect::<Vec<_>>(), &settled);
+        }
+        // Another transaction got there first. It is what happened, so it is
+        // what gets recorded, for every input of ours that it spends.
+        for input in &pending.inputs {
+            let outpoint = input.outpoint();
+            if settled.input.iter().any(|i| i.previous_output == outpoint) {
+                self.observe_spend(input, &settled)?;
+            }
+        }
+        Err(ManagerError::SpentByAnother {
+            outpoint: first.outpoint(),
+            txid,
+        })
+    }
+}
+
+/// A signed spend that was broadcast and is not recorded yet.
+///
+/// Broadcasting is an attempt: until a transaction spending the same
+/// instances is confirmed, a conflicting one can still win, and this one can
+/// be evicted. [`settle`](Self::settle) waits for the confirmed outcome and
+/// records it, whichever transaction it is.
+#[derive(Debug, Clone)]
+pub struct PendingSpend {
+    tx: Transaction,
+    inputs: Vec<InstanceHandle>,
+}
+
+impl PendingSpend {
+    /// The signed transaction.
+    pub fn transaction(&self) -> &Transaction {
+        &self.tx
+    }
+
+    /// The transaction's id.
+    pub fn txid(&self) -> bitcoin::Txid {
+        self.tx.compute_txid()
+    }
+
+    /// The instances this transaction spends, in the order of the builders
+    /// it was made from.
+    pub fn inputs(&self) -> &[InstanceHandle] {
+        &self.inputs
+    }
+
+    /// Wait until the instances are spent by a transaction with the manager's
+    /// [`confirmations`](ContractManager::confirmations), record that spend,
+    /// and return the children. There is no time limit: confirmation takes
+    /// as long as the chain takes (see
+    /// [`settle_within`](Self::settle_within)).
+    ///
+    /// If a *different* transaction ends up spending the first instance, that
+    /// transaction is recorded instead (for each of these instances it
+    /// spends) and the error is [`ManagerError::SpentByAnother`]: the handles
+    /// then show what actually happened.
+    pub fn settle(&self, manager: &mut ContractManager) -> Result<Children, ManagerError> {
+        manager.settle(self, None)
+    }
+
+    /// [`settle`](Self::settle), giving up with
+    /// [`ManagerError::SpendNotFound`] if nothing is confirmed within
+    /// `window`. Nothing is recorded then, and settling can be tried again.
+    pub fn settle_within(
+        &self,
+        manager: &mut ContractManager,
+        window: std::time::Duration,
+    ) -> Result<Children, ManagerError> {
+        manager.settle(self, Some(window))
     }
 }
 

@@ -26,11 +26,18 @@ fn offline_manager() -> ContractManager {
     ContractManager::offline(bitcoin::Network::Regtest)
 }
 
-/// A one-request RPC endpoint: acknowledge and return the broadcast tx.
-fn broadcast_rpc() -> (Client, std::thread::JoinHandle<Transaction>) {
-    broadcast_rpc_with_error(None)
+/// A manager on an in-memory chain, confirming each transaction it sends.
+fn chain_manager() -> ContractManager {
+    crate::testutil::local_manager()
 }
 
+/// The transaction recorded as spending `handle`.
+fn recorded_tx(handle: &InstanceHandle) -> Transaction {
+    Transaction::clone(&handle.spending_tx().expect("the instance is spent"))
+}
+
+/// A one-request RPC endpoint: answer the broadcast (with `error`, if any)
+/// and return the transaction it was sent.
 fn broadcast_rpc_with_error(
     error: Option<serde_json::Value>,
 ) -> (Client, std::thread::JoinHandle<Transaction>) {
@@ -205,10 +212,9 @@ fn template_hash_is_checked_before_signing_and_executes_without_children() {
 
     let (h, valid, calls) =
         signed_spend_with_constraint(false, Some(NextOutputs::TemplateHash(hash)));
-    let (rpc, server) = broadcast_rpc();
-    let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+    let mut manager = chain_manager();
     valid.exec_none(&mut manager).unwrap();
-    let tx = server.join().unwrap();
+    let tx = recorded_tx(&h);
     assert_eq!(calls.get(), 1);
     assert_eq!(h.status(), InstanceStatus::Spent);
     assert!(h.outputs().is_empty());
@@ -247,10 +253,8 @@ fn exec_one_rejects_a_wrong_handle_type_before_broadcast() {
 #[test]
 fn exec_one_returns_the_registered_child() {
     let (handle, builder, _) = signed_spend_fixture(true);
-    let (rpc, server) = broadcast_rpc();
-    let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+    let mut manager = chain_manager();
     let child: InstanceHandle = builder.exec_one(&mut manager).unwrap();
-    server.join().unwrap();
     assert_eq!(handle.outputs().into_vec(), vec![child.clone()]);
     assert!(Rc::ptr_eq(&child.instance, &manager.instances[0]));
 }
@@ -259,14 +263,13 @@ fn exec_one_returns_the_registered_child() {
 fn checked_execution_signs_once_and_records_the_broadcast_witness() {
     for child in [false, true] {
         let (h, builder, calls) = signed_spend_fixture(child);
-        let (rpc, server) = broadcast_rpc();
-        let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+        let mut manager = chain_manager();
         if child {
             builder.exec_one::<InstanceHandle>(&mut manager).unwrap();
         } else {
             builder.exec_none(&mut manager).unwrap();
         }
-        let tx = server.join().unwrap();
+        let tx = recorded_tx(&h);
         assert_eq!(calls.get(), 1);
         let record = h.spend_record().unwrap();
         let recorded = record.args();
@@ -291,8 +294,7 @@ fn payment_checks_run_before_signing_and_execution_tracks_no_children() {
     assert_eq!(calls.get(), 0);
 
     let (h, valid, calls) = signed_spend_with_constraint(false, Some(next.clone()));
-    let (rpc, server) = broadcast_rpc();
-    let mut manager = ContractManager::new(rpc, bitcoin::Network::Regtest);
+    let mut manager = chain_manager();
     valid
         .outputs(vec![TxOut {
             value: sat(10_000),
@@ -300,7 +302,7 @@ fn payment_checks_run_before_signing_and_execution_tracks_no_children() {
         }])
         .exec_none(&mut manager)
         .unwrap();
-    let tx = server.join().unwrap();
+    let tx = recorded_tx(&h);
     assert_eq!(calls.get(), 1);
     assert!(h.outputs().is_empty());
     let (observer, _, _) = signed_spend_with_constraint(false, Some(next));

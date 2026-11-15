@@ -9,7 +9,8 @@
 //! Run with `cargo run --example getting_started`. The manager here runs on an
 //! in-memory chain ([`LocalChain`]), which mints the funding and records the
 //! spend without executing scripts. Against a real node the code is the same
-//! with `ContractManager::new(rpc_client, network)`.
+//! with `ContractManager::new(rpc_client, network)` — minus the auto-mining,
+//! on a chain that has miners.
 
 use std::str::FromStr;
 
@@ -101,12 +102,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // 2. A manager tracks instances and executes spends. The owner's key is
-    //    registered once; every spend it executes is signed from it.
+    //    registered once; every spend it executes is signed from it. A
+    //    manager records a funding or a spend only once it is confirmed, and
+    //    nobody mines on this chain: have it mine a block after each
+    //    transaction it sends.
     let chain = Rc::new(LocalChain::new());
-    let mut manager =
-        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_signer(owner_signer);
+    let mut manager = ContractManager::on(chain.clone(), bitcoin::Network::Regtest)
+        .with_signer(owner_signer)
+        .with_auto_mining();
 
-    // 3. Fund it: `fund` returns a typed handle with one method per clause.
+    // 3. Fund it: `fund` returns a typed handle with one method per clause,
+    //    once the funding transaction is confirmed.
     let handle = timelock.fund(&mut manager, Amount::from_sat(100_000))?;
 
     // 4. Spend it. `withdraw` is timelocked, so the funding must first be

@@ -138,9 +138,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The same code runs on either chain; only the manager's backend differs.
     let manager = if on_regtest {
         let client = mattrs::manager::regtest_rpc_client("testwallet")?;
-        ContractManager::new(client, Network::Regtest)
+        ContractManager::new(client, Network::Regtest).with_auto_mining()
     } else {
-        ContractManager::on(Rc::new(LocalChain::new()), Network::Regtest)
+        ContractManager::on(Rc::new(LocalChain::new()), Network::Regtest).with_auto_mining()
     };
     let mut manager = manager.with_signer(owner);
 

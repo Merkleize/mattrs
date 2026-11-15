@@ -120,10 +120,14 @@ impl ContractKey {
 
 /// What a party does when the protocol token arrives at a contract state.
 pub enum Action<O> {
-    /// My turn: broadcast this spend and follow its child instance.
+    /// My turn: broadcast this spend, then follow the spend of the instance
+    /// that settles — this one, unless a conflicting spend is confirmed
+    /// first, in which case that one is followed like any observed spend.
     Send(SpendBuilder),
-    /// My final spend: broadcast it and finish with this outcome (children, if
-    /// any, are the counterparty's business).
+    /// My final spend: broadcast it and, once it settles, finish with this
+    /// outcome (children, if any, are the counterparty's business). If a
+    /// conflicting spend settles instead, the outcome is not claimed: that
+    /// spend is followed like any observed one.
     SendFinal(SpendBuilder, O),
     /// The counterparty's turn: watch the UTXO for its spend.
     Wait,
@@ -688,6 +692,12 @@ mod tests {
             &self,
             _outpoint: OutPoint,
             _min_confirmations: u32,
+        ) -> Result<Option<Transaction>, ChainError> {
+            Ok(None)
+        }
+        fn find_unsettled_spend(
+            &self,
+            _outpoint: OutPoint,
         ) -> Result<Option<Transaction>, ChainError> {
             Ok(None)
         }

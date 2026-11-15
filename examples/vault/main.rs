@@ -384,8 +384,12 @@ fn main() -> AppResult {
     } else {
         ContractManager::new(regtest_rpc_client(&wallet)?, bitcoin::Network::Regtest)
     };
-    // The owner's key signs every trigger: register it once.
-    let mut manager = manager.with_signer(HotSigner::new(unvault_xpriv));
+    // The owner's key signs every trigger: register it once. Fundings and
+    // spends are recorded once confirmed, and nobody else mines here: mine a
+    // block after each transaction.
+    let mut manager = manager
+        .with_signer(HotSigner::new(unvault_xpriv))
+        .with_auto_mining();
     maybe_enable_inspector(&mut manager, inspector)?;
     let mut repl = Repl {
         manager,

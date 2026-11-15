@@ -160,7 +160,8 @@ fn test_minivault_early_recover_on_regtest() -> Result<(), Box<dyn std::error::E
     // Combo (false, true): tree [trigger, recover] — recover straight from the
     // vault state, no trigger.
     let amount = Amount::from_sat(20_000);
-    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+        .with_auto_mining();
     let mut report = Report::new();
 
     let vault = MiniVault::new(make_params(false, true))?.fund(&mut manager, amount)?;
@@ -186,7 +187,8 @@ fn test_minivault_trigger_and_recover_on_regtest() -> Result<(), Box<dyn std::er
     // Combo (true, true): the full tree [trigger, [trigger_and_revault, recover]];
     // trigger, then recover from the unvaulting state.
     let amount = Amount::from_sat(20_000);
-    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+        .with_auto_mining();
     let mut report = Report::new();
     let wpk = withdrawal_pk();
 
@@ -222,7 +224,8 @@ fn test_minivault_trigger_and_withdraw_on_regtest() -> Result<(), Box<dyn std::e
     // Combo (false, false): the lightest vault — a single-leaf taptree with only
     // the trigger clause — then the timelocked withdraw to the committed key.
     let amount = Amount::from_sat(20_000);
-    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+        .with_auto_mining();
     let mut report = Report::new();
     let wpk = withdrawal_pk();
 
@@ -275,7 +278,8 @@ fn test_minivault_revault_batch_on_regtest() -> Result<(), Box<dyn std::error::E
     // deducted output at index 1. Then withdraw the merged pot.
     let amount = Amount::from_sat(100_000);
     let revault_amount = Amount::from_sat(30_000);
-    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let mut manager = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest)
+        .with_auto_mining();
     let mut report = Report::new();
     let wpk = withdrawal_pk();
 

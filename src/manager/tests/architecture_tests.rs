@@ -104,13 +104,12 @@ fn late_registry_conflict_is_rejected_before_broadcast() {
 
 #[test]
 fn execution_and_observation_record_the_same_joined_batch() {
-    let (rpc, server) = broadcast_rpc();
-    let mut actor = ContractManager::new(rpc, bitcoin::Network::Regtest);
+    let mut actor = chain_manager();
     let (actor_defining, actor_joining) = join_fixture();
     let actor_children = actor
         .spend_batch(&[spend(&actor_joining), spend(&actor_defining)])
         .unwrap();
-    let tx = server.join().unwrap();
+    let tx = recorded_tx(&actor_joining);
     let mut observer = offline_manager();
     let (observer_defining, observer_joining) = join_fixture();
     let observer_children = observer

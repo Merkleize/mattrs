@@ -16,14 +16,17 @@ pub(crate) use fake::fund_fake;
 
 /// A manager on its own fresh in-memory [`LocalChain`](crate::chain::LocalChain)
 /// (regtest addresses): `contract.fund(&mut manager, ..)`, `exec`, `track`
-/// and `mine_blocks` all work on it with no node. To put several parties on
-/// one chain, share a `LocalChain` between managers with
-/// [`ContractManager::on`] instead.
+/// and `mine_blocks` all work on it with no node. It mines a block after
+/// each transaction it sends ([`ContractManager::with_auto_mining`]), since
+/// a funding or a spend is recorded only once confirmed and nobody else
+/// mines here. To put several parties on one chain, share a `LocalChain`
+/// between managers with [`ContractManager::on`] instead.
 pub fn local_manager() -> ContractManager {
     ContractManager::on(
         Rc::new(crate::chain::LocalChain::new()),
         bitcoin::Network::Regtest,
     )
+    .with_auto_mining()
 }
 
 /// Build the batch transaction for `builders` and decode it against each of

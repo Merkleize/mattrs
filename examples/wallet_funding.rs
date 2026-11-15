@@ -19,7 +19,8 @@ use vault::{Vault, VaultParams};
 /// Shared with the live integration test so the documented workflow is tested.
 pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     let wallet = regtest_rpc_client("testwallet")?;
-    let mut manager = ContractManager::new(regtest_rpc_client("testwallet")?, Network::Regtest);
+    let mut manager = ContractManager::new(regtest_rpc_client("testwallet")?, Network::Regtest)
+        .with_auto_mining();
     if wallet.get_blockchain_info()?.chain != Network::Regtest {
         return Err("this example must only run on regtest".into());
     }
@@ -36,7 +37,8 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     manager.mine_blocks(1)?;
 
     // A separate observer knows the contracts, but not the actor's wallet coins.
-    let mut observer = ContractManager::new(regtest_rpc_client("testwallet")?, Network::Regtest);
+    let mut observer = ContractManager::new(regtest_rpc_client("testwallet")?, Network::Regtest)
+        .with_auto_mining();
     let vault = Vault::new(params)?;
     let observed_first: InstanceHandle = vault.track(&mut observer, first.outpoint())?.into();
     let observed_second: InstanceHandle = vault.track(&mut observer, second.outpoint())?.into();

@@ -181,8 +181,9 @@ else can be written.
 The manager keeps preparation, signing, constraint validation, chain I/O, and
 lifecycle updates in separate internal components while preserving the public
 API. Ordinary execution and strict batch observation share validated, staged
-child/link updates: execution checks them before broadcast and commits only
-after broadcast succeeds. See the [manager architecture guide](../src/manager/README.md)
+child/link updates: execution checks them before broadcast, and commits them
+only once a spend of the same inputs is confirmed (through the same path as an
+observation). See the [manager architecture guide](../src/manager/README.md)
 for component boundaries and failure semantics.
 
 `manager.observe_batch(&[&first, &second], &tx)?` checks all supplied input
