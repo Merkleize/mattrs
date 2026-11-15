@@ -138,6 +138,36 @@ impl ContractManager {
         self.observe_spend(handle, &spending_tx)
     }
 
+    /// A single, non-blocking look for a transaction spending `outpoint`
+    /// with the manager's confirmations. An unanswered look is remembered, so
+    /// that what the chain backend keeps for it can be released if the look
+    /// is never repeated (see [`stop_watching`](Self::stop_watching) and
+    /// [`set_confirmations`](Self::set_confirmations)).
+    pub(crate) fn find_spending_tx(
+        &self,
+        outpoint: OutPoint,
+    ) -> Result<Option<Transaction>, ManagerError> {
+        let found = self
+            .chain()?
+            .find_spending_tx(outpoint, self.confirmations)?;
+        match found {
+            // The backend is done with a lookup that found its spend.
+            Some(_) => self.watched.borrow_mut().remove(&outpoint),
+            None => self.watched.borrow_mut().insert(outpoint),
+        };
+        Ok(found)
+    }
+
+    /// Give up looking for a spend of `outpoint`: let the chain backend drop
+    /// what it kept for the search.
+    pub(crate) fn stop_watching(&self, outpoint: OutPoint) {
+        if self.watched.borrow_mut().remove(&outpoint)
+            && let Some(chain) = &self.chain
+        {
+            chain.stop_watching(outpoint, self.confirmations);
+        }
+    }
+
     /// Poll (within `window`; `None` = forever) until the chain reports a
     /// transaction spending `outpoint` with the manager's confirmations.
     pub(super) fn wait_for_spending_tx(
@@ -145,13 +175,9 @@ impl ContractManager {
         outpoint: OutPoint,
         window: Option<Duration>,
     ) -> Result<Transaction, ManagerError> {
-        let chain = self.chain()?;
-        let found = poll_until(window, || {
-            chain.find_spending_tx(outpoint, self.confirmations)
-        });
+        let found = poll_until(window, || self.find_spending_tx(outpoint));
         if !matches!(found, Ok(Some(_))) {
-            // Giving up: let the backend drop what it kept for this search.
-            chain.stop_watching(outpoint);
+            self.stop_watching(outpoint);
         }
         found?.ok_or(ManagerError::SpendNotFound(outpoint))
     }

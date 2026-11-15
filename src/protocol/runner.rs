@@ -358,7 +358,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
         let outpoint = current.outpoint();
         let chain = self.chain()?;
 
-        if let Some(tx) = chain.find_spending_tx(outpoint, self.manager.confirmations())? {
+        if let Some(tx) = self.manager.find_spending_tx(outpoint)? {
             let children = self.manager.observe_spend(&current, &tx)?;
             return self.follow_spend(children, current, parent);
         }

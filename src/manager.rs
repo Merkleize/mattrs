@@ -84,6 +84,11 @@ pub struct ContractManager {
     /// Whether to mine a block after each transaction this manager broadcasts.
     auto_mine: bool,
 
+    /// The outpoints this manager is looking for a spend of, at its current
+    /// `confirmations`: the lookups the chain backend may be keeping state
+    /// for, to release when they are abandoned.
+    watched: RefCell<std::collections::BTreeSet<bitcoin::OutPoint>>,
+
     /// The snapshot shared with the inspector server, if enabled.
     #[cfg(feature = "inspector")]
     inspector_state: Option<std::sync::Arc<std::sync::Mutex<crate::inspector::ManagerSnapshot>>>,
@@ -127,6 +132,7 @@ impl ContractManager {
             signers: Default::default(),
             confirmations: 1,
             auto_mine: false,
+            watched: Default::default(),
             #[cfg(feature = "inspector")]
             inspector_state: None,
             #[cfg(feature = "inspector")]
@@ -174,15 +180,28 @@ impl ContractManager {
     /// [`observe_spend`](Self::observe_spend) /
     /// [`observe_batch`](Self::observe_batch) records the transaction it is
     /// handed, whatever its confirmation status.
+    ///
+    /// Changing the depth while waiting for a spend is fine: the wait goes on
+    /// at the new depth.
     pub fn set_confirmations(&mut self, confirmations: u32) -> &mut Self {
-        self.confirmations = confirmations;
+        if confirmations != self.confirmations {
+            // The lookups in progress were at the old depth: nobody will
+            // continue them, so the backend should not keep their state.
+            let abandoned = std::mem::take(&mut *self.watched.borrow_mut());
+            if let Some(chain) = &self.chain {
+                for outpoint in abandoned {
+                    chain.stop_watching(outpoint, self.confirmations);
+                }
+            }
+            self.confirmations = confirmations;
+        }
         self
     }
 
     /// [`set_confirmations`](Self::set_confirmations), for construction
     /// chains.
     pub fn with_confirmations(mut self, confirmations: u32) -> Self {
-        self.confirmations = confirmations;
+        self.set_confirmations(confirmations);
         self
     }
 

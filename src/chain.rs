@@ -113,12 +113,14 @@ pub trait ChainView {
         self.find_spending_tx(outpoint, 0)
     }
 
-    /// Nobody is looking for a spend of `outpoint` any more (the caller gave
-    /// up waiting): release whatever [`find_spending_tx`](Self::find_spending_tx)
-    /// kept between calls for it. Looking again later is fine; it starts over.
+    /// Nobody is looking for a spend of `outpoint` with `min_confirmations`
+    /// any more (the caller gave up waiting, or now waits for another depth):
+    /// release whatever [`find_spending_tx`](Self::find_spending_tx) kept
+    /// between calls for that lookup. Lookups of the same outpoint at other
+    /// depths are not affected. Looking again later is fine; it starts over.
     /// The default does nothing, for backends that keep no such state.
-    fn stop_watching(&self, outpoint: OutPoint) {
-        let _ = outpoint;
+    fn stop_watching(&self, outpoint: OutPoint, min_confirmations: u32) {
+        let _ = (outpoint, min_confirmations);
     }
 
     /// The transaction `txid`, if this chain knows it (mempool or block).

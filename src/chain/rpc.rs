@@ -54,18 +54,12 @@ impl ScanState {
         }
     }
 
-    /// The scan for a spend of `outpoint` at this depth found it: drop its
-    /// cursor. A cursor left behind would pin the eviction floor at its
-    /// height and retain every block fetched afterwards.
-    fn found(&mut self, outpoint: OutPoint, min_confirmations: u32) {
+    /// The scan for a spend of `outpoint` at this depth is over (the spend
+    /// was found, or its caller stopped looking): drop its cursor. A cursor
+    /// left behind would pin the eviction floor at its height and retain
+    /// every block fetched afterwards.
+    fn release(&mut self, outpoint: OutPoint, min_confirmations: u32) {
         self.cursors.remove(&(outpoint, min_confirmations));
-        self.evict();
-    }
-
-    /// Nobody is looking for a spend of `outpoint` any more: drop its
-    /// cursors, at every depth.
-    fn forget(&mut self, outpoint: OutPoint) {
-        self.cursors.retain(|(watched, _), _| *watched != outpoint);
         self.evict();
     }
 }
@@ -103,7 +97,7 @@ impl ChainView for RpcChain {
         let found =
             find_spending_tx_once(&self.client, outpoint, min_confirmations, cursor, blocks)?;
         match found {
-            Some(_) => scan.found(outpoint, min_confirmations),
+            Some(_) => scan.release(outpoint, min_confirmations),
             None => scan.evict(),
         }
         Ok(found)
@@ -132,8 +126,8 @@ impl ChainView for RpcChain {
         found
     }
 
-    fn stop_watching(&self, outpoint: OutPoint) {
-        self.scan.borrow_mut().forget(outpoint);
+    fn stop_watching(&self, outpoint: OutPoint, min_confirmations: u32) {
+        self.scan.borrow_mut().release(outpoint, min_confirmations);
     }
 
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError> {
@@ -467,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn an_abandoned_wait_releases_its_cursors_and_blocks() {
+    fn an_abandoned_wait_releases_its_cursor_and_blocks() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let chain = RpcChain::new(
             Client::new("http://127.0.0.1:1", bitcoincore_rpc::Auth::None).expect("no I/O yet"),
@@ -475,20 +469,25 @@ mod tests {
         {
             let mut scan = chain.scan.borrow_mut();
             // The lagging outpoint is watched at two depths.
-            scan.cursors.insert((outpoint(1), 1), 11);
             scan.cursors.insert((outpoint(1), 6), 10);
+            scan.cursors.insert((outpoint(1), 1), 11);
             scan.cursors.insert((outpoint(2), 1), 12);
             for height in 10..=14 {
                 scan.blocks.insert(height, block.clone());
             }
         }
 
-        // The caller waiting on the lagging outpoint gives up.
-        chain.stop_watching(outpoint(1));
-        let scan = chain.scan.borrow();
-        assert_eq!(scan.cursors.len(), 1);
-        assert!(scan.cursors.contains_key(&(outpoint(2), 1)));
-        assert_eq!(scan.blocks.len(), 3);
+        // The caller waiting for six confirmations gives up (or now waits
+        // for another depth): only that watch goes.
+        chain.stop_watching(outpoint(1), 6);
+        {
+            let scan = chain.scan.borrow();
+            assert_eq!(scan.cursors.len(), 2);
+            assert!(scan.cursors.contains_key(&(outpoint(1), 1)));
+            assert_eq!(scan.blocks.len(), 4);
+        }
+        chain.stop_watching(outpoint(1), 1);
+        assert_eq!(chain.scan.borrow().blocks.len(), 3);
     }
 
     #[test]
@@ -507,12 +506,12 @@ mod tests {
 
         // The lagging outpoint's spend is found: its cursor must not keep
         // pinning the blocks only it still needed.
-        scan.found(outpoint(1), 1);
+        scan.release(outpoint(1), 1);
         assert!(!scan.cursors.contains_key(&(outpoint(1), 1)));
         assert_eq!(scan.blocks.len(), 3);
 
         // Nothing left to watch: nothing left to cache.
-        scan.found(outpoint(2), 1);
+        scan.release(outpoint(2), 1);
         assert!(scan.cursors.is_empty());
         assert_eq!(scan.blocks.len(), 0);
     }
@@ -525,7 +524,7 @@ mod tests {
 
         // The shallow scan finding the spend leaves the deep one in place,
         // still short of the blocks that are not final for it.
-        scan.found(outpoint(1), 1);
+        scan.release(outpoint(1), 1);
         assert_eq!(scan.cursors.get(&(outpoint(1), 6)), Some(&96));
     }
 }

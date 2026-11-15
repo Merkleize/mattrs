@@ -203,6 +203,90 @@ fn timeout_does_not_fire_over_a_spend_awaiting_confirmations() {
     assert!(matches!(watcher.step().unwrap(), Progress::Done(out) if out == vec!["bob moved"]));
 }
 
+/// A `LocalChain` that records which spend lookups it was told to release.
+#[derive(Default)]
+struct RecordingChain {
+    inner: LocalChain,
+    released: std::cell::RefCell<Vec<(bitcoin::OutPoint, u32)>>,
+}
+
+impl mattrs::chain::ChainView for RecordingChain {
+    fn broadcast(&self, tx: &bitcoin::Transaction) -> Result<(), mattrs::chain::ChainError> {
+        self.inner.broadcast(tx)
+    }
+    fn find_spending_tx(
+        &self,
+        outpoint: bitcoin::OutPoint,
+        min_confirmations: u32,
+    ) -> Result<Option<bitcoin::Transaction>, mattrs::chain::ChainError> {
+        self.inner.find_spending_tx(outpoint, min_confirmations)
+    }
+    fn stop_watching(&self, outpoint: bitcoin::OutPoint, min_confirmations: u32) {
+        self.released
+            .borrow_mut()
+            .push((outpoint, min_confirmations));
+    }
+    fn transaction(
+        &self,
+        txid: bitcoin::Txid,
+    ) -> Result<Option<bitcoin::Transaction>, mattrs::chain::ChainError> {
+        self.inner.transaction(txid)
+    }
+    fn height(&self) -> Result<u32, mattrs::chain::ChainError> {
+        self.inner.height()
+    }
+    fn confirmation_height(
+        &self,
+        txid: bitcoin::Txid,
+    ) -> Result<Option<u32>, mattrs::chain::ChainError> {
+        self.inner.confirmation_height(txid)
+    }
+    fn fund_output(
+        &self,
+        script_pubkey: &bitcoin::Script,
+        amount: Amount,
+    ) -> Result<bitcoin::Transaction, mattrs::chain::ChainError> {
+        self.inner.fund_output(script_pubkey, amount)
+    }
+}
+
+/// Changing the confirmation depth while a runner waits abandons its lookup
+/// at the old depth: the chain backend is told, so it keeps nothing for it.
+#[test]
+fn changing_the_depth_releases_the_lookups_at_the_old_one() {
+    let chain = Rc::new(RecordingChain::default());
+    let c_a = alice_move_commitment(0, &[7u8; 32]);
+    let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
+    let mut manager =
+        mattrs::manager::ContractManager::on(chain.clone(), bitcoin::Network::Regtest);
+    let entry: InstanceHandle = RpsGameS0::new(params(c_a))
+        .unwrap()
+        .fund(&mut manager, pot)
+        .unwrap()
+        .into();
+    let outpoint = entry.outpoint();
+
+    let role: Role<(), ()> = Role::new().watch::<RpsGameS0>();
+    let mut runner = Runner::new(manager, role, (), entry);
+    assert!(matches!(runner.step().unwrap(), Progress::Waiting));
+    assert!(chain.released.borrow().is_empty());
+
+    runner.manager_mut().set_confirmations(3);
+    assert_eq!(*chain.released.borrow(), [(outpoint, 1)]);
+    // Nothing is being looked for at the new depth yet, and setting the same
+    // depth again abandons nothing.
+    runner.manager_mut().set_confirmations(3);
+    runner.manager_mut().set_confirmations(1);
+    assert_eq!(*chain.released.borrow(), [(outpoint, 1)]);
+
+    assert!(matches!(runner.step().unwrap(), Progress::Waiting));
+    runner.manager_mut().set_confirmations(6);
+    assert_eq!(*chain.released.borrow(), [(outpoint, 1), (outpoint, 1)]);
+    assert!(matches!(runner.step().unwrap(), Progress::Waiting));
+    runner.manager_mut().set_confirmations(1);
+    assert_eq!(chain.released.borrow().last(), Some(&(outpoint, 6)));
+}
+
 #[test]
 fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     let c_a = alice_move_commitment(0, &[7u8; 32]);
