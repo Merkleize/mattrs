@@ -261,6 +261,36 @@ fn a_dropped_spend_is_sent_again() {
     );
 }
 
+/// A final spend earns its outcome only if it is the very transaction that
+/// settled. One with the same txid and another witness (another clause, or
+/// other arguments: the txid covers neither) is followed like anyone's.
+#[test]
+fn a_final_outcome_is_not_claimed_for_another_witness() {
+    let chain = Rc::new(LocalChain::new());
+    let (ours, entry, _rival, _) = contested_game(&chain);
+    let outpoint = entry.outpoint();
+
+    let mut runner = Runner::new(ours, final_move_role(), (), entry);
+    assert!(matches!(runner.step().unwrap(), Progress::Advanced));
+    let sent = chain.find_unsettled_spend(outpoint).unwrap().unwrap();
+
+    // The same transaction body confirms with a different witness.
+    let mut other = sent.clone();
+    // (Bob's move, then his signature: change the signature.)
+    let mut witness = other.input[0].witness.to_vec();
+    witness[1] = vec![9; 64];
+    other.input[0].witness = bitcoin::Witness::from_slice(&witness);
+    assert_eq!(other.compute_txid(), sent.compute_txid());
+    assert!(chain.evict(sent.compute_txid()));
+    chain.broadcast(&other).unwrap();
+    chain.mine(1);
+
+    assert!(matches!(runner.step().unwrap(), Progress::Advanced));
+    assert!(
+        matches!(runner.step().unwrap(), Progress::Done(out) if out == vec!["another move settled"])
+    );
+}
+
 /// A refused broadcast with no other spend around is a real failure.
 #[test]
 fn a_refused_spend_with_no_rival_fails_the_runner() {

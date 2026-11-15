@@ -391,7 +391,7 @@ impl ContractManager {
         // is enough to rule our transaction out.
         let settled = self.wait_for_any_spending_tx(&pending.inputs, window)?;
         let txid = settled.compute_txid();
-        if txid == pending.txid() {
+        if pending.is(&settled) {
             return self.observe_batch(&pending.inputs.iter().collect::<Vec<_>>(), &settled);
         }
         // Another transaction got there first. It is what happened, so it is
@@ -439,6 +439,15 @@ impl PendingSpend {
         self.tx.compute_txid()
     }
 
+    /// Whether `tx` is this very transaction, witnesses included. The txid
+    /// alone does not say: it does not cover the witness, so a transaction
+    /// spending the same instances through another clause, or with other
+    /// arguments, has the same txid whenever its inputs, outputs and
+    /// sequences agree.
+    pub fn is(&self, tx: &Transaction) -> bool {
+        tx.compute_wtxid() == self.tx.compute_wtxid()
+    }
+
     /// The instances this transaction spends, in the order of the builders
     /// it was made from.
     pub fn inputs(&self) -> &[InstanceHandle] {
@@ -456,7 +465,9 @@ impl PendingSpend {
     /// each of these instances it spends) and the error is
     /// [`ManagerError::SpentByAnother`], naming the first of them. The
     /// handles then show what actually happened; an instance the other
-    /// transaction left alone is still unspent.
+    /// transaction left alone is still unspent. "Different" includes a
+    /// transaction with our txid but another witness (see [`is`](Self::is)):
+    /// it may have spent through another clause.
     pub fn settle(&self, manager: &mut ContractManager) -> Result<Children, ManagerError> {
         manager.settle(self, None)
     }

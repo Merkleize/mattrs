@@ -196,3 +196,35 @@ fn a_rival_batch_is_recorded_with_its_join_links() {
     assert_eq!(joining.outputs().into_vec(), child);
     assert_eq!(manager.instances.len(), 1);
 }
+
+/// A txid does not cover the witness. A confirmed transaction with our txid
+/// but another witness is not ours: it is recorded as it is, and settling
+/// says so.
+#[test]
+fn a_spend_with_our_txid_and_another_witness_is_not_ours() {
+    let mut manager = chain_manager();
+    let chain = manager.chain().unwrap().clone();
+    let (handle, builder, _) = signed_spend_fixture(true);
+    let pending = manager
+        .broadcast_batch_with(&[builder], |_| Ok::<_, ManagerError>(()))
+        .unwrap();
+
+    // The same transaction body, spent with a different signature argument.
+    let mut rival = pending.transaction().clone();
+    let mut witness = rival.input[0].witness.to_vec();
+    witness[0] = vec![9; 64];
+    rival.input[0].witness = bitcoin::Witness::from_slice(&witness);
+    assert_eq!(rival.compute_txid(), pending.txid());
+    assert!(!pending.is(&rival));
+    assert!(pending.is(pending.transaction()));
+    chain.broadcast(&rival).unwrap();
+    chain.mine_blocks(1).unwrap();
+
+    assert!(matches!(
+        pending.settle(&mut manager),
+        Err(ManagerError::SpentByAnother { txid, .. }) if txid == pending.txid()
+    ));
+    // What is recorded is the witness that confirmed, not the one we signed.
+    assert_eq!(handle.spend_record().unwrap().args()[0], vec![9; 64]);
+    assert_eq!(handle.outputs().len(), 1);
+}

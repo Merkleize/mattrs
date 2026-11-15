@@ -49,7 +49,8 @@ pub enum ManagerError {
     SpendNotFound(OutPoint),
     /// The instance at `outpoint` was spent by a transaction other than the
     /// one this manager broadcast for it. That transaction, `txid`, is the
-    /// one recorded.
+    /// one recorded. The txid can be our transaction's own, when the two
+    /// differ only in their witnesses (another clause, or other arguments).
     SpentByAnother { outpoint: OutPoint, txid: Txid },
     /// The transaction funding the instance at `outpoint` does not have the
     /// manager's confirmations yet (`confirmations` out of `required`).

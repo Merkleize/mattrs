@@ -421,9 +421,7 @@ impl<D: 'static, O: 'static> Runner<D, O> {
             let children = self.manager.observe_spend(&current, &tx)?;
             return match outcome {
                 // Our final spend settled: this is the outcome it earns.
-                Some(outcome) if tx.compute_txid() == pending.txid() => {
-                    Ok(TokenStep::Resolved(Some(outcome)))
-                }
+                Some(outcome) if pending.is(&tx) => Ok(TokenStep::Resolved(Some(outcome))),
                 // Our spend to follow, or somebody else's: either way, the
                 // token moves along what settled.
                 _ => self.follow_spend(children, current, parent),
