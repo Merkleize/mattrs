@@ -162,6 +162,47 @@ fn action_cannot_spend_a_different_token() {
     );
 }
 
+/// A counterparty spend that is out but not confirmed deeply enough is not a
+/// missed deadline: the fallback waits, and the spend is followed once it has
+/// the confirmations.
+#[test]
+fn timeout_does_not_fire_over_a_spend_awaiting_confirmations() {
+    let chain = Rc::new(LocalChain::new());
+    let c_a = alice_move_commitment(0, &[7u8; 32]);
+    let pot = Amount::from_sat((2 * DEFAULT_STAKE) as u64);
+    let game = RpsGameS0::new(params(c_a)).unwrap();
+
+    let mut watcher_manager =
+        mattrs::manager::ContractManager::on(chain.clone(), bitcoin::Network::Regtest)
+            .with_confirmations(2);
+    let mut bob_manager =
+        mattrs::manager::ContractManager::on(chain.clone(), bitcoin::Network::Regtest)
+            .with_signer(HotSigner::new(bob_xpriv()));
+    let watched: InstanceHandle = game.fund(&mut watcher_manager, pot).unwrap().into();
+    let bob_entry = game.track(&mut bob_manager, watched.outpoint()).unwrap();
+    chain.mine(1);
+
+    let role: Role<(), &str> = Role::new()
+        .on::<RpsGameS0, _>(|_d, _h, _cx| {
+            Ok(Action::wait_or_after(3, TimeoutAction::Finish("timed out")))
+        })
+        .on::<RpsGameS1, _>(|_d, _h, _cx| Ok(Action::Finish("bob moved")));
+    let mut watcher = Runner::new(watcher_manager, role, (), watched);
+    assert!(matches!(watcher.step().unwrap(), Progress::Waiting));
+
+    // The game confirmed at height 1, so the deadline is height 3. Bob moves
+    // just as it passes: his spend is only in the mempool.
+    chain.mine(2);
+    bob_entry.bob_move(1).exec(&mut bob_manager).unwrap();
+    assert!(matches!(watcher.step().unwrap(), Progress::Waiting));
+    // One confirmation is still one short of the watcher's two.
+    chain.mine(1);
+    assert!(matches!(watcher.step().unwrap(), Progress::Waiting));
+    chain.mine(1);
+    assert!(matches!(watcher.step().unwrap(), Progress::Advanced));
+    assert!(matches!(watcher.step().unwrap(), Progress::Done(out) if out == vec!["bob moved"]));
+}
+
 #[test]
 fn zero_timeout_is_rejected_and_confirmation_moves_reset_the_deadline() {
     let c_a = alice_move_commitment(0, &[7u8; 32]);

@@ -99,6 +99,20 @@ pub trait ChainView {
         min_confirmations: u32,
     ) -> Result<Option<Transaction>, ChainError>;
 
+    /// A single, non-blocking look for *any* transaction spending `outpoint`,
+    /// however shallow: in the mempool, or in a block at any depth. This is
+    /// for telling "not spent" apart from "spent, but not confirmed deeply
+    /// enough yet", and must leave later
+    /// [`find_spending_tx`](Self::find_spending_tx) calls unaffected: a
+    /// backend that remembers how far it has looked does not count this look.
+    ///
+    /// The default asks [`find_spending_tx`](Self::find_spending_tx) for
+    /// zero confirmations, which is right for a backend keeping no such
+    /// state.
+    fn find_unsettled_spend(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+        self.find_spending_tx(outpoint, 0)
+    }
+
     /// Nobody is looking for a spend of `outpoint` any more (the caller gave
     /// up waiting): release whatever [`find_spending_tx`](Self::find_spending_tx)
     /// kept between calls for it. Looking again later is fine; it starts over.

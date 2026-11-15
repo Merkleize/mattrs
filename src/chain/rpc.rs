@@ -92,6 +92,18 @@ impl ChainView for RpcChain {
         Ok(found)
     }
 
+    /// The mempool, then every block the confirmed scan has not passed yet,
+    /// up to the tip. The scan's cursor is read, not moved: blocks still too
+    /// shallow to count stay ahead of it.
+    fn find_unsettled_spend(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+        let mut scan = self.scan.borrow_mut();
+        let mut cursor = match scan.cursors.get(&outpoint) {
+            Some(cursor) => *cursor,
+            None => spend_scan_start(&self.client, outpoint)?,
+        };
+        find_spending_tx_once(&self.client, outpoint, 0, &mut cursor, &mut scan.blocks)
+    }
+
     fn stop_watching(&self, outpoint: OutPoint) {
         self.scan.borrow_mut().settle(outpoint, true);
     }

@@ -78,7 +78,8 @@ enum TokenStep<O> {
 /// [`confirmations`](ContractManager::confirmations) (one by default), so
 /// somebody has to mine: on regtest and test chains, see
 /// [`ContractManager::with_auto_mining`]. A spend the runner sends itself
-/// moves its token at once.
+/// moves its token at once. A timeout fallback is held back while a spend of
+/// the waited-on instance is known but not confirmed that deeply yet.
 ///
 /// The runner starts with a single token (the entry instance). A spend forking
 /// into several handled children splits the token, and each child is followed
@@ -371,8 +372,13 @@ impl<D: 'static, O: 'static> Runner<D, O> {
                         .ok_or_else(|| ProtocolError::internal("timeout height overflow"))
                 })
                 .transpose()?;
+            // A spend that is out but not confirmed deeply enough yet is not
+            // an absent one: the counterparty moved, so keep waiting for it
+            // rather than time out (a fallback spend would conflict with it,
+            // and a fallback outcome would be wrong).
             if let Some(deadline) = deadline
                 && chain.height()? >= deadline
+                && chain.find_unsettled_spend(outpoint)?.is_none()
             {
                 let t = timeout.expect("checked above");
                 return self.execute_action(t.on_timeout.into(), current, parent);
