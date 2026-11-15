@@ -162,3 +162,62 @@ fn test_observer_follows_batch_spend() -> Result<(), Box<dyn std::error::Error>>
 
     Ok(())
 }
+
+/// `RpcChain` tells a spend that is out, but not confirmed deeply enough,
+/// apart from no spend at all, and looking for the former does not make the
+/// confirmed lookup step over it.
+#[test]
+#[ignore = "requires a running regtest bitcoind"]
+fn test_rpc_chain_sees_a_shallow_spend_without_settling_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    use mattrs::chain::{ChainView, RpcChain};
+
+    const DEPTH: u32 = 3;
+
+    let mut actor = ContractManager::new(regtest_client("testwallet"), bitcoin::Network::Regtest);
+    let vault = Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })?
+    .fund(&mut actor, Amount::from_sat(1_000_000))?;
+    let outpoint = vault.outpoint();
+    actor.mine_blocks(1)?;
+
+    // A watcher's view of the chain, with its own scan state.
+    let chain = RpcChain::new(regtest_client("testwallet"));
+    assert!(chain.find_spending_tx(outpoint, DEPTH)?.is_none());
+    assert!(chain.find_unsettled_spend(outpoint)?.is_none());
+
+    let unvaulting: UnvaultingHandle = vault
+        .trigger([7; 32], 0)
+        .sign(HotSigner::new(alice_xpriv()))
+        .exec_one(&mut actor)?;
+    let spend = unvaulting.outpoint().txid;
+
+    // In the mempool: out, but not confirmed.
+    let seen = chain
+        .find_unsettled_spend(outpoint)?
+        .expect("a spend in the mempool");
+    assert_eq!(seen.compute_txid(), spend);
+    assert!(chain.find_spending_tx(outpoint, DEPTH)?.is_none());
+
+    // Mined, one block at a time, up to one confirmation short.
+    for _ in 1..DEPTH {
+        actor.mine_blocks(1)?;
+        let seen = chain
+            .find_unsettled_spend(outpoint)?
+            .expect("a shallow spend");
+        assert_eq!(seen.compute_txid(), spend);
+        assert!(chain.find_spending_tx(outpoint, DEPTH)?.is_none());
+    }
+
+    // The looks above did not move the confirmed scan past the spend's block.
+    actor.mine_blocks(1)?;
+    let found = chain
+        .find_spending_tx(outpoint, DEPTH)?
+        .expect("a confirmed spend");
+    assert_eq!(found.compute_txid(), spend);
+    Ok(())
+}
