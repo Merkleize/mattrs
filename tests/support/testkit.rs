@@ -97,7 +97,7 @@ where
 /// An RPC client for the local regtest node, used by the `#[ignore]`d e2e
 /// tests (see [`mattrs::manager::regtest_rpc_client`] for the auth rules).
 pub fn regtest_client(wallet_name: &str) -> Client {
-    mattrs::manager::regtest_rpc_client(wallet_name)
+    mattrs::manager::regtest_rpc_client(wallet_name).expect("an RPC client for the regtest node")
 }
 
 /// Convert an untyped handle into the typed handle `T`, panicking on a

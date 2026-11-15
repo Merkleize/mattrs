@@ -46,7 +46,6 @@ use std::str::FromStr;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
-use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{ProtocolError, Runner};
 use mattrs::signer::HotSigner;
@@ -73,11 +72,6 @@ fn urandom<const N: usize>() -> io::Result<[u8; N]> {
     let mut buf = [0u8; N];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
     Ok(buf)
-}
-
-/// RPC client for the local regtest node (see `mattrs::manager::regtest_rpc_client`).
-fn rpc_client(wallet_name: &str) -> Client {
-    mattrs::manager::regtest_rpc_client(wallet_name)
 }
 
 fn xonly(xpriv: &Xpriv) -> XOnlyPublicKey {
@@ -157,7 +151,7 @@ fn run_alice(m_a: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppR
     };
 
     // Fund the game with both stakes and tell Bob where it lives.
-    let client = rpc_client(wallet);
+    let client = mattrs::manager::regtest_rpc_client(wallet)?;
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector)?;
     let s0 =
@@ -229,7 +223,7 @@ fn run_bob(m_b: i64, addr: &str, wallet: &str, inspector: Option<u16>) -> AppRes
         )?,
         vout: u32_field(&msg, "vout")?,
     };
-    let client = rpc_client(wallet);
+    let client = mattrs::manager::regtest_rpc_client(wallet)?;
     let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
     maybe_enable_inspector(&mut manager, inspector)?;
     let entry = RpsGameS0::new(params)?.track(&mut manager, outpoint)?;

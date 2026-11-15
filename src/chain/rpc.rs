@@ -261,11 +261,12 @@ fn find_spending_tx_once(
 ///   `~/.bitcoin/regtest/.cookie`) — a stock regtest `bitcoind` works with no
 ///   configuration at all.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the client cannot be created — in practice, when the cookie file
+/// Fails if the client cannot be created — in practice, when the cookie file
 /// is missing because no node is running (or it keeps its data elsewhere).
-pub fn regtest_rpc_client(wallet_name: &str) -> Client {
+/// The error names the URL and the credentials that were tried.
+pub fn regtest_rpc_client(wallet_name: &str) -> Result<Client, ChainError> {
     let rpc_url =
         std::env::var("BITCOIN_RPC_URL").unwrap_or_else(|_| "http://localhost:18443".to_string());
     let rpc_url_full = format!("{}/wallet/{}", rpc_url, wallet_name);
@@ -281,10 +282,17 @@ pub fn regtest_rpc_client(wallet_name: &str) -> Client {
         _ => {
             let cookie = std::env::var("BITCOIN_RPC_COOKIE")
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").expect("HOME not set");
-                    std::path::PathBuf::from(home).join(".bitcoin/regtest/.cookie")
-                });
+                .or_else(|_| {
+                    std::env::var("HOME")
+                        .map(|home| std::path::PathBuf::from(home).join(".bitcoin/regtest/.cookie"))
+                        .map_err(|_| {
+                            ChainError::Other(
+                                "cannot locate the node's cookie file: HOME is not set; set \
+                                 BITCOIN_RPC_COOKIE, or BITCOIN_RPC_USER and BITCOIN_RPC_PASSWORD"
+                                    .into(),
+                            )
+                        })
+                })?;
             let hint = format!(
                 "the cookie file {}; is the regtest node running? Otherwise set \
                  BITCOIN_RPC_COOKIE, or BITCOIN_RPC_USER and BITCOIN_RPC_PASSWORD",
@@ -294,8 +302,10 @@ pub fn regtest_rpc_client(wallet_name: &str) -> Client {
         }
     };
 
-    Client::new(&rpc_url_full, auth).unwrap_or_else(|e| {
-        panic!("cannot create an RPC client for {rpc_url_full} with {auth_hint}: {e}")
+    Client::new(&rpc_url_full, auth).map_err(|e| {
+        ChainError::Other(format!(
+            "cannot create an RPC client for {rpc_url_full} with {auth_hint}: {e}"
+        ))
     })
 }
 
