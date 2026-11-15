@@ -240,7 +240,7 @@ fn raw_state_commitments_validate_on_regtest() -> Result<(), Box<dyn std::error:
         ))),
     )?);
     let mut manager = ContractManager::new(
-        mattrs::manager::regtest_rpc_client("testwallet"),
+        mattrs::manager::regtest_rpc_client("testwallet")?,
         Network::Regtest,
     );
     for len in [0, 1, 31, 32, 33] {

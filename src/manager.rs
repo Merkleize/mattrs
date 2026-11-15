@@ -14,6 +14,9 @@
 //! [`ContractManager::observe_spend`]) detects its spend, decodes the witness
 //! back into the clause and its arguments, and materializes the child instances
 //! — so both parties of a protocol hold the same view of the contract's state.
+//! A spend found on the chain is recorded once it has the manager's
+//! [`confirmations`](ContractManager::confirmations) (one by default) and is
+//! never revisited: reorganizations deeper than that are not handled.
 //!
 //! The public facade composes RPC-free preparation/signing, shared constraint
 //! validation, and staged lifecycle updates. Ordinary execution validates and
@@ -74,6 +77,18 @@ pub struct ContractManager {
     /// This party's standing signers, by the key they sign for.
     signers: signing::Signers,
 
+    /// How many confirmations a spend found on the chain needs before it is
+    /// recorded.
+    confirmations: u32,
+
+    /// Whether to mine a block after each transaction this manager broadcasts.
+    auto_mine: bool,
+
+    /// The outpoints this manager is looking for a spend of, at its current
+    /// `confirmations`: the lookups the chain backend may be keeping state
+    /// for, to release when they are abandoned.
+    watched: RefCell<std::collections::BTreeSet<bitcoin::OutPoint>>,
+
     /// The snapshot shared with the inspector server, if enabled.
     #[cfg(feature = "inspector")]
     inspector_state: Option<std::sync::Arc<std::sync::Mutex<crate::inspector::ManagerSnapshot>>>,
@@ -115,6 +130,9 @@ impl ContractManager {
             network,
             instances: Vec::new(),
             signers: Default::default(),
+            confirmations: 1,
+            auto_mine: false,
+            watched: Default::default(),
             #[cfg(feature = "inspector")]
             inspector_state: None,
             #[cfg(feature = "inspector")]
@@ -136,6 +154,74 @@ impl ContractManager {
     /// `ContractManager::on(chain, network).with_signer(signer)`.
     pub fn with_signer(mut self, signer: impl crate::signer::Signer + 'static) -> Self {
         self.add_signer(signer);
+        self
+    }
+
+    /// How many confirmations a spend found on the chain needs before this
+    /// manager records it ([`wait_for_spend`](Self::wait_for_spend) and its
+    /// variants, and a protocol [`Runner`](crate::protocol::Runner) following
+    /// a counterparty). The default is 1: a spend counts once it is in a
+    /// block.
+    pub fn confirmations(&self) -> u32 {
+        self.confirmations
+    }
+
+    /// Set the [`confirmations`](Self::confirmations) a spend found on the
+    /// chain needs before it is recorded.
+    ///
+    /// A recorded spend is never revisited, so this is the manager's whole
+    /// answer to chain reorganizations: wait for a depth at which you take a
+    /// block as final. With 0, a spend is recorded as soon as it reaches the
+    /// node's mempool, where it can still be replaced or never confirm; that
+    /// is only suitable for tests and demos.
+    ///
+    /// Two things are not covered by this setting. A spend this manager
+    /// broadcasts itself is recorded at once, and an explicit
+    /// [`observe_spend`](Self::observe_spend) /
+    /// [`observe_batch`](Self::observe_batch) records the transaction it is
+    /// handed, whatever its confirmation status.
+    ///
+    /// Changing the depth while waiting for a spend is fine: the wait goes on
+    /// at the new depth.
+    pub fn set_confirmations(&mut self, confirmations: u32) -> &mut Self {
+        if confirmations != self.confirmations {
+            // The lookups in progress were at the old depth: nobody will
+            // continue them, so the backend should not keep their state.
+            let abandoned = std::mem::take(&mut *self.watched.borrow_mut());
+            if let Some(chain) = &self.chain {
+                for outpoint in abandoned {
+                    chain.stop_watching(outpoint, self.confirmations);
+                }
+            }
+            self.confirmations = confirmations;
+        }
+        self
+    }
+
+    /// [`set_confirmations`](Self::set_confirmations), for construction
+    /// chains.
+    pub fn with_confirmations(mut self, confirmations: u32) -> Self {
+        self.set_confirmations(confirmations);
+        self
+    }
+
+    /// Mine [`confirmations`](Self::confirmations) blocks (at least one)
+    /// after every transaction this manager broadcasts through its chain
+    /// backend, so the parties watching the chain see the spend without
+    /// anyone else mining. For regtest and test chains only: the backend must
+    /// support [`ChainView::mine_blocks`]. Off by default.
+    ///
+    /// A spend sent through [`spend_batch_with`](Self::spend_batch_with)'s
+    /// own broadcaster is not followed by a block.
+    pub fn set_auto_mining(&mut self, auto_mine: bool) -> &mut Self {
+        self.auto_mine = auto_mine;
+        self
+    }
+
+    /// [`set_auto_mining`](Self::set_auto_mining)`(true)`, for construction
+    /// chains.
+    pub fn with_auto_mining(mut self) -> Self {
+        self.auto_mine = true;
         self
     }
 
@@ -165,7 +251,14 @@ impl ContractManager {
 
     /// Broadcast through this manager's own chain backend.
     fn send_to_node(&self, tx: &Transaction) -> Result<(), ManagerError> {
-        Ok(self.chain()?.broadcast(tx)?)
+        let chain = self.chain()?;
+        chain.broadcast(tx)?;
+        if self.auto_mine {
+            // The transaction is out: a failure to mine must not be reported
+            // as a failed spend, which would leave it unrecorded.
+            let _ = chain.mine_blocks(self.confirmations.max(1));
+        }
+        Ok(())
     }
 
     /// Like [`spend_batch`](Self::spend_batch), but hands the signed

@@ -86,15 +86,41 @@ pub trait ChainView {
     fn broadcast(&self, tx: &Transaction) -> Result<(), ChainError>;
 
     /// A single, non-blocking look for a transaction spending `outpoint`
-    /// (mempool or block), if one exists.
-    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError>;
+    /// that has at least `min_confirmations` confirmations (1 = in the tip
+    /// block or deeper). With `min_confirmations == 0`, a spend still in the
+    /// mempool counts too.
+    ///
+    /// A spend buried under `min_confirmations` blocks is taken as final:
+    /// nothing here follows a reorganization deeper than that, so choose the
+    /// depth accordingly.
+    fn find_spending_tx(
+        &self,
+        outpoint: OutPoint,
+        min_confirmations: u32,
+    ) -> Result<Option<Transaction>, ChainError>;
 
-    /// Nobody is looking for a spend of `outpoint` any more (the caller gave
-    /// up waiting): release whatever [`find_spending_tx`](Self::find_spending_tx)
-    /// kept between calls for it. Looking again later is fine; it starts over.
+    /// A single, non-blocking look for *any* transaction spending `outpoint`,
+    /// however shallow: in the mempool, or in a block at any depth. This is
+    /// for telling "not spent" apart from "spent, but not confirmed deeply
+    /// enough yet", and must leave later
+    /// [`find_spending_tx`](Self::find_spending_tx) calls unaffected: a
+    /// backend that remembers how far it has looked does not count this look.
+    ///
+    /// The default asks [`find_spending_tx`](Self::find_spending_tx) for
+    /// zero confirmations, which is right for a backend keeping no such
+    /// state.
+    fn find_unsettled_spend(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+        self.find_spending_tx(outpoint, 0)
+    }
+
+    /// Nobody is looking for a spend of `outpoint` with `min_confirmations`
+    /// any more (the caller gave up waiting, or now waits for another depth):
+    /// release whatever [`find_spending_tx`](Self::find_spending_tx) kept
+    /// between calls for that lookup. Lookups of the same outpoint at other
+    /// depths are not affected. Looking again later is fine; it starts over.
     /// The default does nothing, for backends that keep no such state.
-    fn stop_watching(&self, outpoint: OutPoint) {
-        let _ = outpoint;
+    fn stop_watching(&self, outpoint: OutPoint, min_confirmations: u32) {
+        let _ = (outpoint, min_confirmations);
     }
 
     /// The transaction `txid`, if this chain knows it (mempool or block).
@@ -206,12 +232,21 @@ impl ChainView for LocalChain {
         Ok(())
     }
 
-    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+    fn find_spending_tx(
+        &self,
+        outpoint: OutPoint,
+        min_confirmations: u32,
+    ) -> Result<Option<Transaction>, ChainError> {
         let inner = self.inner.borrow();
-        Ok(inner
-            .spends
-            .get(&outpoint)
-            .map(|txid| inner.txs[txid].clone()))
+        let Some(txid) = inner.spends.get(&outpoint) else {
+            return Ok(None);
+        };
+        let confirmations = match inner.confirmed.get(txid) {
+            // Confirmed at the tip is one confirmation.
+            Some(height) => (inner.height + 1).saturating_sub(*height),
+            None => 0,
+        };
+        Ok((confirmations >= min_confirmations).then(|| inner.txs[txid].clone()))
     }
 
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError> {
@@ -292,12 +327,13 @@ mod tests {
     fn broadcast_and_find_spend() {
         let chain = LocalChain::new();
         let op = outpoint(1);
-        assert!(chain.find_spending_tx(op).unwrap().is_none());
+        assert!(chain.find_spending_tx(op, 0).unwrap().is_none());
 
         let tx = tx_spending(op, 0);
         chain.broadcast(&tx).unwrap();
-        // Visible from the mempool, before any block.
-        assert_eq!(chain.find_spending_tx(op).unwrap(), Some(tx.clone()));
+        // Visible from the mempool, before any block, only when asked for.
+        assert_eq!(chain.find_spending_tx(op, 0).unwrap(), Some(tx.clone()));
+        assert!(chain.find_spending_tx(op, 1).unwrap().is_none());
         // Re-broadcasting the same tx is fine; a conflicting spend is not.
         chain.broadcast(&tx).unwrap();
         let conflict = tx_spending(op, 7);
@@ -316,7 +352,23 @@ mod tests {
         assert_eq!(chain.height().unwrap(), 3);
         assert_eq!(chain.confirmation_height(txid).unwrap(), Some(1));
         // Spends stay visible after confirmation.
-        assert!(chain.find_spending_tx(outpoint(2)).unwrap().is_some());
+        assert!(chain.find_spending_tx(outpoint(2), 0).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_spend_is_found_once_it_has_the_confirmations_asked_for() {
+        let chain = LocalChain::new();
+        let op = outpoint(3);
+        let tx = tx_spending(op, 0);
+        chain.broadcast(&tx).unwrap();
+
+        chain.mine(1);
+        assert_eq!(chain.find_spending_tx(op, 1).unwrap(), Some(tx.clone()));
+        assert!(chain.find_spending_tx(op, 3).unwrap().is_none());
+        chain.mine(1);
+        assert!(chain.find_spending_tx(op, 3).unwrap().is_none());
+        chain.mine(1);
+        assert_eq!(chain.find_spending_tx(op, 3).unwrap(), Some(tx));
     }
 
     #[test]

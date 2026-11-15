@@ -601,6 +601,54 @@ fn test_offline_manager_reports_node_operations() {
     ));
 }
 
+/// An observer waiting for several confirmations follows a spend only once
+/// it is that deep, and an auto-mining manager confirms its own spends.
+#[test]
+fn test_a_spend_is_followed_at_the_configured_depth() {
+    use mattrs::chain::{ChainView, LocalChain};
+    use mattrs::manager::ManagerError;
+    use mattrs::signer::HotSigner;
+    use std::rc::Rc;
+    use std::time::Duration;
+    use support::testkit::alice_xpriv;
+
+    let chain = Rc::new(LocalChain::new());
+    let mut actor =
+        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_auto_mining();
+    let mut observer =
+        ContractManager::on(chain.clone(), bitcoin::Network::Regtest).with_confirmations(3);
+    assert_eq!(actor.confirmations(), 1);
+
+    let vault = Vault::new(VaultParams {
+        alternate_pk: None,
+        spend_delay: 10,
+        recover_pk: bob_pk(),
+        unvault_pk: alice_pk(),
+    })
+    .unwrap();
+    let funded = vault.fund(&mut actor, Amount::from_sat(100_000)).unwrap();
+    let watched = Vault::track(&vault, &mut observer, funded.outpoint()).unwrap();
+
+    let children = funded
+        .trigger([9; 32], 0)
+        .sign(HotSigner::new(alice_xpriv()))
+        .exec(&mut actor)
+        .unwrap();
+    // The actor mined its spend into a block: one confirmation.
+    let spend = children[0].outpoint().txid;
+    assert_eq!(chain.confirmation_height(spend).unwrap(), Some(1));
+
+    for _ in 0..2 {
+        assert!(matches!(
+            observer.wait_for_spend_within(&watched, Some(Duration::ZERO)),
+            Err(ManagerError::SpendNotFound(_))
+        ));
+        chain.mine(1);
+    }
+    let seen = observer.wait_for_spend(&watched).unwrap();
+    assert_eq!(seen[0].outpoint(), children[0].outpoint());
+}
+
 /// The whole funded → spent lifecycle on the in-memory chain: one party funds
 /// and spends with the ordinary `fund` / `exec` API, another tracks the same
 /// outpoint and follows the spend, and both end with the same child.
@@ -636,6 +684,15 @@ fn test_fund_exec_and_follow_on_a_local_chain() {
         .unwrap();
     assert_eq!(children.len(), 1);
 
+    // The observer does not act on a spend that is only in the mempool...
+    assert!(matches!(
+        observer.wait_for_spend_within(&watched, Some(std::time::Duration::ZERO)),
+        Err(mattrs::manager::ManagerError::SpendNotFound(_))
+    ));
+    assert_eq!(watched.status(), mattrs::contracts::InstanceStatus::Funded);
+
+    // ...only on a confirmed one,
+    actor.mine_blocks(1).unwrap();
     let seen = observer.wait_for_spend(&watched).unwrap();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].outpoint(), children[0].outpoint());

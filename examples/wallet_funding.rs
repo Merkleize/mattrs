@@ -18,8 +18,8 @@ use vault::{Vault, VaultParams};
 
 /// Shared with the live integration test so the documented workflow is tested.
 pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
-    let wallet = regtest_rpc_client("testwallet");
-    let mut manager = ContractManager::new(regtest_rpc_client("testwallet"), Network::Regtest);
+    let wallet = regtest_rpc_client("testwallet")?;
+    let mut manager = ContractManager::new(regtest_rpc_client("testwallet")?, Network::Regtest);
     if wallet.get_blockchain_info()?.chain != Network::Regtest {
         return Err("this example must only run on regtest".into());
     }
@@ -36,7 +36,7 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     manager.mine_blocks(1)?;
 
     // A separate observer knows the contracts, but not the actor's wallet coins.
-    let mut observer = ContractManager::new(regtest_rpc_client("testwallet"), Network::Regtest);
+    let mut observer = ContractManager::new(regtest_rpc_client("testwallet")?, Network::Regtest);
     let vault = Vault::new(params)?;
     let observed_first: InstanceHandle = vault.track(&mut observer, first.outpoint())?.into();
     let observed_second: InstanceHandle = vault.track(&mut observer, second.outpoint())?.into();
@@ -136,6 +136,8 @@ pub fn run() -> Result<Txid, Box<dyn std::error::Error>> {
     }
     signed.validate_final(&final_tx)?;
     let txid = wallet.send_raw_transaction(&final_tx)?;
+    // The observer below only follows a confirmed spend.
+    manager.mine_blocks(1)?;
     let result = signed.observe_final(&mut manager, &final_tx)?;
     assert_eq!(result.children.len(), 1);
     assert_eq!(

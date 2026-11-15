@@ -47,11 +47,12 @@ pub fn bob_pk() -> XOnlyPublicKey {
 }
 
 /// A manager on `chain`, for tests driving protocols on a `LocalChain` shared
-/// between the parties.
+/// between the parties. It mines a block after each of its spends: the other
+/// party only sees a spend once it is confirmed, and nobody else mines here.
 pub fn manager_on(
     chain: std::rc::Rc<mattrs::chain::LocalChain>,
 ) -> mattrs::manager::ContractManager {
-    mattrs::manager::ContractManager::on(chain, bitcoin::Network::Regtest)
+    mattrs::manager::ContractManager::on(chain, bitcoin::Network::Regtest).with_auto_mining()
 }
 
 /// Interleave two parties' runners — one step each per round — until both
@@ -97,7 +98,7 @@ where
 /// An RPC client for the local regtest node, used by the `#[ignore]`d e2e
 /// tests (see [`mattrs::manager::regtest_rpc_client`] for the auth rules).
 pub fn regtest_client(wallet_name: &str) -> Client {
-    mattrs::manager::regtest_rpc_client(wallet_name)
+    mattrs::manager::regtest_rpc_client(wallet_name).expect("an RPC client for the regtest node")
 }
 
 /// Convert an untyped handle into the typed handle `T`, panicking on a

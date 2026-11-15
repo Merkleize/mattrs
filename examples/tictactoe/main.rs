@@ -38,7 +38,6 @@ use std::str::FromStr;
 use bitcoin::bip32::Xpriv;
 use bitcoin::key::Secp256k1;
 use bitcoin::{Amount, OutPoint, Txid, XOnlyPublicKey};
-use bitcoincore_rpc::Client;
 use mattrs::manager::ContractManager;
 use mattrs::protocol::{ProtocolError, Runner};
 use mattrs::signer::HotSigner;
@@ -54,11 +53,6 @@ type AppResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 // Demo keys (the pymatt reference fixtures; never use on mainnet).
 const ALICE_XPRIV: &str = "tprv8ZgxMBicQKsPdpwA4vW8DcSdXzPn7GkS2RdziGXUX8k86bgDQLKhyXtB3HMbJhPFd2vKRpChWxgPe787WWVqEtjy8hGbZHqZKeRrEwMm3SN";
 const BOB_XPRIV: &str = "tprv8ZgxMBicQKsPeDvaW4xxmiMXxqakLgvukT8A5GR6mRwBwjsDJV1jcZab8mxSerNcj22YPrusm2Pz5oR8LTw9GqpWT51VexTNBzxxm49jCZZ";
-
-/// RPC client for the local regtest node (see `mattrs::manager::regtest_rpc_client`).
-fn rpc_client(wallet_name: &str) -> Client {
-    mattrs::manager::regtest_rpc_client(wallet_name)
-}
 
 fn xonly(xpriv: &Xpriv) -> XOnlyPublicKey {
     xpriv.to_priv().public_key(&Secp256k1::new()).into()
@@ -211,8 +205,10 @@ fn run_alice(
     };
 
     // Fund the game with both stakes and tell Bob where it lives.
-    let client = rpc_client(wallet);
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    let client = mattrs::manager::regtest_rpc_client(wallet)?;
+    // Each side follows the other's confirmed spends, and nobody mines on
+    // regtest: mine a block after each of our own.
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     maybe_enable_inspector(&mut manager, inspector)?;
     let game = TicTacToe::new(params)?.fund(
         &mut manager,
@@ -277,8 +273,10 @@ fn run_bob(addr: &str, wallet: &str, inspector: Option<u16>) -> AppResult {
         )?,
         vout: u32_field(&msg, "vout")?,
     };
-    let client = rpc_client(wallet);
-    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest);
+    let client = mattrs::manager::regtest_rpc_client(wallet)?;
+    // Each side follows the other's confirmed spends, and nobody mines on
+    // regtest: mine a block after each of our own.
+    let mut manager = ContractManager::new(client, bitcoin::Network::Regtest).with_auto_mining();
     maybe_enable_inspector(&mut manager, inspector)?;
     let entry = TicTacToe::new(params)?.track(&mut manager, outpoint, TttState::initial())?;
     println!("Tracking the game at {outpoint}");

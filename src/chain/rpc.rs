@@ -20,12 +20,13 @@ impl From<bitcoincore_rpc::Error> for ChainError {
     }
 }
 
-/// A [`ChainView`] over a real Bitcoin node's RPC interface (the same watching
-/// strategy as [`ContractManager::wait_for_spend`]: the mempool via
-/// `gettxspendingprevout`, plus a per-outpoint block scan from the funding
-/// transaction's height onward).
+/// A [`ChainView`] over a real Bitcoin node's RPC interface. A spend is found
+/// by a per-outpoint block scan, from the funding transaction's height up to
+/// the last block with the confirmations asked for (and, when unconfirmed
+/// spends are asked for, in the mempool via `gettxspendingprevout`).
 ///
-/// [`ContractManager::wait_for_spend`]: crate::manager::ContractManager::wait_for_spend
+/// The scan never passes a block shallower than the confirmations asked for,
+/// so a reorganization no deeper than that is followed; a deeper one is not.
 pub struct RpcChain {
     client: Client,
     scan: RefCell<ScanState>,
@@ -33,27 +34,33 @@ pub struct RpcChain {
 
 #[derive(Default)]
 struct ScanState {
-    /// Per-outpoint cursor of the next block height to scan for a spend.
-    cursors: HashMap<OutPoint, u64>,
+    /// The next block height to scan for a spend, per outpoint and per
+    /// confirmation depth asked for. Every block below a cursor had that many
+    /// confirmations when it was scanned; a cursor is therefore only good for
+    /// its own depth, and a lookup at another depth keeps its own.
+    cursors: HashMap<(OutPoint, u32), u64>,
     /// Blocks fetched by one outpoint's scan and not yet passed by all the
     /// others, so concurrent tokens download each new block once.
     blocks: BlockCache,
 }
 
 impl ScanState {
-    /// Bookkeeping after one look for a spend of `outpoint`. A scan that is
-    /// `done` (its spend was found, or its caller stopped looking) drops its
-    /// cursor: a cursor left behind would pin the eviction floor at its
-    /// height and retain every block fetched afterwards. Blocks below every
-    /// remaining cursor are evicted.
-    fn settle(&mut self, outpoint: OutPoint, done: bool) {
-        if done {
-            self.cursors.remove(&outpoint);
-        }
+    /// Evict the blocks below every cursor (all of them, with no cursor
+    /// left): no scan will read them again. Run after every look.
+    fn evict(&mut self) {
         match self.cursors.values().copied().min() {
             Some(min) => self.blocks.retain_from(min),
             None => self.blocks.clear(),
         }
+    }
+
+    /// The scan for a spend of `outpoint` at this depth is over (the spend
+    /// was found, or its caller stopped looking): drop its cursor. A cursor
+    /// left behind would pin the eviction floor at its height and retain
+    /// every block fetched afterwards.
+    fn release(&mut self, outpoint: OutPoint, min_confirmations: u32) {
+        self.cursors.remove(&(outpoint, min_confirmations));
+        self.evict();
     }
 }
 
@@ -74,20 +81,53 @@ impl ChainView for RpcChain {
         Ok(())
     }
 
-    fn find_spending_tx(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+    fn find_spending_tx(
+        &self,
+        outpoint: OutPoint,
+        min_confirmations: u32,
+    ) -> Result<Option<Transaction>, ChainError> {
         let mut scan = self.scan.borrow_mut();
         let ScanState { cursors, blocks } = &mut *scan;
-        let cursor = match cursors.entry(outpoint) {
+        let cursor = match cursors.entry((outpoint, min_confirmations)) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(spend_scan_start(&self.client, outpoint)?),
+            Entry::Vacant(e) => {
+                e.insert(spend_scan_start(&self.client, outpoint, min_confirmations)?)
+            }
         };
-        let found = find_spending_tx_once(&self.client, outpoint, cursor, blocks)?;
-        scan.settle(outpoint, found.is_some());
+        let found =
+            find_spending_tx_once(&self.client, outpoint, min_confirmations, cursor, blocks)?;
+        match found {
+            Some(_) => scan.release(outpoint, min_confirmations),
+            None => scan.evict(),
+        }
         Ok(found)
     }
 
-    fn stop_watching(&self, outpoint: OutPoint) {
-        self.scan.borrow_mut().settle(outpoint, true);
+    /// The mempool, then every block the confirmed scans have not passed
+    /// yet, up to the tip. The scans' cursors are read, not moved: blocks
+    /// still too shallow to count stay ahead of them.
+    fn find_unsettled_spend(&self, outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+        let mut scan = self.scan.borrow_mut();
+        let watched = scan
+            .cursors
+            .iter()
+            .filter(|((watched, _), _)| *watched == outpoint)
+            .map(|(_, cursor)| *cursor)
+            .min();
+        let mut cursor = match watched {
+            Some(cursor) => cursor,
+            // A one-off look at the chain as it is now.
+            None => spend_scan_start(&self.client, outpoint, 1)?,
+        };
+        let found = find_spending_tx_once(&self.client, outpoint, 0, &mut cursor, &mut scan.blocks);
+        // This look keeps no cursor, so nothing else would release the
+        // blocks it fetched.
+        scan.evict();
+        found
+    }
+
+    fn stop_watching(&self, outpoint: OutPoint, min_confirmations: u32) {
+        self.scan.borrow_mut().release(outpoint, min_confirmations);
     }
 
     fn transaction(&self, txid: Txid) -> Result<Option<Transaction>, ChainError> {
@@ -156,32 +196,67 @@ fn tx_confirmation_height(rpc: &Client, txid: &Txid) -> Result<Option<u64>, Chai
     })
 }
 
-/// The block height where a scan for spends of `outpoint` should start: where
-/// the funding transaction confirmed (or the next block, if it is still
-/// unconfirmed).
-fn spend_scan_start(rpc: &Client, outpoint: OutPoint) -> Result<u64, ChainError> {
-    Ok(match tx_confirmation_height(rpc, &outpoint.txid)? {
-        Some(height) => height,
-        None => rpc.get_block_count()? + 1,
-    })
+/// The block height where a scan for spends of `outpoint`, with
+/// `min_confirmations`, should start (see [`scan_start`]).
+fn spend_scan_start(
+    rpc: &Client,
+    outpoint: OutPoint,
+    min_confirmations: u32,
+) -> Result<u64, ChainError> {
+    let funded_at = tx_confirmation_height(rpc, &outpoint.txid)?;
+    Ok(scan_start(
+        funded_at,
+        rpc.get_block_count()?,
+        min_confirmations,
+    ))
+}
+
+/// Where a scan for the spend of an output starts, given the height its
+/// funding transaction confirmed at (if it has), the tip, and the depth at
+/// which a block is taken as final.
+///
+/// A spend cannot sit below its funding, but the funding's height is only a
+/// lower bound once that block is final. Until then, a reorganization can
+/// move the funding (and a spend with it) down to any block that is not
+/// final yet, so the scan starts at the first of those.
+fn scan_start(funded_at: Option<u64>, tip: u64, min_confirmations: u32) -> u64 {
+    // Blocks up to `tip - (depth - 1)` are final.
+    let first_unsettled = (tip + 2).saturating_sub(u64::from(min_confirmations.max(1)));
+    match funded_at {
+        Some(height) => height.min(first_unsettled),
+        None => first_unsettled,
+    }
 }
 
 /// A cache of fetched blocks, shared between the spend scans of several
 /// outpoints so each new block is downloaded once even when many cursors walk
 /// the same range. Evict with [`retain_from`](BlockCache::retain_from) once
 /// every cursor has passed a height.
+///
+/// A block is cached under its height together with its hash, and reused only
+/// while the active chain still has that hash there: scans waiting for
+/// different depths share the cache, so a block one of them fetched at the
+/// tip can be reorganized away before a deeper one reads it.
 #[derive(Default)]
-struct BlockCache(HashMap<u64, bitcoin::Block>);
+struct BlockCache(HashMap<u64, (bitcoin::BlockHash, bitcoin::Block)>);
 
 impl BlockCache {
+    /// The block at `height` on the node's active chain. Its hash is asked
+    /// for every time; the block itself is downloaded only when the cached
+    /// one is not that block.
     fn get(&mut self, rpc: &Client, height: u64) -> Result<&bitcoin::Block, ChainError> {
-        match self.0.entry(height) {
-            std::collections::hash_map::Entry::Occupied(e) => Ok(e.into_mut()),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                let hash = rpc.get_block_hash(height)?;
-                Ok(e.insert(rpc.get_block(&hash)?))
-            }
+        let hash = rpc.get_block_hash(height)?;
+        if !self.holds(height, &hash) {
+            self.0.insert(height, (hash, rpc.get_block(&hash)?));
         }
+        Ok(&self.0[&height].1)
+    }
+
+    /// Whether the block cached at `height` is the one with `hash`.
+    fn holds(&self, height: u64, hash: &bitcoin::BlockHash) -> bool {
+        self.0
+            .get(&height)
+            .is_some_and(|(cached, _)| cached == hash)
     }
 
     /// Drop every cached block below `height`.
@@ -196,7 +271,7 @@ impl BlockCache {
 
     #[cfg(test)]
     fn insert(&mut self, height: u64, block: bitcoin::Block) {
-        self.0.insert(height, block);
+        self.0.insert(height, (block.block_hash(), block));
     }
 
     #[cfg(test)]
@@ -205,37 +280,50 @@ impl BlockCache {
     }
 }
 
-/// A single, non-blocking look for a transaction spending `outpoint`: the
-/// mempool first (`gettxspendingprevout`), then the blocks from `*next_height`
-/// to the tip (the cursor advances past the blocks already scanned; seed it
-/// with [`spend_scan_start`], and share one `blocks` cache between the scans
-/// of concurrent outpoints).
+/// The last block height a spend may sit at to have `min_confirmations`
+/// confirmations under a tip at height `tip` (`None` when no block is deep
+/// enough yet). Zero confirmations scan up to the tip, like one.
+fn deepest_scan_height(tip: u64, min_confirmations: u32) -> Option<u64> {
+    tip.checked_sub(u64::from(min_confirmations.saturating_sub(1)))
+}
+
+/// A single, non-blocking look for a transaction spending `outpoint` with at
+/// least `min_confirmations` confirmations: the blocks from `*next_height` to
+/// the last one that deep (the cursor advances past the blocks already
+/// scanned; seed it with [`spend_scan_start`] for the same depth, and share one `blocks` cache
+/// between the scans of concurrent outpoints). With zero confirmations, the
+/// mempool is looked at first (`gettxspendingprevout`).
 fn find_spending_tx_once(
     rpc: &Client,
     outpoint: OutPoint,
+    min_confirmations: u32,
     next_height: &mut u64,
     blocks: &mut BlockCache,
 ) -> Result<Option<Transaction>, ChainError> {
-    // 1. The mempool.
-    let query = serde_json::json!([{
-        "txid": outpoint.txid.to_string(),
-        "vout": outpoint.vout,
-    }]);
-    let res: serde_json::Value = rpc.call("gettxspendingprevout", &[query])?;
-    if let Some(txid_str) = res
-        .get(0)
-        .and_then(|entry| entry.get("spendingtxid"))
-        .and_then(|v| v.as_str())
-    {
-        let txid: Txid = txid_str
-            .parse()
-            .map_err(|e| ChainError::Other(format!("bad spendingtxid: {}", e)))?;
-        return Ok(Some(rpc.get_raw_transaction(&txid, None)?));
+    // 1. The mempool, when unconfirmed spends count.
+    if min_confirmations == 0 {
+        let query = serde_json::json!([{
+            "txid": outpoint.txid.to_string(),
+            "vout": outpoint.vout,
+        }]);
+        let res: serde_json::Value = rpc.call("gettxspendingprevout", &[query])?;
+        if let Some(txid_str) = res
+            .get(0)
+            .and_then(|entry| entry.get("spendingtxid"))
+            .and_then(|v| v.as_str())
+        {
+            let txid: Txid = txid_str
+                .parse()
+                .map_err(|e| ChainError::Other(format!("bad spendingtxid: {}", e)))?;
+            return Ok(Some(rpc.get_raw_transaction(&txid, None)?));
+        }
     }
 
-    // 2. Blocks mined since the last look.
-    let tip = rpc.get_block_count()?;
-    while *next_height <= tip {
+    // 2. Blocks that became deep enough since the last look.
+    let Some(last) = deepest_scan_height(rpc.get_block_count()?, min_confirmations) else {
+        return Ok(None);
+    };
+    while *next_height <= last {
         let block = blocks.get(rpc, *next_height)?;
         if let Some(tx) = block
             .txdata
@@ -261,11 +349,12 @@ fn find_spending_tx_once(
 ///   `~/.bitcoin/regtest/.cookie`) — a stock regtest `bitcoind` works with no
 ///   configuration at all.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the client cannot be created — in practice, when the cookie file
+/// Fails if the client cannot be created — in practice, when the cookie file
 /// is missing because no node is running (or it keeps its data elsewhere).
-pub fn regtest_rpc_client(wallet_name: &str) -> Client {
+/// The error names the URL and the credentials that were tried.
+pub fn regtest_rpc_client(wallet_name: &str) -> Result<Client, ChainError> {
     let rpc_url =
         std::env::var("BITCOIN_RPC_URL").unwrap_or_else(|_| "http://localhost:18443".to_string());
     let rpc_url_full = format!("{}/wallet/{}", rpc_url, wallet_name);
@@ -281,10 +370,17 @@ pub fn regtest_rpc_client(wallet_name: &str) -> Client {
         _ => {
             let cookie = std::env::var("BITCOIN_RPC_COOKIE")
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").expect("HOME not set");
-                    std::path::PathBuf::from(home).join(".bitcoin/regtest/.cookie")
-                });
+                .or_else(|_| {
+                    std::env::var("HOME")
+                        .map(|home| std::path::PathBuf::from(home).join(".bitcoin/regtest/.cookie"))
+                        .map_err(|_| {
+                            ChainError::Other(
+                                "cannot locate the node's cookie file: HOME is not set; set \
+                                 BITCOIN_RPC_COOKIE, or BITCOIN_RPC_USER and BITCOIN_RPC_PASSWORD"
+                                    .into(),
+                            )
+                        })
+                })?;
             let hint = format!(
                 "the cookie file {}; is the regtest node running? Otherwise set \
                  BITCOIN_RPC_COOKIE, or BITCOIN_RPC_USER and BITCOIN_RPC_PASSWORD",
@@ -294,8 +390,10 @@ pub fn regtest_rpc_client(wallet_name: &str) -> Client {
         }
     };
 
-    Client::new(&rpc_url_full, auth).unwrap_or_else(|e| {
-        panic!("cannot create an RPC client for {rpc_url_full} with {auth_hint}: {e}")
+    Client::new(&rpc_url_full, auth).map_err(|e| {
+        ChainError::Other(format!(
+            "cannot create an RPC client for {rpc_url_full} with {auth_hint}: {e}"
+        ))
     })
 }
 
@@ -322,6 +420,47 @@ mod tests {
     }
 
     #[test]
+    fn the_scan_stops_at_the_last_block_with_enough_confirmations() {
+        // The tip block has one confirmation.
+        assert_eq!(deepest_scan_height(100, 0), Some(100));
+        assert_eq!(deepest_scan_height(100, 1), Some(100));
+        assert_eq!(deepest_scan_height(100, 6), Some(95));
+        assert_eq!(deepest_scan_height(5, 6), Some(0));
+        assert_eq!(deepest_scan_height(4, 6), None);
+    }
+
+    #[test]
+    fn a_cached_block_is_not_reused_for_another_block_at_its_height() {
+        let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let replaced = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Testnet);
+        let mut blocks = BlockCache::default();
+        blocks.insert(100, block.clone());
+
+        assert!(blocks.holds(100, &block.block_hash()));
+        // After a reorganization, the active chain has another block there.
+        assert!(!blocks.holds(100, &replaced.block_hash()));
+        assert!(!blocks.holds(101, &block.block_hash()));
+    }
+
+    #[test]
+    fn a_scan_starts_below_a_funding_that_is_not_final_yet() {
+        // Funded in a final block: nothing below it can hold the spend.
+        assert_eq!(scan_start(Some(90), 100, 1), 90);
+        assert_eq!(scan_start(Some(90), 100, 6), 90);
+        // One confirmation: the tip is final, an unconfirmed funding is next.
+        assert_eq!(scan_start(Some(100), 100, 1), 100);
+        assert_eq!(scan_start(None, 100, 1), 101);
+        // Six confirmations: blocks 96..=100 can still be replaced, and the
+        // funding (with its spend) can land in any of them.
+        assert_eq!(scan_start(Some(100), 100, 6), 96);
+        assert_eq!(scan_start(None, 100, 6), 96);
+        assert_eq!(scan_start(Some(95), 100, 6), 95);
+        // Zero confirmations scan like one; a short chain starts at genesis.
+        assert_eq!(scan_start(None, 100, 0), 101);
+        assert_eq!(scan_start(None, 3, 6), 0);
+    }
+
+    #[test]
     fn an_abandoned_wait_releases_its_cursor_and_blocks() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let chain = RpcChain::new(
@@ -329,43 +468,63 @@ mod tests {
         );
         {
             let mut scan = chain.scan.borrow_mut();
-            scan.cursors.insert(outpoint(1), 10);
-            scan.cursors.insert(outpoint(2), 12);
+            // The lagging outpoint is watched at two depths.
+            scan.cursors.insert((outpoint(1), 6), 10);
+            scan.cursors.insert((outpoint(1), 1), 11);
+            scan.cursors.insert((outpoint(2), 1), 12);
             for height in 10..=14 {
                 scan.blocks.insert(height, block.clone());
             }
         }
 
-        // The caller waiting on the lagging outpoint gives up.
-        chain.stop_watching(outpoint(1));
-        let scan = chain.scan.borrow();
-        assert!(!scan.cursors.contains_key(&outpoint(1)));
-        assert_eq!(scan.blocks.len(), 3);
+        // The caller waiting for six confirmations gives up (or now waits
+        // for another depth): only that watch goes.
+        chain.stop_watching(outpoint(1), 6);
+        {
+            let scan = chain.scan.borrow();
+            assert_eq!(scan.cursors.len(), 2);
+            assert!(scan.cursors.contains_key(&(outpoint(1), 1)));
+            assert_eq!(scan.blocks.len(), 4);
+        }
+        chain.stop_watching(outpoint(1), 1);
+        assert_eq!(chain.scan.borrow().blocks.len(), 3);
     }
 
     #[test]
     fn a_found_spend_releases_its_cursor_and_blocks() {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let mut scan = ScanState::default();
-        scan.cursors.insert(outpoint(1), 10);
-        scan.cursors.insert(outpoint(2), 12);
+        scan.cursors.insert((outpoint(1), 1), 10);
+        scan.cursors.insert((outpoint(2), 1), 12);
         for height in 10..=14 {
             scan.blocks.insert(height, block.clone());
         }
 
         // Still waiting on both: everything from the lowest cursor is kept.
-        scan.settle(outpoint(2), false);
+        scan.evict();
         assert_eq!(scan.blocks.len(), 5);
 
         // The lagging outpoint's spend is found: its cursor must not keep
         // pinning the blocks only it still needed.
-        scan.settle(outpoint(1), true);
-        assert!(!scan.cursors.contains_key(&outpoint(1)));
+        scan.release(outpoint(1), 1);
+        assert!(!scan.cursors.contains_key(&(outpoint(1), 1)));
         assert_eq!(scan.blocks.len(), 3);
 
         // Nothing left to watch: nothing left to cache.
-        scan.settle(outpoint(2), true);
+        scan.release(outpoint(2), 1);
         assert!(scan.cursors.is_empty());
         assert_eq!(scan.blocks.len(), 0);
+    }
+
+    #[test]
+    fn a_scan_at_one_depth_does_not_move_the_scan_at_another() {
+        let mut scan = ScanState::default();
+        scan.cursors.insert((outpoint(1), 1), 101);
+        scan.cursors.insert((outpoint(1), 6), 96);
+
+        // The shallow scan finding the spend leaves the deep one in place,
+        // still short of the blocks that are not final for it.
+        scan.release(outpoint(1), 1);
+        assert_eq!(scan.cursors.get(&(outpoint(1), 6)), Some(&96));
     }
 }

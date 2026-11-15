@@ -684,7 +684,11 @@ mod tests {
         fn broadcast(&self, _tx: &Transaction) -> Result<(), ChainError> {
             Err(ChainError::Other("no chain".into()))
         }
-        fn find_spending_tx(&self, _outpoint: OutPoint) -> Result<Option<Transaction>, ChainError> {
+        fn find_spending_tx(
+            &self,
+            _outpoint: OutPoint,
+            _min_confirmations: u32,
+        ) -> Result<Option<Transaction>, ChainError> {
             Ok(None)
         }
         fn transaction(&self, _txid: Txid) -> Result<Option<Transaction>, ChainError> {

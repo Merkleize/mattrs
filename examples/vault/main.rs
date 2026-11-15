@@ -382,7 +382,7 @@ fn main() -> AppResult {
             bitcoin::Network::Regtest,
         )
     } else {
-        ContractManager::new(regtest_rpc_client(&wallet), bitcoin::Network::Regtest)
+        ContractManager::new(regtest_rpc_client(&wallet)?, bitcoin::Network::Regtest)
     };
     // The owner's key signs every trigger: register it once.
     let mut manager = manager.with_signer(HotSigner::new(unvault_xpriv));
