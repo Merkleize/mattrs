@@ -263,7 +263,13 @@ fn prompt_move() -> io::Result<i64> {
         io::stdout().flush()?;
 
         let mut line = String::new();
-        stdin.lock().read_line(&mut line)?;
+        if stdin.lock().read_line(&mut line)? == 0 {
+            // End of input: asking again would never get an answer.
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "no move given (pass --rock, --paper or --scissors)",
+            ));
+        }
         match line.trim().to_lowercase().as_str() {
             "r" | "rock" => return Ok(0),
             "p" | "paper" => return Ok(1),

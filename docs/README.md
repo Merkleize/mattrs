@@ -145,9 +145,9 @@ Vault:
   trigger(ctv_hash, out_i) => [out_i: Unvaulting[ctv_hash]]:
     checksig(unvault_pk)
 
-  trigger_and_revault(ctv_hash, revault_out_i, trigger_out_i) => [
+  trigger_and_revault(ctv_hash, out_i, revault_out_i) => [
     deduct revault_out_i: Vault,
-    trigger_out_i: Unvaulting[ctv_hash]
+    out_i: Unvaulting[ctv_hash]
   ]:
     checksig(unvault_pk)
 

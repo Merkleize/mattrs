@@ -520,6 +520,31 @@ fn join_without_target_errors() {
 }
 
 #[test]
+fn merged_amounts_overflowing_return_an_error() {
+    // Building is given the same guarantee as observing: amounts that do not
+    // add up are an error, not a panic.
+    let dest = test_contract(90, None);
+    let preserving =
+        |seed| contract_yielding(seed, vec![ClauseOutput::at(0).to(dest.clone()).build()]);
+    let joining = test_contract(
+        3,
+        Some(Arc::new(|_: &(), _: &RawArgs, _: &()| {
+            Ok(NextOutputs::join(0))
+        })),
+    );
+    let big = fund_fake(preserving(1), (), sat(u64::MAX), 1);
+    let other = fund_fake(preserving(2), (), sat(1), 2);
+    let joined = fund_fake(joining, (), sat(1), 3);
+
+    for batch in [[spend(&big), spend(&other)], [spend(&big), spend(&joined)]] {
+        assert!(matches!(
+            crate::manager::build_batch_tx(&batch),
+            Err(ManagerError::AmountOverflow)
+        ));
+    }
+}
+
+#[test]
 fn join_into_a_deduct_output_errors() {
     let dest = test_contract(90, None);
     let deducting = contract_yielding(

@@ -1,8 +1,9 @@
 # Manager architecture
 
 `mattrs::manager` is the public entry point; its types are re-exported from
-private modules. `ContractManager` owns the RPC client, instance
-registry, network, and optional inspector projection; its facade composes the
+private modules. `ContractManager` owns the chain backend (a `ChainView`, or
+none for an offline manager), the instance registry, the standing signers, the
+network, and the optional inspector projection; its facade composes the
 following components.
 
 | Component | Responsibility | Side effects |
@@ -12,7 +13,7 @@ following components.
 | `validation.rs` | Witness schemas, CTV, output identities, local and batch amount constraints | None |
 | `observation.rs` | Authenticate witnesses, resolve metadata, validate complete input context | No RPC; delegates recording to lifecycle staging |
 | `lifecycle.rs` | Register funding, stage children/links, commit validated batches | Registry and instance updates |
-| `chain.rs` | Funding, mining, transaction discovery, polling and shared block scans | Node/wallet RPC; delegates observation and registration |
+| `chain.rs` | Funding, mining, spend discovery and polling, through the `ChainView` backend | Chain I/O (node/wallet RPC on `RpcChain`, whose block scans live in `src/chain/rpc.rs`); delegates observation and registration |
 | `wallet.rs` | External-wallet funding authorization and finalization | Explicit signing and observation phases; no wallet RPC |
 | `inspection.rs` | Project and publish manager snapshots | Inspector server and notifications |
 

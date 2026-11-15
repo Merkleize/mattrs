@@ -29,7 +29,7 @@ mod contract;
 ///                 // shorthand for `#[signer(|p| p.unvault_pk)]`
 ///                 #[signer(p.unvault_pk)] sig: Signature,
 ///                 ctv_hash: [u8; 32],
-///                 out_i: i64,
+///                 out_i: CcvIndex,                  // an output index, as CCV reads it
 ///             }
 ///             script Vault::trigger_script;         // fn(&VaultParams) -> ScriptBuf
 ///             // The body yields a Result whose Ok value may be a

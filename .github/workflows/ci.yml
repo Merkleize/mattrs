@@ -25,19 +25,35 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # `--workspace` covers the inspector client, the derive macros and the
+      # vendored `script!` macro, not only the root crate.
       - name: Lint
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Check without default features
+        run: cargo check --no-default-features
 
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --all-features --no-deps
+        run: cargo doc --workspace --all-features --no-deps
 
       - name: Test
-        run: cargo test --all-targets --all-features
+        run: cargo test --workspace --all-targets --all-features
 
-      - name: Run the offline example
-        run: cargo run --all-features --example getting_started
+      # `--all-targets` leaves the documentation examples out, and with them
+      # the `compile_fail` ones that pin what the typed APIs must reject.
+      - name: Test the documentation examples
+        run: cargo test --workspace --doc --all-features
+
+      # The demo binaries are otherwise only compiled; these run without a node.
+      - name: Run the offline examples
+        run: |
+          cargo run --all-features --example getting_started
+          cargo run --all-features --example counter
+          for script in examples/vault/scripts/*.txt; do
+            cargo run --all-features --example vault -- --local --script "$script"
+          done
 
   # The #[ignore]d end-to-end tests, against a MATT-enabled regtest node.
   regtest:
